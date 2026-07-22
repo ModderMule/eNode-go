@@ -43,6 +43,20 @@ type Config struct {
 	Admin AdminConfig `yaml:"admin"`
 
 	Storage StorageConfig `yaml:"storage"`
+	Debug   DebugConfig   `yaml:"debug"`
+}
+
+// DebugConfig gates debug-only development aids. SeedFixtures injects the dummy
+// peers and files described by FixturesFile into the chosen storage engine at
+// startup, so the search / source-list paths can be exercised without live clients.
+//
+// SeedFixtures is a plain bool, not a *bool: its default is OFF, which is exactly
+// what a missing key yields, so the *bool "tell absent from explicit-false" pattern
+// used by the default-on toggles is unnecessary here. Never enable on a public
+// server — it advertises fabricated sources.
+type DebugConfig struct {
+	SeedFixtures bool   `yaml:"seedFixtures"`
+	FixturesFile string `yaml:"fixturesFile"`
 }
 
 // ServerEntry is one advertised peer server in OP_SERVERLIST. IP may be an IPv4
@@ -331,6 +345,12 @@ func setDefaults(cfg *Config) error {
 	}
 	if cfg.Storage.MongoDB.Database == "" {
 		cfg.Storage.MongoDB.Database = "enode"
+	}
+	// Default the fixtures path even when seeding is off, so the shipped config can
+	// document the key without an operator having to invent a path. Working-directory
+	// relative, like storage.mysql.schemaFile above.
+	if cfg.Debug.FixturesFile == "" {
+		cfg.Debug.FixturesFile = "tests/data/debug_fixtures.yaml"
 	}
 	return nil
 }

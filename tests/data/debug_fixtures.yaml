@@ -1,0 +1,82 @@
+# Debug-only storage fixtures.
+#
+# Injected into the chosen storage engine (memory / mysql / mongodb) at startup ONLY
+# when debug.seedFixtures is true (see enode.local.yaml). Each peer is registered as a
+# connected client (storage.Engine.Connect) and every file it lists is offered on its
+# behalf (storage.Engine.AddFile) — exactly the path a real login takes. The files
+# become search results (OP_SEARCHRESULT); the peers become the sources the server
+# returns for a hash (OP_FOUNDSOURCES).
+#
+# This data is entirely fabricated. Never enable seeding on a public server — it
+# advertises peers that do not exist.
+#
+# Peer fields:
+#   ipv4          dotted-quad public address; for a HighID peer the ed2k ID is derived
+#                 from it. Leave "" for a LowID peer and set id/lowID instead.
+#   id            explicit ed2k ID. Required for a LowID peer (1..16777215); for a
+#                 HighID peer it is derived from ipv4 and may be omitted.
+#   lowID         true marks a LowID peer (not directly callable).
+#   port          client TCP port, sent verbatim to requesters.
+#   userHash      32 hex chars (16 bytes). Must be unique per peer — it is the client
+#                 identity key the engines dedupe on.
+#   cryptOptions  eMule OP_FOUNDSOURCES_OBFU byte: 0x01 supports, 0x02 requests,
+#                 0x04 requires crypt. 0 = plaintext.
+#   ipv6          optional public IPv6 literal, or "" for none.
+#   ipv6Reachable true only if the server would have verified the v6 as reachable.
+#
+# File fields (under a peer's `files:`):
+#   hash          32 hex chars (16 bytes) — the ed2k file hash.
+#   name          filename shown in search results.
+#   size          file size in bytes (uint64).
+#   type          optional ENUM (Image/Audio/Video/Pro/Doc); derived from name if "".
+#   completed     true if THIS peer has the complete file.
+
+peers:
+  - ipv4: "203.0.113.7"
+    port: 4662
+    userHash: "0123456789abcdef0123456789abcdef"
+    cryptOptions: 0
+    ipv6: ""
+    ipv6Reachable: false
+    files:
+      - hash: "fedcba9876543210fedcba9876543210"
+        name: "Debian-13-amd64-netinst.iso"
+        size: 4700000000
+        type: "Pro"
+        completed: true
+      - hash: "00112233445566778899aabbccddeeff"
+        name: "big buck bunny 1080p.mkv"
+        size: 355856889
+        completed: true
+
+  - ipv4: "198.51.100.42"
+    port: 4662
+    userHash: "aaaabbbbccccddddeeeeffff00001111"
+    cryptOptions: 1
+    ipv6: "2001:db8::42"
+    ipv6Reachable: true
+    files:
+      # Same hash+size as peer 1 → this file gets two sources.
+      - hash: "fedcba9876543210fedcba9876543210"
+        name: "Debian-13-amd64-netinst.iso"
+        size: 4700000000
+        type: "Pro"
+        completed: true
+      - hash: "22223333444455556666777788889999"
+        name: "Sintel.2010.1080p.mkv"
+        size: 1129240576
+        completed: false
+
+  # LowID peer (no routable IPv4): still a valid source, delivered with its port.
+  - ipv4: ""
+    id: 123456
+    lowID: true
+    port: 4662
+    userHash: "99998888777766665555444433332211"
+    cryptOptions: 0
+    files:
+      - hash: "fedcba9876543210fedcba9876543210"
+        name: "Debian-13-amd64-netinst.iso"
+        size: 4700000000
+        type: "Pro"
+        completed: false

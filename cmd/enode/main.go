@@ -123,6 +123,15 @@ func run(ctx context.Context, configPath string) error {
 
 	seedServers(engine, cfg.Servers)
 
+	// Debug-only: pre-populate the engine with dummy peers and files so the search /
+	// source-list paths can be exercised without live clients. Off by default; a
+	// failure here is never fatal — it is a development aid, not part of serving.
+	if cfg.Debug.SeedFixtures {
+		if err := seedDebugFixtures(engine, cfg.Debug.FixturesFile); err != nil {
+			logging.Warnf("debug fixtures: %v", err)
+		}
+	}
+
 	if cfg.Storage.Cleanup.Enabled {
 		keepZeroSourceFiles := cfg.Storage.Cleanup.KeepZeroSourceFilesOrDefault()
 		stopStorageCleanup := storage.StartCleanup(

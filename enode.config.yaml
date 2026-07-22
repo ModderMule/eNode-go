@@ -122,3 +122,12 @@ storage:
     port: 27017
     database: enode
     uri: ""
+
+# Debug-only development aid. When seedFixtures is true, the dummy peers and files in
+# fixturesFile are injected into the chosen storage engine at startup (via the same
+# Connect/AddFile calls a real login takes), so the search results and source lists
+# the server sends can be exercised without live clients. OFF here; ON in
+# enode.local.yaml. Never enable on a public server — it advertises fake sources.
+debug:
+  seedFixtures: false
+  fixturesFile: tests/data/debug_fixtures.yaml
