@@ -12,8 +12,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -24,8 +22,11 @@ jobs:
 #        run: go test ./...
 
       - name: Get version
-        shell: pwsh
-        run: echo "APP_VERSION=$(git describe --tags --always --dirty)" >> $env:GITHUB_ENV
+        shell: bash
+        run: |
+          APP_VERSION=$(sed -n 's/.*ENodeVersionStr[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' ed2k/constants.go)
+          test -n "$APP_VERSION" || { echo "could not extract ENodeVersionStr from ed2k/constants.go" >&2; exit 1; }
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
 
       - name: Build
         shell: pwsh
@@ -34,7 +35,7 @@ jobs:
           GOOS: windows
           GOARCH: amd64
         run: |
-          $out = "dist/enode-v$env:APP_VERSION-win64"
+          $out = "dist/enode-$env:APP_VERSION-win64"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
           foreach ($c in "enode","natsim1","natsim2") {
             go build -trimpath -ldflags="-s -w" -o "$out/$c.exe" "./cmd/$c"
@@ -43,12 +44,12 @@ jobs:
       - name: Bundle
         shell: pwsh
         run: |
-          $out = "dist/enode-v$env:APP_VERSION-win64"
+          $out = "dist/enode-$env:APP_VERSION-win64"
           Copy-Item enode.config.yaml,README.md,MIT-LICENSE.txt $out
           Compress-Archive -Path "$out/*" -DestinationPath "$out.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
-          name: enode-v${{ env.APP_VERSION }}-win64
+          name: enode-${{ env.APP_VERSION }}-win64
           path: dist/enode-v*-win64.zip

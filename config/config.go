@@ -36,10 +36,11 @@ type Config struct {
 	AuxiliarPort bool `yaml:"auxiliarPort"`
 	IPInLogin    bool `yaml:"IPinLogin"`
 
-	TCP  TCPConfig  `yaml:"tcp"`
-	UDP  UDPConfig  `yaml:"udp"`
-	NAT  NATConfig  `yaml:"natTraversal"`
-	IPv6 IPv6Config `yaml:"ipv6"`
+	TCP   TCPConfig   `yaml:"tcp"`
+	UDP   UDPConfig   `yaml:"udp"`
+	NAT   NATConfig   `yaml:"natTraversal"`
+	IPv6  IPv6Config  `yaml:"ipv6"`
+	Admin AdminConfig `yaml:"admin"`
 
 	Storage StorageConfig `yaml:"storage"`
 }
@@ -130,6 +131,19 @@ func (c IPv6Config) PublishSourcesOrDefault() bool { return boolOrDefault(c.Publ
 func (c IPv6Config) ProbeReachabilityOrDefault() bool {
 	return boolOrDefault(c.ProbeReachability, true)
 }
+
+// AdminConfig controls the local HTTP status dashboard (see admin.Server). Enabled
+// is *bool so an absent key defaults on rather than off; BindIP defaults to
+// 127.0.0.1 so the dashboard is reachable out of the box but never off-box unless
+// the operator widens it deliberately.
+type AdminConfig struct {
+	Enabled *bool  `yaml:"enabled"`
+	BindIP  string `yaml:"bindIP"`
+	Port    uint16 `yaml:"port"`
+}
+
+// EnabledOrDefault reports whether the admin dashboard is served, defaulting to true.
+func (c AdminConfig) EnabledOrDefault() bool { return boolOrDefault(c.Enabled, true) }
 
 // boolOrDefault returns *p, or def when p is nil. The *bool pattern lets an absent
 // YAML key be told from an explicit false (see the IPv6 and cleanup toggles).
@@ -278,6 +292,14 @@ func setDefaults(cfg *Config) error {
 	}
 	if cfg.NAT.RegistrationTTLSeconds <= 0 {
 		cfg.NAT.RegistrationTTLSeconds = 30
+	}
+	// Localhost-only by default: the dashboard is on out of the box but reachable
+	// only from the same machine until an operator sets a wider bindIP.
+	if cfg.Admin.BindIP == "" {
+		cfg.Admin.BindIP = "127.0.0.1"
+	}
+	if cfg.Admin.Port == 0 {
+		cfg.Admin.Port = 4560
 	}
 	if cfg.Storage.Engine == "" {
 		cfg.Storage.Engine = "memory"

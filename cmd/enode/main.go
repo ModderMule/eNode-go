@@ -5,12 +5,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"enode/admin"
 	"enode/config"
 	"enode/ed2k"
 	"enode/logging"
@@ -226,6 +228,60 @@ func run(ctx context.Context, configPath string) error {
 		engine,
 	)
 
+	// Local admin status dashboard. Default on and bound to loopback; a bind
+	// failure is fatal because the operator asked for it. Static server facts are
+	// captured once; the live counters come from a snapshot read per request.
+	if cfg.Admin.EnabledOrDefault() {
+		startTime := time.Now()
+		tcpObf, udpObf := uint16(0), uint16(0)
+		if cfg.SupportCrypt {
+			tcpObf, udpObf = cfg.TCP.PortObfuscated, cfg.UDP.PortObfuscated
+		}
+		natPort := uint16(0)
+		if cfg.NAT.Enabled {
+			natPort = cfg.NAT.Port
+		}
+		adminSrv := admin.New(
+			admin.Config{BindIP: cfg.Admin.BindIP, Port: cfg.Admin.Port},
+			admin.StaticInfo{
+				Name:              cfg.Name,
+				Description:       cfg.Description,
+				Version:           ed2k.ENodeVersionStr,
+				Engine:            cfg.Storage.Engine,
+				TCPPort:           cfg.TCP.Port,
+				TCPPortObf:        tcpObf,
+				UDPPort:           cfg.UDP.Port,
+				UDPPortObf:        udpObf,
+				NATPort:           natPort,
+				Crypt:             cfg.SupportCrypt,
+				IPv6:              dualStack,
+				NAT:               cfg.NAT.Enabled,
+				ServerIndependent: natServerIndependent,
+			},
+			func() admin.LiveStats {
+				clients, files := runtime.Counts()
+				return admin.LiveStats{
+					Clients:       clients,
+					Files:         files,
+					LowIDs:        int(runtime.LowIDs.Count()),
+					Servers:       runtime.Storage.ServersCount(),
+					UptimeSeconds: int64(time.Since(startTime).Seconds()),
+					Time:          time.Now().Format(time.RFC3339),
+				}
+			},
+		)
+		if err := adminSrv.Start(); err != nil {
+			return fmt.Errorf("admin dashboard failed to bind %s:%d: %w", cfg.Admin.BindIP, cfg.Admin.Port, err)
+		}
+		defer adminSrv.Close()
+		logging.Infof("admin dashboard: http://%s:%d/", adminDisplayHost(cfg.Admin.BindIP), cfg.Admin.Port)
+		if !adminBindIsLoopback(cfg.Admin.BindIP) {
+			logging.Warnf("admin dashboard bound to %s: it has no authentication and is reachable off-box", cfg.Admin.BindIP)
+		}
+	} else {
+		logging.Infof("admin dashboard: disabled")
+	}
+
 	ln, err := ed2k.RunTCPServer(tcpCfg, runtime.TCPHandler(false))
 	if err != nil {
 		return fmt.Errorf("tcp server failed: %w", err)
@@ -417,4 +473,30 @@ func seedServers(store storage.Engine, entries []config.ServerEntry) {
 	if n := store.ServersCount(); n > 0 {
 		logging.Infof("advertising %d server(s) in OP_SERVERLIST", n)
 	}
+}
+
+// adminDisplayHost turns a bind address into a host usable in a browseable URL.
+// The wildcards (empty, 0.0.0.0, ::) are not browseable, so they map to localhost;
+// an IPv6 literal is bracketed so the resulting URL is valid.
+func adminDisplayHost(bindIP string) string {
+	switch bindIP {
+	case "", "0.0.0.0", "::", "[::]":
+		return "localhost"
+	}
+	if ip := net.ParseIP(bindIP); ip != nil && ip.To4() == nil {
+		return "[" + bindIP + "]"
+	}
+	return bindIP
+}
+
+// adminBindIsLoopback reports whether the dashboard bind stays on this machine.
+// A non-loopback bind (a wildcard or a routable address) exposes an unauthenticated
+// page off-box, which warrants a warning.
+func adminBindIsLoopback(bindIP string) bool {
+	if ip := net.ParseIP(bindIP); ip != nil {
+		return ip.IsLoopback()
+	}
+	// Not an IP literal: only the empty default (resolved to 127.0.0.1 elsewhere)
+	// and "localhost" are loopback; any other hostname is treated as exposed.
+	return bindIP == "" || bindIP == "localhost"
 }

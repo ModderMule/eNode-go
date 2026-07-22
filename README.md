@@ -36,6 +36,11 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   `OP_SERVERIDENT` NAT-port tag. See
   [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md) §9.
 - Files larger than 4 GiB
+- Admin status dashboard: a single self-contained HTML page served over HTTP with
+  only the Go standard library (zero third-party deps), showing live client / file /
+  LowID / peer-server counts, listening ports, enabled features, version and uptime.
+  Default on and bound to `127.0.0.1` only; live figures poll a `/stats.json`
+  endpoint. See [`docs/admin-status-dashboard.md`](docs/admin-status-dashboard.md).
 - IPv6 dual-stack: accepts IPv6 client logins, records and verifies each client's
   IPv6, publishes IPv6 sources, and advertises IPv6 peer servers in `OP_SERVERLIST`
   (eMuleAI/eMuleQt `CT_MOD_*` compatible). See
@@ -124,6 +129,11 @@ ipv6:                        # IPv6 dual-stack; omit the whole block for IPv4-on
   testUrls6:                 # Used only when dynIp6=auto, first valid IPv6 wins
     - "https://v6.ident.me"
     - "https://api64.ipify.org"
+
+admin:                       # Local admin status dashboard (stdlib-only HTTP page)
+  enabled: true              # Default on; an absent block still enables it
+  bindIP: "127.0.0.1"        # Loopback only; "0.0.0.0" / "::" exposes it on all interfaces
+  port: 4560                 # HTTP port (no authentication — keep it loopback-only)
 
 storage:
   engine: memory             # Storage engine: memory | mysql | mongodb

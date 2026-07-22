@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Name}} — admin</title>
+<style>
+:root{color-scheme:light dark;--bg:#0f1216;--card:#1a1f27;--fg:#e6e9ef;--muted:#8b94a3;--accent:#4ea1ff;--ok:#3ecf8e;--err:#ff6b6b;--line:#2a313c}
+@media (prefers-color-scheme:light){:root{--bg:#f4f6fa;--card:#ffffff;--fg:#1a1f27;--muted:#5c6675;--accent:#1769d1;--ok:#149a63;--err:#c53030;--line:#e2e6ee}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:920px;margin:0 auto;padding:28px 20px 48px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 14px;margin-bottom:4px}
+h1{font-size:22px;margin:0}
+.desc{color:var(--muted);margin:2px 0 20px}
+.badge{font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;border:1px solid var(--line)}
+.badge.ok{color:var(--ok);border-color:var(--ok)}
+.badge.err{color:var(--err);border-color:var(--err)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.card .label{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.card .value{font-size:28px;font-weight:700;margin-top:6px;font-variant-numeric:tabular-nums}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:28px 0 10px}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+td{padding:9px 14px;border-top:1px solid var(--line)}
+tr:first-child td{border-top:none}
+td.k{color:var(--muted);width:45%}
+td.v{font-variant-numeric:tabular-nums}
+.on{color:var(--ok);font-weight:600}
+.off{color:var(--muted)}
+footer{margin-top:24px;color:var(--muted);font-size:12px}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<h1>{{.Name}}</h1>
+<span id="status" class="badge">connecting…</span>
+<span id="updated" class="desc" style="margin:0"></span>
+</header>
+<p class="desc">{{.Description}} · {{.Version}} · storage: {{.Engine}}</p>
+
+<div class="grid">
+<div class="card"><div class="label">Clients online</div><div class="value" id="clients">…</div></div>
+<div class="card"><div class="label">Files</div><div class="value" id="files">…</div></div>
+<div class="card"><div class="label">LowID registrations</div><div class="value" id="lowIDs">…</div></div>
+<div class="card"><div class="label">Peer servers</div><div class="value" id="servers">…</div></div>
+<div class="card"><div class="label">Uptime</div><div class="value" id="uptime">…</div></div>
+</div>
+
+<h2>Listeners</h2>
+<table>
+<tr><td class="k">TCP</td><td class="v">{{.TCPPort}}</td></tr>
+<tr><td class="k">TCP obfuscated</td><td class="v">{{if .TCPPortObf}}{{.TCPPortObf}}{{else}}—{{end}}</td></tr>
+<tr><td class="k">UDP</td><td class="v">{{.UDPPort}}</td></tr>
+<tr><td class="k">UDP obfuscated</td><td class="v">{{if .UDPPortObf}}{{.UDPPortObf}}{{else}}—{{end}}</td></tr>
+<tr><td class="k">NAT rendezvous</td><td class="v">{{if .NATPort}}{{.NATPort}}{{else}}—{{end}}</td></tr>
+</table>
+
+<h2>Features</h2>
+<table>
+<tr><td class="k">Obfuscation</td><td class="v">{{if .Crypt}}<span class="on">on</span>{{else}}<span class="off">off</span>{{end}}</td></tr>
+<tr><td class="k">IPv6 dual-stack</td><td class="v">{{if .IPv6}}<span class="on">on</span>{{else}}<span class="off">off</span>{{end}}</td></tr>
+<tr><td class="k">NAT traversal</td><td class="v">{{if .NAT}}<span class="on">on</span>{{else}}<span class="off">off</span>{{end}}</td></tr>
+<tr><td class="k">Server-independent rendezvous</td><td class="v">{{if .ServerIndependent}}<span class="on">on</span>{{else}}<span class="off">off</span>{{end}}</td></tr>
+</table>
+
+<footer>Live figures poll <a href="/stats.json">/stats.json</a> every 5s.</footer>
+</div>
+
+<script>
+function fmtUptime(total){
+  total = Math.max(0, Math.floor(total));
+  var d = Math.floor(total/86400); total -= d*86400;
+  var h = Math.floor(total/3600); total -= h*3600;
+  var m = Math.floor(total/60); var s = total - m*60;
+  var parts = [];
+  if(d) parts.push(d + 'd');
+  if(d || h) parts.push(h + 'h');
+  if(d || h || m) parts.push(m + 'm');
+  parts.push(s + 's');
+  return parts.join(' ');
+}
+function setText(id, val){ var el = document.getElementById(id); if(el){ el.textContent = val; } }
+function setStatus(text, cls){
+  var el = document.getElementById('status');
+  if(el){ el.textContent = text; el.className = 'badge ' + cls; }
+}
+async function refresh(){
+  try{
+    var r = await fetch('/stats.json', {cache:'no-store'});
+    if(!r.ok){ throw new Error('HTTP ' + r.status); }
+    var d = await r.json();
+    setText('clients', d.clients.toLocaleString());
+    setText('files', d.files.toLocaleString());
+    setText('lowIDs', d.lowIDs.toLocaleString());
+    setText('servers', d.servers.toLocaleString());
+    setText('uptime', fmtUptime(d.uptimeSeconds));
+    setText('updated', 'updated ' + new Date(d.time).toLocaleTimeString());
+    setStatus('live', 'ok');
+  }catch(e){
+    setStatus('offline', 'err');
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

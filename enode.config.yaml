@@ -81,6 +81,16 @@ ipv6:
     - "https://www.cloudflare.com/cdn-cgi/trace"
     - "https://6.ipw.cn"
 
+# Local admin status dashboard: a single self-contained HTML page (served with only
+# the Go standard library) showing live client/file/LowID/server counts, listening
+# ports, enabled features, version and uptime. Default on and bound to loopback, so
+# it is reachable only from this machine. It has no authentication — widen bindIP to
+# expose it only if you add your own access control. See docs/admin-status-dashboard.md.
+admin:
+  enabled: true
+  bindIP: "127.0.0.1"   # loopback only; "0.0.0.0" / "::" exposes it on all interfaces
+  port: 4560
+
 storage:
   engine: memory
   cleanup:

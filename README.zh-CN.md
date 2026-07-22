@@ -27,6 +27,7 @@
 - NAT 穿透服务端（`OP_VC_NAT_HEADER`、`OP_NAT_REGISTER`、`OP_NAT_SYNC2`）：双栈 UDP 打洞，支持 LowID↔LowID 与被防火墙隔离的 IPv6↔IPv6 对端（每个客户端保存一个 v4 和一个 v6 候选端点，优先 v6）；由 `natTraversal.ipv6` 控制（默认开启，需 `ipv6.enabled`）。注册表以用户 hash 为键、与登录无关，因此 `natTraversal.serverIndependent`（默认开启）可为**位于不同服务器或未连接任何服务器**的客户端配对——跨服务器 / 无服务器 LowID↔LowID——并通过 `SRV_TCPFLG_NAT_RENDEZVOUS (0x8000)` 及 `OP_SERVERIDENT` 中的 NAT 端口标签对外通告。详见 [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md) §9。
 - IPv6 双栈：接受 IPv6 登录、记录并校验各客户端的 IPv6、发布 IPv6 源，并在 `OP_SERVERLIST` 中通告 IPv6 对端服务器（兼容 eMuleAI/eMuleQt 的 `CT_MOD_*`）。详见 [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md)。设置 `ipv6.enabled: false` 可恢复纯 IPv4 行为。
 - 支持大于 4 GiB 的文件
+- 管理状态面板：仅用 Go 标准库（零第三方依赖）通过 HTTP 提供的单页自包含 HTML，展示实时的客户端 / 文件 / LowID / 对等服务器数量、监听端口、已启用特性、版本与运行时长。默认开启且仅绑定 `127.0.0.1`；实时数据轮询 `/stats.json` 接口。详见 [`docs/admin-status-dashboard.md`](docs/admin-status-dashboard.md)。
 - 易于扩展多种存储引擎
 
 ## NAT Traversal 传输截图
@@ -110,6 +111,11 @@ ipv6:                        # IPv6 双栈；整段省略即为仅 IPv4 行为
   testUrls6:                 # 仅 dynIp6=auto 时使用，取第一个可用 IPv6
     - "https://v6.ident.me"
     - "https://api64.ipify.org"
+
+admin:                       # 本机管理状态面板（仅标准库实现的 HTTP 页面）
+  enabled: true              # 默认开启；整段省略也视为开启
+  bindIP: "127.0.0.1"        # 仅回环地址；"0.0.0.0" / "::" 会在所有网卡上暴露
+  port: 4560                 # HTTP 端口（无鉴权——请保持仅回环访问）
 
 storage:
   engine: memory             # 存储引擎：memory | mysql | mongodb

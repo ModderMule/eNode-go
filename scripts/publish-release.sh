@@ -3,10 +3,14 @@ set -euo pipefail
 
 # Interactive release helper for eNode-go.
 #
-# Bumps the version, records it in a VERSION file, then creates a release
-# commit + annotated git tag and pushes both. The tag is what the GitHub build
-# workflows (.github/workflows/{linux,windows,macos}.yml) turn into versioned
-# artifacts, since CI derives its version from `git describe`.
+# Bumps ENodeVersionStr in ed2k/constants.go -- the single source of truth for
+# the version -- then creates a release commit + annotated git tag and pushes
+# both. The GitHub build workflows (.github/workflows/{linux,windows,macos}.yml)
+# read that same constant to name their artifacts, so tag, artifact and the
+# version the binary reports all stay in lockstep.
+#
+# ENodeVersionInt (the ed2k wire-protocol version) is deliberately NOT bumped
+# here; it changes only when the protocol changes.
 #
 # Usage: scripts/publish-release.sh
 
@@ -28,7 +32,9 @@ BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 REMOTE="origin"
 
 # --- current version + suggested next patch bump ---------------------------
-CURRENT="$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)"
+CONST_FILE="ed2k/constants.go"
+CURRENT="$(sed -n 's/.*ENodeVersionStr[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CONST_FILE")"
+CURRENT="${CURRENT:-v0.0.0}"
 
 # strip leading 'v', split into major.minor.patch, suggest patch+1
 suggest="v0.0.1"
@@ -56,22 +62,29 @@ if git rev-parse -q --verify "refs/tags/${NEW}" >/dev/null; then
   exit 1
 fi
 
-# --- record the version -----------------------------------------------------
-echo "${NEW#v}" > VERSION
-git add VERSION
+# --- record the version in the source of truth ------------------------------
+sed -i.bak "s#\(ENodeVersionStr[[:space:]]*=[[:space:]]*\)\"[^\"]*\"#\1\"${NEW}\"#" "$CONST_FILE"
+rm -f "${CONST_FILE}.bak"
+GOT="$(sed -n 's/.*ENodeVersionStr[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CONST_FILE")"
+if [[ "$GOT" != "$NEW" ]]; then
+  echo "error: failed to bump ENodeVersionStr in ${CONST_FILE} (got '${GOT}')" >&2
+  git checkout -- "$CONST_FILE"
+  exit 1
+fi
+git add "$CONST_FILE"
 
 # --- confirm ----------------------------------------------------------------
 echo
 echo "About to:"
-echo "  commit : release: ${NEW}   (VERSION -> ${NEW#v})"
+echo "  commit : release: ${NEW}   (ENodeVersionStr -> ${NEW})"
 echo "  tag    : ${NEW}  (annotated)"
 echo "  push   : ${REMOTE} ${BRANCH}  and  ${REMOTE} ${NEW}"
 echo
 read -r -p "Proceed? [y/N]: " CONFIRM
 if [[ "${CONFIRM,,}" != "y" ]]; then
-  echo "aborted; unstaging VERSION"
-  git restore --staged VERSION
-  git checkout -- VERSION 2>/dev/null || rm -f VERSION
+  echo "aborted; reverting ${CONST_FILE}"
+  git restore --staged "$CONST_FILE"
+  git checkout -- "$CONST_FILE"
   exit 1
 fi
 

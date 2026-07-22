@@ -12,8 +12,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -24,7 +22,11 @@ jobs:
 #        run: go test ./...
 
       - name: Get version
-        run: echo "APP_VERSION=$(git describe --tags --always --dirty)" >> "$GITHUB_ENV"
+        shell: bash
+        run: |
+          APP_VERSION=$(sed -n 's/.*ENodeVersionStr[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' ed2k/constants.go)
+          test -n "$APP_VERSION" || { echo "could not extract ENodeVersionStr from ed2k/constants.go" >&2; exit 1; }
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
 
       - name: Build
         env:
@@ -32,7 +34,7 @@ jobs:
           GOOS: darwin
           GOARCH: arm64
         run: |
-          OUT="dist/enode-v${APP_VERSION}-macos-arm64"
+          OUT="dist/enode-${APP_VERSION}-macos-arm64"
           mkdir -p "$OUT"
           for c in enode natsim1 natsim2; do
             go build -trimpath -ldflags="-s -w" -o "$OUT/$c" "./cmd/$c"
@@ -40,12 +42,12 @@ jobs:
 
       - name: Bundle
         run: |
-          OUT="dist/enode-v${APP_VERSION}-macos-arm64"
+          OUT="dist/enode-${APP_VERSION}-macos-arm64"
           cp enode.config.yaml README.md MIT-LICENSE.txt "$OUT/"
-          tar -C dist -czf "$OUT.tar.gz" "enode-v${APP_VERSION}-macos-arm64"
+          tar -C dist -czf "$OUT.tar.gz" "enode-${APP_VERSION}-macos-arm64"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
-          name: enode-v${{ env.APP_VERSION }}-macos-arm64
+          name: enode-${{ env.APP_VERSION }}-macos-arm64
           path: dist/enode-v*-macos-arm64.tar.gz

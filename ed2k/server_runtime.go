@@ -125,6 +125,14 @@ func (s *ServerRuntime) SetNATHandler(handler *NATTraversalHandler) {
 	s.NAT = handler
 }
 
+// Counts returns the cached online-client and file totals — the same briefly
+// cached reading that backs OP_SERVERSTATUS and OP_GLOBSERVSTATRES. Callers such
+// as the admin dashboard read this rather than Storage.ClientsCount/FilesCount so
+// that frequent polling cannot turn into a flood of COUNT(*) queries.
+func (s *ServerRuntime) Counts() (clients, files int) {
+	return s.counters.Counts()
+}
+
 func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, *net.UDPConn) {
 	module := "udp"
 	if enableCrypt {
