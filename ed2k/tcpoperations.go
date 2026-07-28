@@ -20,6 +20,14 @@ type ServerConfig struct {
 	// (0x9d) uint16 tag in OP_SERVERIDENT so a client learns where to REGISTER/SYNC2.
 	// Zero omits the tag (feature off or NAT disabled).
 	NatPort uint16
+	// ClientIPv6 is the IPv6 the server observed *this* session arriving on (16
+	// network-order bytes), reflected back as a CT_MOD_YOUR_IP (0xad) hash tag.
+	// Unlike the fields above it is per-session, not per-server. Empty omits the tag.
+	ClientIPv6 []byte
+	// ClientIPv6Status is the IPv6Status* bitfield describing what the server knows
+	// about this session's IPv6, sent as a TagIPv6Status (0xab) uint8 tag. Zero omits
+	// the tag, which is also how "the server has no verdict" is expressed.
+	ClientIPv6Status uint8
 }
 
 type LoginRequest struct {
@@ -87,10 +95,17 @@ func BuildFoundSourcesSentinelPacket(fileHash []byte, sources []storage.Source, 
 	return buildFoundSourcesPacketWithOpcode(opcode, fileHash, sources, obfu, FormatSentinel)
 }
 
-// hasHighID reports whether an ed2k ClientID is a routable HighID (a packed
+// HasHighID reports whether an ed2k ClientID is a routable HighID (a packed
 // public IPv4) rather than a LowID handle or the unset 0. A source with a HighID
 // is directly reachable over IPv4, so it is never replaced by the IPv6 sentinel.
-func hasHighID(id uint32) bool {
+//
+// Read the other way round, it is also the test for whether an observed IPv4 can
+// be handed to a client *as* its ID: a HighID is the packed address with the first
+// octet in the low byte, so any address ending in .0 packs to a value at or below
+// 0x00ffffff and comes back out of a client as a LowID. eMule states the rule from
+// the client side — "we now know the servers just give *.*.*.0 users a lowID"
+// (srchybrid/otherfunctions.h:448) — and drops its own .0 handling because of it.
+func HasHighID(id uint32) bool {
 	return id != 0 && !isLowID(id)
 }
 
@@ -101,7 +116,7 @@ func hasHighID(id uint32) bool {
 // with a reachable v6 is better delivered as a direct v6 than as an uncallable
 // LowID, and a v6-only source has no other reachable form at all.
 func sentinelForSource(src storage.Source) bool {
-	return sourceHasReachableIPv6(src) && !hasHighID(src.ID)
+	return sourceHasReachableIPv6(src) && !HasHighID(src.ID)
 }
 
 func buildFoundSourcesPacketWithOpcode(opcode uint8, fileHash []byte, sources []storage.Source, withObfuSettings bool, format SourceFormat) (*Buffer, error) {
@@ -289,11 +304,34 @@ func BuildServerStatusPacket(clients, files int) (*Buffer, error) {
 	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
-func BuildIDChangePacket(id uint32, tcpFlags uint32) (*Buffer, error) {
+// BuildIDChangePacket builds OP_IDCHANGE in eMule's full documented layout,
+// <newID 4><serverFlags 4><primaryTCPPort 4><observedClientIPv4 4>
+// (srchybrid/Opcodes.h:182). The last two words are what make the packet 16 bytes
+// instead of 8; both are additive, since eMule only ever lower-bounds the size —
+// flags at offset 4 need size >= 8, the observed IP at offset 12 needs size >= 16
+// (ServerSocket.cpp:264,307), and nothing rejects a longer packet.
+//
+// observedClientIPv4 is the address the server saw the session arrive from, and it
+// is the only public-IPv4 source a LowID client has: eMule feeds it straight to
+// SetPublicIP() (ServerSocket.cpp:349-350). A HighID client gets the same value it
+// already reads out of its ID, which is exactly what eMule asserts.
+//
+// primaryTCPPort is annotated "(unused)" in the reference and is ignored by both
+// surveyed clients; it carries the server's own listening port to match the name.
+func BuildIDChangePacket(id, tcpFlags uint32, primaryPort uint16, observedClientIPv4 uint32) (*Buffer, error) {
+	// eMule zeroes a reported IP that looks like a LowID and ASSERTs on it
+	// (ServerSocket.cpp:309-312), so send 0 rather than a value the client will
+	// reject anyway. HasHighID also covers the v6-only session, whose IPv4 is 0
+	// because it has no IPv4 to report.
+	if !HasHighID(observedClientIPv4) {
+		observedClientIPv4 = 0
+	}
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpIDChange},
 		{Type: TypeUint32, Value: id},
 		{Type: TypeUint32, Value: tcpFlags},
+		{Type: TypeUint32, Value: uint32(primaryPort)},
+		{Type: TypeUint32, Value: observedClientIPv4},
 	}
 	packet, err := MakePacket(PrED2K, pack)
 	if err != nil {
@@ -331,6 +369,18 @@ func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
 	// backward-compatible tag loop as the IPv6 tag above — a legacy client ignores it.
 	if conf.NatPort != 0 {
 		tags = append(tags, Tag{Type: TypeUint16, Code: TagNatPort, Data: conf.NatPort})
+	}
+	// Per-session reflection tags, appended last so the packet a legacy session
+	// receives stays byte-identical to the pre-reflection server. Both ride the same
+	// backward-compatible tag loop: eMule dispatches on the tag *name* and skips the
+	// ones it does not know, but it consumes the value by *type*, so these use
+	// TAGTYPE_HASH and TAGTYPE_UINT8 — types the reference reads by fixed length
+	// (packets.cpp:470-472,479-483) rather than a type it would fail to skip.
+	if len(conf.ClientIPv6) == 16 {
+		tags = append(tags, Tag{Type: TypeHash, Code: TagModYourIP, Data: conf.ClientIPv6})
+	}
+	if conf.ClientIPv6Status != 0 {
+		tags = append(tags, Tag{Type: TypeUint8, Code: TagIPv6Status, Data: conf.ClientIPv6Status})
 	}
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpServerIdent},

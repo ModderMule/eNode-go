@@ -82,6 +82,11 @@ type ServerRuntime struct {
 	LowIDs   *LowIDClients
 	NAT      *NATTraversalHandler
 	counters *counterCache
+	// firewallProbe indirects the IPv4 dial-back so a test can drive both branches
+	// of the login ID decision without a reachable listener, and can assert that
+	// the decision short-circuits before dialling at all. nil selects the real
+	// probe; nothing outside tests sets it.
+	firewallProbe func(*tcpClient) bool
 }
 
 // ipv6Enabled reports whether IPv6 is on at all (dual-stack accept, CT_MOD_IP_V6
@@ -602,19 +607,31 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// CT_MOD_IP_V6. The probe reads only already-settled info (IPv6, Port), so it
 	// races nothing. Only started when an actual dial is needed; a v6-connected or
 	// probe-disabled client trusts the address as reachable.
-	needV6Probe := c.server.publishV6Sources() && len(v6Bytes) == 16 && !c.connectedV6 && c.server.TCP.ProbeIPv6
+	needV6Probe := c.v6ProbeRequired(len(v6Bytes))
 	var v6ProbeResult chan bool
 	if needV6Probe {
 		v6ProbeResult = make(chan bool, 1)
 		go func() { v6ProbeResult <- c.server.probeIPv6Reachable(c) }()
 	}
 
-	// A client with no usable IPv4 cannot receive a HighID — the ClientID field is
-	// 32 bits and a HighID is the packed IPv4, so ID would be 0. Force LowID and
-	// skip the pointless IPv4 dial-back (isFirewalled would dial 0.0.0.0:port).
-	firewalled := ipv4 == 0 || c.server.isFirewalled(c)
-	logging.Debugf("login decision remote=%s requestedID=%d firewalled=%t hasIPv6=%t ipv6Capable=%t",
-		c.remoteHost, req.ID, firewalled, len(v6Bytes) == 16, c.ipv6Capable)
+	// A client whose observed IPv4 cannot be expressed as an ed2k HighID is forced
+	// to LowID, and the pointless dial-back is skipped with it (|| short-circuits).
+	// The ClientID field *is* the packed IPv4 with the first octet in the low byte,
+	// so both 0.0.0.0 — a v6-only session, where isFirewalled would dial
+	// 0.0.0.0:port — and any address ending in .0 land at or below 0x00ffffff,
+	// which every client reads as a LowID. eMule states the rule from the client
+	// side: "we now know the servers just give *.*.*.0 users a lowID"
+	// (srchybrid/otherfunctions.h:448).
+	//
+	// Calling such a client a HighID would leave the server publishing it as
+	// directly reachable while the client and every peer handed it as a source
+	// treat it as a LowID — and since it was never registered in the LowID pool,
+	// the callback they then send cannot be routed, so the source is reachable by
+	// nobody.
+	usableIPv4 := HasHighID(ipv4)
+	firewalled := !usableIPv4 || c.server.isFirewalled(c)
+	logging.Debugf("login decision remote=%s requestedID=%d usableIPv4=%t firewalled=%t hasIPv6=%t ipv6Capable=%t",
+		c.remoteHost, req.ID, usableIPv4, firewalled, len(v6Bytes) == 16, c.ipv6Capable)
 	if firewalled {
 		c.infoMu.Lock()
 		c.hasLowID = true
@@ -958,7 +975,10 @@ func (c *tcpClient) sendServerStatus() {
 }
 
 func (c *tcpClient) sendIDChange(id uint32) {
-	packet, err := BuildIDChangePacket(id, c.server.TCP.Flags)
+	// The observed IPv4 is taken from the accepted socket, never from anything the
+	// client claimed in OP_LOGINREQUEST. It is what lets a LowID client learn its
+	// own public IPv4 — see BuildIDChangePacket.
+	packet, err := BuildIDChangePacket(id, c.server.TCP.Flags, c.server.TCP.Port, c.snapshotInfo().IPv4)
 	if err != nil {
 		return
 	}
@@ -974,15 +994,18 @@ func (c *tcpClient) sendCallbackFailed() {
 }
 
 func (c *tcpClient) sendServerIdent() {
+	clientV6, v6Status := c.ipv6Reflection()
 	packet, err := BuildServerIdentPacket(ServerConfig{
-		Name:        c.server.TCP.Name,
-		Description: c.server.TCP.Description,
-		Address:     c.server.advertisedAddress(),
-		Hash:        c.server.TCP.Hash,
-		TCPPort:     c.server.TCP.Port,
-		TCPFlags:    c.server.TCP.Flags,
-		IPv6:        c.server.TCP.ServerIPv6,
-		NatPort:     c.server.TCP.NatRendezvousPort,
+		Name:             c.server.TCP.Name,
+		Description:      c.server.TCP.Description,
+		Address:          c.server.advertisedAddress(),
+		Hash:             c.server.TCP.Hash,
+		TCPPort:          c.server.TCP.Port,
+		TCPFlags:         c.server.TCP.Flags,
+		IPv6:             c.server.TCP.ServerIPv6,
+		NatPort:          c.server.TCP.NatRendezvousPort,
+		ClientIPv6:       clientV6,
+		ClientIPv6Status: v6Status,
 	})
 	if err != nil {
 		return
@@ -1327,6 +1350,13 @@ func opcodeLabel(opcode uint8) string {
 }
 
 func (s *ServerRuntime) isFirewalled(client *tcpClient) bool {
+	if s.firewallProbe != nil {
+		return s.firewallProbe(client)
+	}
+	return s.probeFirewalled(client)
+}
+
+func (s *ServerRuntime) probeFirewalled(client *tcpClient) bool {
 	if client == nil {
 		return true
 	}
@@ -1958,6 +1988,57 @@ func loginIPv6(tags []NamedTag) (addr []byte, present bool) {
 		return append([]byte(nil), b...), true
 	}
 	return nil, false
+}
+
+// v6ProbeRequired reports whether the login path has to dial back to decide the
+// client's IPv6 reachability rather than simply trusting the address: a session
+// that arrived over IPv6 has proven the address by using it, and probing can be
+// turned off outright. Shared with ipv6Reflection so the IPv6StatusProbed bit
+// cannot drift away from what the login path actually did.
+func (c *tcpClient) v6ProbeRequired(v6Len int) bool {
+	return c.server.publishV6Sources() && v6Len == 16 && !c.connectedV6 && c.server.TCP.ProbeIPv6
+}
+
+// ipv6Reflection returns the two per-session IPv6 fields of OP_SERVERIDENT: the
+// address the server observed this session on (CT_MOD_YOUR_IP) and the
+// IPv6Status* bitfield summarising what it knows about the session's IPv6.
+//
+// The reflected address is only ever one the server *observed*, so it is emitted
+// solely for a session that actually arrived over IPv6 — echoing back the
+// CT_MOD_IP_V6 the client sent us would teach it nothing. That leaves the
+// v4-connected dual-stack client, and the status bitfield is what serves it: it
+// reports the dial-back verdict for the address that client advertised.
+//
+// Both are omitted for a server with IPv6 turned off, so such a server keeps
+// emitting the pre-reflection packet byte for byte.
+func (c *tcpClient) ipv6Reflection() (peerV6 []byte, status uint8) {
+	if !c.server.ipv6Enabled() {
+		return nil, 0
+	}
+	if c.connectedV6 && IsPublicIPv6(c.peerIP) {
+		if b, ok := IPv6Bytes(c.peerIP); ok {
+			peerV6 = append([]byte(nil), b[:]...)
+		}
+	}
+	// The verdict only exists once login has settled it, and only when v6 source
+	// publication is on — that is the code path that computes it. Pre-login (an
+	// OP_GETSERVERLIST before OP_LOGINREQUEST also sends an ident) there is nothing
+	// to report, and a zero bitfield omits the tag.
+	if !c.server.publishV6Sources() || !c.isLogged() {
+		return peerV6, 0
+	}
+	info := c.snapshotInfo()
+	if len(info.IPv6) != 16 {
+		return peerV6, 0
+	}
+	status = IPv6StatusHave
+	if info.IPv6Reachable {
+		status |= IPv6StatusReachable
+	}
+	if c.v6ProbeRequired(len(info.IPv6)) {
+		status |= IPv6StatusProbed
+	}
+	return peerV6, status
 }
 
 // cryptOptionsFromLoginFlags maps the login capability bits to the per-source

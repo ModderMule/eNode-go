@@ -174,6 +174,15 @@ const (
 	// in OP_SERVERIDENT.
 	TagModIPv6    uint8 = 0xae
 	TagModSvrIPv6 uint8 = 0xaf
+	// TagModYourIP is CT_MOD_YOUR_IP, already allocated by eMuleAI (Opcodes.h:585)
+	// for "the address I see you coming from" — a uint32 for an IPv4 peer, a 16-byte
+	// HASH for an IPv6 one, written into the client-to-client hello
+	// (UpDownClient.cpp:1195-1201). eNode-go emits the HASH form in OP_SERVERIDENT so
+	// a client learns which of its addresses actually reached the server; with RFC
+	// 4941 temporary addresses and multiple prefixes it cannot know that locally.
+	// Only ever the observed peer address, never an echo of the client's own
+	// CT_MOD_IP_V6 claim. See docs/ipv6-client-implementation-spec.md §3a.
+	TagModYourIP uint8 = 0xad
 	// TagNatPort is an eNode-go OP_SERVERIDENT extension: the server's NAT-rendezvous
 	// UDP port as a uint16, so a client learns where to REGISTER/SYNC2 without
 	// assuming the default 2004. 0x9D is free across the ST_* server-tag, CT_* client
@@ -182,6 +191,31 @@ const (
 	// name-IDs without disconnecting. Emitted only when natTraversal.serverIndependent
 	// is on. See docs/ipv6-client-implementation-spec.md §9.
 	TagNatPort uint8 = 0x9d
+	// TagIPv6Status is an eNode-go OP_SERVERIDENT extension: an IPv6Status* bitfield
+	// (uint8) telling the session what the server knows about its IPv6 — whether it
+	// holds one, whether that address is treated as reachable, and whether that
+	// verdict came from a real dial-back. Complements TagModYourIP: reflection only
+	// happens on a v6-connected session, whereas this reaches a v4-connected client
+	// that advertised CT_MOD_IP_V6 and would otherwise never learn whether it is
+	// being published as a v6 source. 0xAB is free across the ST_*, CT_* and OP_*
+	// namespaces in both surveyed C++ trees. See docs/ipv6-client-implementation-spec.md §3a.
+	TagIPv6Status uint8 = 0xab
+)
+
+// IPv6Status* are the bits of the TagIPv6Status (0xab) bitfield. Unset bits mean
+// "no", never "unknown" — the tag is omitted entirely when the server has no
+// verdict to report, so a client that sees it can trust every bit.
+const (
+	// IPv6StatusHave is set when the server holds a public IPv6 for this session,
+	// from the CT_MOD_IP_V6 login tag or from a v6 connection.
+	IPv6StatusHave uint8 = 0x01
+	// IPv6StatusReachable is set when that address is treated as reachable on the
+	// client's advertised port, i.e. the client is published as an IPv6 source.
+	IPv6StatusReachable uint8 = 0x02
+	// IPv6StatusProbed is set when the reachability verdict came from an actual
+	// dial-back rather than a trust default (a v6-connected session, or tcp.probeIPv6
+	// turned off). Without this bit a client must not report "verified" to its user.
+	IPv6StatusProbed uint8 = 0x04
 )
 
 const (

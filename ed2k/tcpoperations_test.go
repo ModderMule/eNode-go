@@ -1,8 +1,10 @@
 package ed2k
 
 import (
-	"enode/storage"
+	"encoding/binary"
 	"testing"
+
+	"enode/storage"
 )
 
 func TestParseLoginRequest(t *testing.T) {
@@ -40,12 +42,141 @@ func TestBuildServerPackets(t *testing.T) {
 		t.Fatalf("opcode mismatch")
 	}
 
-	idc, err := BuildIDChangePacket(123, 0x10)
+	idc, err := BuildIDChangePacket(123, 0x10, 4661, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if idc.Bytes()[5] != OpIDChange {
 		t.Fatalf("opcode mismatch")
+	}
+}
+
+// TestHasHighIDMatchesEMuleIsLowID pins the predicate that decides both the ID a
+// client is assigned and whether its observed IPv4 is reflected back, against the
+// reference client's own test. eMule's IsLowID is purely numeric — it never
+// compares the ID to an address — so any address whose packed form falls in that
+// range is a LowID as far as every client is concerned, whatever the server
+// believes (srchybrid/otherfunctions.h:449).
+func TestHasHighIDMatchesEMuleIsLowID(t *testing.T) {
+	// Transcribed from srchybrid/otherfunctions.h:449, including the bound.
+	emuleIsLowID := func(id uint32) bool { return id < 16777216 }
+
+	cases := []struct {
+		ipv4 string
+		want bool
+		why  string
+	}{
+		{"1.2.3.4", true, "ordinary address"},
+		{"203.0.113.7", true, "ordinary address"},
+		{"255.255.255.255", true, "the top of the space"},
+		{"0.0.0.1", true, "packs to 0x01000000, the first value above the LowID ceiling"},
+		{"203.0.113.0", false, "last octet 0 — the packed value is a LowID"},
+		{"10.0.0.0", false, "last octet 0"},
+		{"255.255.255.0", false, "last octet 0, however large the rest is"},
+		{"0.0.0.0", false, "no address at all"},
+	}
+
+	for _, tc := range cases {
+		packed, err := IPv4ToInt32LE(tc.ipv4)
+		if err != nil {
+			t.Fatalf("IPv4ToInt32LE(%q): %v", tc.ipv4, err)
+		}
+		got := HasHighID(packed)
+		t.Logf("input: %-16s packed=0x%08x -> output: HasHighID=%-5t (%s)", tc.ipv4, packed, got, tc.why)
+
+		if got != tc.want {
+			t.Fatalf("HasHighID(%s / 0x%08x) = %t, want %t", tc.ipv4, packed, got, tc.want)
+		}
+		// The two must agree on everything except 0, which eMule calls a LowID and
+		// eNode-go treats as "no ID at all"; both refuse it as a HighID.
+		if packed != 0 && got == emuleIsLowID(packed) {
+			t.Fatalf("disagrees with eMule IsLowID for %s (0x%08x): HasHighID=%t IsLowID=%t",
+				tc.ipv4, packed, got, emuleIsLowID(packed))
+		}
+	}
+}
+
+// TestIDChangeCarriesObservedIPv4 checks OP_IDCHANGE fills eMule's full
+// documented layout, <newID 4><serverFlags 4><primaryTCPPort 4><clientIP 4>. The
+// 4th word is the only public-IPv4 source a LowID client has — eMule reads it at
+// offset 12 once size >= 16 and feeds it to SetPublicIP()
+// (srchybrid/ServerSocket.cpp:306-315,349-350).
+func TestIDChangeCarriesObservedIPv4(t *testing.T) {
+	// 192.0.2.10 packed the way an ed2k HighID is: first octet in the low byte.
+	const highID = uint32(192) | uint32(0)<<8 | uint32(2)<<16 | uint32(10)<<24
+	// 198.51.100.0 — a last octet of 0 makes the packed value look like a LowID.
+	const trailingZeroIP = uint32(198) | uint32(51)<<8 | uint32(100)<<16 | uint32(0)<<24
+
+	cases := []struct {
+		name     string
+		id       uint32
+		observed uint32
+		wantIP   uint32
+	}{
+		{
+			name:     "HighID reports the same address the ID encodes",
+			id:       highID,
+			observed: highID,
+			wantIP:   highID,
+		},
+		{
+			name:     "LowID still reports the observed IPv4",
+			id:       0x00123456,
+			observed: highID,
+			wantIP:   highID,
+		},
+		{
+			name:     "v6-only session has no IPv4 to report",
+			id:       0x00123456,
+			observed: 0,
+			wantIP:   0,
+		},
+		{
+			name:     "an address eMule would reject as a LowID is zeroed",
+			id:       trailingZeroIP,
+			observed: trailingZeroIP,
+			wantIP:   0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const flags = uint32(0x10)
+			const primaryPort = uint16(4661)
+			t.Logf("input: id=0x%08x flags=0x%08x primaryPort=%d observedIPv4=0x%08x",
+				tc.id, flags, primaryPort, tc.observed)
+
+			buf, err := BuildIDChangePacket(tc.id, flags, primaryPort, tc.observed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opcode, payload := tcpFoundSourcesPayload(t, buf)
+			t.Logf("output: opcode=0x%02x payload=% x", opcode, payload)
+
+			if opcode != OpIDChange {
+				t.Fatalf("opcode = 0x%02x, want OP_IDCHANGE", opcode)
+			}
+			if len(payload) != 16 {
+				t.Fatalf("payload = %d bytes, want 16 (eMule reads the client IP at offset 12)", len(payload))
+			}
+			if got := binary.LittleEndian.Uint32(payload[0:4]); got != tc.id {
+				t.Fatalf("clientID = 0x%08x, want 0x%08x", got, tc.id)
+			}
+			if got := binary.LittleEndian.Uint32(payload[4:8]); got != flags {
+				t.Fatalf("tcpFlags = 0x%08x, want 0x%08x", got, flags)
+			}
+			if got := binary.LittleEndian.Uint32(payload[8:12]); got != uint32(primaryPort) {
+				t.Fatalf("primaryTCPPort = %d, want %d", got, primaryPort)
+			}
+			got := binary.LittleEndian.Uint32(payload[12:16])
+			if got != tc.wantIP {
+				t.Fatalf("observed IPv4 = 0x%08x, want 0x%08x", got, tc.wantIP)
+			}
+			// eMule asserts the reported IP equals the ID unless the ID is a LowID.
+			if HasHighID(tc.id) && got != tc.id {
+				t.Fatalf("HighID session: reported IP 0x%08x != clientID 0x%08x", got, tc.id)
+			}
+		})
 	}
 }
 

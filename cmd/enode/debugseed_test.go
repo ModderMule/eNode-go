@@ -125,6 +125,71 @@ func TestSeedDebugFixturesMissingFile(t *testing.T) {
 	}
 }
 
+// TestClientInfoFromPeerRejectsUnrepresentableHighID covers the fixture side of
+// the rule the login path enforces: an ed2k HighID *is* the packed IPv4, so an
+// address ending in .0 packs into the LowID range. Seeding such a peer as a HighID
+// would publish a source every client reads as a LowID but that the server never
+// registered in its LowID pool, so no callback for it could be routed and nobody
+// could reach it.
+func TestClientInfoFromPeerRejectsUnrepresentableHighID(t *testing.T) {
+	const userHash = "0123456789abcdef0123456789abcdef"
+
+	cases := []struct {
+		name    string
+		peer    debugPeer
+		wantOK  bool
+		wantID  uint32
+		wantLow bool
+		wantWhy string
+	}{
+		{
+			name:    "ordinary address becomes a HighID",
+			peer:    debugPeer{IPv4: "203.0.113.7", Port: 4662, UserHash: userHash},
+			wantOK:  true,
+			wantID:  mustID(t, "203.0.113.7"),
+			wantWhy: "packs above the LowID ceiling",
+		},
+		{
+			name:    "address ending in .0 is not a usable HighID",
+			peer:    debugPeer{IPv4: "203.0.113.0", Port: 4662, UserHash: userHash},
+			wantOK:  false,
+			wantWhy: "packs to 0x007100cb, inside the LowID range",
+		},
+		{
+			name:    "the same address is fine once declared a LowID with an explicit id",
+			peer:    debugPeer{IPv4: "203.0.113.0", ID: 123456, LowID: true, Port: 4662, UserHash: userHash},
+			wantOK:  true,
+			wantID:  123456,
+			wantLow: true,
+			wantWhy: "the id is a pool handle, not the address",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("input: ipv4=%q id=%d lowID=%t", tc.peer.IPv4, tc.peer.ID, tc.peer.LowID)
+			info, ok := clientInfoFromPeer(0, tc.peer)
+			t.Logf("output: ok=%t id=0x%08x lowID=%t (%s)", ok, info.ID, info.LowID, tc.wantWhy)
+
+			if ok != tc.wantOK {
+				t.Fatalf("accepted = %t, want %t", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if info.ID != tc.wantID {
+				t.Fatalf("id = 0x%08x, want 0x%08x", info.ID, tc.wantID)
+			}
+			if info.LowID != tc.wantLow {
+				t.Fatalf("lowID = %t, want %t", info.LowID, tc.wantLow)
+			}
+			if !info.LowID && !ed2k.HasHighID(info.ID) {
+				t.Fatalf("seeded HighID 0x%08x is in the LowID range — clients will disagree", info.ID)
+			}
+		})
+	}
+}
+
 func mustHash(t *testing.T, s string) []byte {
 	t.Helper()
 	h, err := decodeHash(s)

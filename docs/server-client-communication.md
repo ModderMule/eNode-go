@@ -28,7 +28,7 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_CALLBACKREQUEST` | `0x1c` | Client -> Server | Ask server to callback a LowID client. |
 | `OP_SERVERMESSAGE` | `0x38` | Server -> Client | Human-readable server message. |
 | `OP_SERVERSTATUS` | `0x34` | Server -> Client | Current server counters/status. |
-| `OP_IDCHANGE` | `0x40` | Server -> Client | Assign/update client ID and flags. |
+| `OP_IDCHANGE` | `0x40` | Server -> Client | Assign/update client ID and flags, and report the IPv4 the server observes the client on. |
 | `OP_SERVERLIST` | `0x32` | Server -> Client | Response with known servers. |
 | `OP_SERVERIDENT` | `0x41` | Server -> Client | Server identity/tags response. |
 | `OP_FOUNDSOURCES` | `0x42` | Server -> Client | Source list for requested file. |
@@ -109,9 +109,9 @@ layouts: [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.
 | `OP_LOGINREQUEST` | Client -> Server (parsed) | `hash16 + clientID(uint32) + clientPort(uint16) + tags` |
 | `OP_SERVERMESSAGE` | Server -> Client | `message(string)` |
 | `OP_SERVERSTATUS` | Server -> Client | `clients(uint32) + files(uint32)` |
-| `OP_IDCHANGE` | Server -> Client | `clientID(uint32) + tcpFlags(uint32)` |
+| `OP_IDCHANGE` | Server -> Client | `clientID(uint32) + tcpFlags(uint32) + primaryTCPPort(uint32) + observedClientIPv4(uint32)`. eMule's full documented layout (`srchybrid/Opcodes.h:182`); it lower-bounds the size only, reading the flags at size >= 8 and the observed IP at size >= 16. `primaryTCPPort` is annotated "unused" by the reference and ignored by both surveyed clients. `observedClientIPv4` is the address the socket arrived from — the only public-IPv4 source a LowID client has — and is `0` when the server has no routable IPv4 for the session (v6-only, or a value a client would reject as a LowID). Such a session is assigned a LowID as well — an address ending in `.0` packs into the LowID range, so it cannot be a HighID either — which keeps `clientID` and `observedClientIPv4` consistent. See [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.md) §2 and §3a. |
 | `OP_SERVERLIST` | Server -> Client | `v4count(uint8) + repeated(serverIP(uint32) + serverPort(uint16))` [`+ v6count(uint8) + repeated(serverIPv6(hash16) + serverPort(uint16))`]. The trailing IPv6 block is appended only when IPv6 publication is on and a peer server has a public IPv6; it is pure trailing data after the self-terminating v4 count, so a v4-only client ignores it. See [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.md) §8. |
-| `OP_SERVERIDENT` | Server -> Client | `serverHash(hash16) + serverIP(uint32) + serverPort(uint16) + tags` |
+| `OP_SERVERIDENT` | Server -> Client | `serverHash(hash16) + serverIP(uint32) + serverPort(uint16) + tags`. Tags are `ST_SERVERNAME`, `ST_DESCRIPTION`, then optionally `CT_MOD_SVR_IP_V6 (0xaf, hash16)`, `ST_NAT_PORT (0x9d, uint16)`, and the two per-session reflection tags `CT_MOD_YOUR_IP` (`0xad`, hash16 — the IPv6 the server observes this client on, v6-connected sessions only) and `ST_IPV6_STATUS` (`0xab`, uint8 — the `IPV6ST_*` reachability bitfield). All are additive: eMule dispatches on the tag name and consumes unknown names by type, so a client that ignores them parses as before. See [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.md) §3a. |
 | `OP_FOUNDSOURCES` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry)` |
 | `OP_FOUNDSOURCES_OBFU` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry + obfSettings(uint8) [+ userHash(hash16) if obfSettings&0x80])` |
 | `OP_SEARCHRESULT` | Server -> Client | `resultCount(uint32) + repeated(fileRecord)`; `fileRecord = fileHash(hash16) + sourceID(uint32) + sourcePort(uint16) + tags` |

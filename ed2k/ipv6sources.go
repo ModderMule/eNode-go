@@ -41,7 +41,7 @@ func buildFoundSourcesIPv6(opcode uint8, udp bool, fileHash []byte, sources []st
 		id := src.ID
 		var tags []Tag
 		if sourceHasReachableIPv6(src) {
-			if !hasHighID(id) {
+			if !HasHighID(id) {
 				id = SentinelIPv6ID
 			}
 			tags = []Tag{{Type: TypeHash, Code: TagModIPv6, Data: src.IPv6}}

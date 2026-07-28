@@ -16,6 +16,11 @@ to the pre-IPv6 server. IPv6 is entirely additive and opt-in.
 |---|---|---|
 | `CT_MOD_IP_V6` | tag `0xAE`, type `TAGTYPE_HASH` (0x01), 16 bytes | `OP_LOGINREQUEST` (client→server) |
 | `CT_MOD_SVR_IP_V6` | tag `0xAF`, type `TAGTYPE_HASH`, 16 bytes | `OP_SERVERIDENT` (server→client) |
+| `CT_MOD_YOUR_IP` | tag `0xAD`, type `TAGTYPE_HASH`, 16 bytes | `OP_SERVERIDENT` (server→client) — the IPv6 the server observes *you* on (§3a) |
+| `ST_IPV6_STATUS` | tag `0xAB`, type `TAGTYPE_UINT8` (0x09) | `OP_SERVERIDENT` (server→client) — `IPV6ST_*` bitfield (§3a) |
+| `IPV6ST_HAVE` | `0x01` | `ST_IPV6_STATUS` bit: the server holds a public IPv6 for your session |
+| `IPV6ST_REACHABLE` | `0x02` | `ST_IPV6_STATUS` bit: that address is treated as reachable — you are published as a v6 source |
+| `IPV6ST_PROBED` | `0x04` | `ST_IPV6_STATUS` bit: the verdict came from a real dial-back, not a trust default |
 | `SRV_TCPFLG_IPV6` | `0x00004000` | `OP_IDCHANGE` / `OP_SERVERIDENT` flags word |
 | `SRV_UDPFLG_IPV6` | `0x00004000` | `OP_GLOBSERVSTATRES` UDP flags word |
 | `SRVCAP_IPV6` (optional) | `0x1000` | `CT_SERVER_FLAGS` (0x20) login tag |
@@ -92,13 +97,24 @@ IPv6 to put in `0xAE`. The server reads `CT_SERVER_FLAGS` as a uint32.
 > inside a classic `OP_FOUNDSOURCES`; a client that advertises capability but
 > cannot parse the sentinel will desync its source list.
 
-### ID assignment for IPv6-only clients
+### ID assignment when there is no usable HighID
 
-An ed2k ClientID is 32 bits and a HighID *is* the packed IPv4, so a client with no
-usable IPv4 can never get a HighID. eNode-go assigns such a client a **LowID**
-unconditionally and reaches it via its IPv6 (published as a v6 source). Such a
-client can also drive and receive **IPv6 LowID callbacks** (§7). A dual-stack
-client with a routable IPv4 still gets a HighID as usual.
+An ed2k ClientID is 32 bits and a HighID *is* the packed IPv4, first octet in the
+low byte. Two kinds of session therefore cannot be given one, and eNode-go assigns
+both a **LowID** unconditionally — without even running the IPv4 dial-back, whose
+answer could not change the outcome:
+
+1. **No IPv4 at all** — an IPv6-only session. It is reached via its IPv6, published
+   as a v6 source, and can drive and receive **IPv6 LowID callbacks** (§7).
+2. **An IPv4 ending in `.0`** — `203.0.113.0` packs to `0x007100cb`, at or below
+   `0x00ffffff`, which is exactly the range a client reads back as a LowID. eMule
+   assumes servers behave this way; the comment above its own `IsLowID` says so
+   outright: *"we now know the servers just give `*.*.*.0` users a lowID"*
+   (`srchybrid/otherfunctions.h:448`). Such a client is reached by IPv4 LowID
+   callback like any other LowID, and its `observedClientIPv4` is `0` (§3a) — the
+   field has no encoding for an address in that range.
+
+A dual-stack client with a routable IPv4 still gets a HighID as usual.
 
 ---
 
@@ -120,6 +136,92 @@ client with a routable IPv4 still gets a HighID as usual.
   carries `ST_NAT_PORT (0x9D)`, a `TAGTYPE_UINT16` tag with the server's NAT-rendezvous
   UDP port (so you need not assume the default `2004`). Both are absent when the
   operator has turned the feature off; then only same-server LowID↔LowID is served.
+
+---
+
+## 3a. Learning your own addresses
+
+The server sees the address you actually reach it from. It reports that back, which
+is the only reliable way for you to know it: your local interface addresses are not
+what a peer observes, and with RFC 4941 temporary addresses plus multiple delegated
+prefixes you cannot tell locally *which* of your IPv6 addresses egressed.
+
+### Your IPv4 — `OP_IDCHANGE`
+
+eNode-go sends `OP_IDCHANGE` in eMule's full documented 16-byte layout:
+
+```
+uint32  newClientID
+uint32  serverTCPFlags
+uint32  primaryTCPPort     // the server's own listening port; eMule ignores this word
+uint32  observedClientIPv4 // the IPv4 the server sees you on, packed as an ed2k ID
+```
+
+Read `observedClientIPv4` only when the packet is at least 16 bytes — older servers
+send 8. This is what stock eMule already does (`srchybrid/ServerSocket.cpp:306-315`),
+and it matters most on a **LowID**, where the ID tells you nothing about your
+address: eMule feeds this word straight to `SetPublicIP()`. On a HighID the value
+equals `newClientID`, since a HighID *is* the packed IPv4.
+
+`observedClientIPv4` is `0` when the server has no routable IPv4 for you — an
+IPv6-only session, or an address whose packed form would be indistinguishable from a
+LowID. Treat `0` as "unknown", never as an address. Both cases are also assigned a
+LowID (§2, "ID assignment when there is no usable HighID"), so `newClientID` and this
+word always agree about which kind of session you are in.
+
+### Your IPv6 — `CT_MOD_YOUR_IP (0xAD)` in `OP_SERVERIDENT`
+
+A 16-byte `TAGTYPE_HASH` tag carrying the IPv6 the server observed the session
+arriving on. Parse it position-agnostically among the ident tags, exactly like
+`CT_MOD_SVR_IP_V6` (§3).
+
+**The tag is only ever an observed address.** It is sent only for a session that
+actually connected over IPv6, and only when that peer address is public global
+unicast. A session that connects over IPv4 and advertises `CT_MOD_IP_V6` receives
+**no** tag — echoing your own claim back would tell you nothing you did not already
+know. Prefer this value over any locally-guessed source address when you populate
+your own `CT_MOD_IP_V6`, and over a value reflected by a peer's client-to-client
+`CT_MOD_YOUR_IP`: the server is the more stable observer.
+
+### Your IPv6 status — `ST_IPV6_STATUS (0xAB)` in `OP_SERVERIDENT`
+
+A `TAGTYPE_UINT8` bitfield answering the question reflection cannot answer for a
+v4-connected client: *is the IPv6 I advertised actually working?*
+
+| Bit | Meaning |
+|---|---|
+| `IPV6ST_HAVE (0x01)` | the server holds a public IPv6 for this session (from your `CT_MOD_IP_V6`, or from a v6 connection) |
+| `IPV6ST_REACHABLE (0x02)` | that address is treated as reachable on the port you advertised — you are published as an IPv6 source |
+| `IPV6ST_PROBED (0x04)` | the reachability verdict came from an actual dial-back, not a trust default |
+
+Unset bits mean "no", never "unknown": the tag is **omitted entirely** when the
+server has no verdict to report, so every bit in a tag you receive is meaningful.
+The tag is absent when v6 source publication is off, when the server holds no IPv6
+for you, and on an ident sent before you have logged in (an `OP_GETSERVERLIST`
+before `OP_LOGINREQUEST` also draws an `OP_SERVERIDENT`).
+
+What the combinations mean:
+
+| Session | Bits | Reading |
+|---|---|---|
+| connected over IPv6 | `HAVE\|REACHABLE` | proven by the connection itself; no dial-back was needed |
+| connected over IPv4, dial-back succeeded | `HAVE\|REACHABLE\|PROBED` | verified — you are reachable as an IPv6 source |
+| connected over IPv4, dial-back failed | `HAVE\|PROBED` | verified unreachable — your v6 port is firewalled or the address is wrong, and you are **not** published as a v6 source |
+| `tcp.probeIPv6` off on the server | `HAVE\|REACHABLE` | assumed, not tested |
+| (tag absent) | — | the server has no verdict; assume nothing |
+
+`IPV6ST_PROBED` is the bit that keeps the signal honest. Without it,
+`REACHABLE` may be an assumption, so do not report "IPv6 verified" to a user
+unless `PROBED` is also set.
+
+### Compatibility
+
+All three fields are additive and skippable. eMule only lower-bounds the
+`OP_IDCHANGE` size and never rejects a longer packet, and its `OP_SERVERIDENT` tag
+loop dispatches on the tag *name*, consuming names it does not know. Both tags use
+value types the reference reads by fixed length (`TAGTYPE_HASH` = 16 bytes,
+`TAGTYPE_UINT8` = 1 byte) and are appended after the classic server tags, so a
+client that ignores them parses exactly as before.
 
 ---
 
@@ -212,6 +314,13 @@ v6-only source (`clientId == 0xFFFFFFFF`) is reachable only over IPv6.
 - Nothing NAT-related is scoped out any more: `PR_NAT` hole-punching is dual-stack —
   see **§9**. (When `natTraversal.ipv6` is set to `false`, the server declines IPv6
   `PR_NAT` datagrams and the family is IPv4-only, exactly as it was before v6 support.)
+- Self-address discovery is no longer scoped out either: the server reports the IPv4
+  and IPv6 it observes you on, plus its verdict on whether your IPv6 is reachable —
+  see **§3a**. What it still does not do is reflect an address it has not observed:
+  a v4-connected session gets no `CT_MOD_YOUR_IP`, only the status bitfield.
+- The `PR_NAT` `OP_NAT_REGISTER*` acks are **not** a reflection channel. They carry
+  the *server's* endpoint so you know where to punch; the observed source of your
+  register is recorded server-side as a candidate but never sent back (§9).
 
 ---
 

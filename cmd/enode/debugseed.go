@@ -111,6 +111,15 @@ func clientInfoFromPeer(idx int, p debugPeer) (storage.ClientInfo, bool) {
 		}
 		ipv4 = v
 		if !p.LowID {
+			// A HighID *is* the packed IPv4, so an address ending in .0 packs into
+			// the LowID range and would seed a source every client reads as a LowID
+			// but that the server never registered in its LowID pool — nobody could
+			// reach it. The login path forces such a client to LowID; a fixture has
+			// to say so explicitly, since it supplies its own id.
+			if !ed2k.HasHighID(v) {
+				logging.Warnf("debug fixtures: skipping peer %d: ipv4 %q packs to 0x%08x, which clients read as a LowID (set lowID: true and an explicit id)", idx, p.IPv4, v)
+				return storage.ClientInfo{}, false
+			}
 			id = v
 		}
 	}
