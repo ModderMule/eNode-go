@@ -1,0 +1,28 @@
+# Build context exclusions. The interop images build with the module root as their
+# context (tests/interop/Dockerfile.enode needs go.mod plus every package), so without
+# this file each build ships ~25 MB of vendored eserver binaries and the whole .git
+# history to the daemon on every run.
+#
+# Only paths the compiler does not need are listed. admin/html/ is NOT excluded — the
+# dashboard page is //go:embed-ed at build time, so dropping it breaks the build.
+
+.git
+.github
+.idea
+.vscode
+
+# Vendored eserver: the interop test stages its own build context for that image from
+# the binary it needs, so the tree never has to enter the eNode context.
+lugdunum-eserver
+
+# Written at run time, never an input.
+data
+logs
+bin
+dist
+build
+
+# Not compiled in.
+docs
+*.md
+enode.local.yaml

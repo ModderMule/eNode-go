@@ -36,6 +36,14 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   `OP_SERVERIDENT` NAT-port tag. See
   [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md) §9.
 - Files larger than 4 GiB
+- Server-to-server gossip: the Lugdunum `OP_SERVER_LIST_REQ/RES` handshake, so
+  `OP_SERVERLIST` is populated from the live network instead of only a static list.
+  Verified against the original **eserver 17.14** binary running beside us on a Docker
+  network — see [`docs/server-gossip.md`](docs/server-gossip.md) for the protocol and
+  [`docs/interop-docker-tests.md`](docs/interop-docker-tests.md) for the test rig.
+- Access filters: `ipfilter.dat` ranges and MaxMind GeoIP country blocking, both dropping
+  a refused address before any wire parsing. See
+  [`docs/access-filters.md`](docs/access-filters.md).
 - Admin status dashboard: a single self-contained HTML page served over HTTP with
   only the Go standard library (zero third-party deps), showing live client / file /
   LowID / peer-server counts, listening ports, enabled features, version and uptime.
@@ -109,6 +117,7 @@ tcp:
 udp:
   port: 5559                 # Main UDP port (tcp.port + 4, where eMule pings the plaintext stat)
   portObfuscated: 5567       # Obfuscated UDP port; must be tcp.port + 12 for the crypt-ping (see docs/server-udp-crypt-ping.md)
+  portGossip: 5567           # Obfuscated server-to-server source port / advertised portUDPOBF; shares the socket above (see docs/server-gossip.md)
   getSources: true           # Enable UDP source queries
   getFiles: true             # Enable UDP file queries
   serverKey: 305419896       # Server-wide secret; per-client UDP obfuscation keys are derived from it + the client IP (see docs/server-udp-crypt-ping.md)

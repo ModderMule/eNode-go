@@ -1,0 +1,66 @@
+; donkey.ini for the interop rig. Rendered by entrypoint.eserver.sh, which fills
+; __THIS_IP__ with the container's own address and appends the seed settings when asked.
+;
+; PARSER WARNING, measured against the binary: eserver splits every line containing an
+; equals sign on it and does NOT honour ';' as a comment marker for such a line, so a
+; commented-out setting is still parsed and logs "Unknown config keyword". Every comment
+; below therefore avoids the character entirely -- including where it would be natural to
+; write one, which is why the notes read a little awkwardly.
+
+[server]
+name=lugdunum-ref
+desc=Lugdunum eserver 17.14 reference (interop test)
+
+; thisIP cannot be auto-detected by eserver -- the manual is explicit that it MUST be set
+; correctly for a public server. The entrypoint resolves it from the container interface.
+thisIP=__THIS_IP__
+port=4661
+
+; --- REQUIRED under QEMU user-mode emulation ---
+; Two independent QEMU limitations, both fatal without these:
+;   noepoll      eserver's epoll path segfaults during socket setup
+;   tcpthreads   defaults to the CPU count, and more than one TCP worker crashes shortly
+;                after startup
+noepoll=true
+tcpthreads=1
+udpsearchers=1
+
+; --- capacity: tiny, this is a test rig ---
+maxClients=200
+max_clients_per_ip=64
+softLimit=1000
+hardLimit=4000
+LOWIDenable=1
+LOWIDpercent=90
+
+; --- logging: the whole point is to SEE the protocol ---
+; The console flag puts the trace on stdout, where `docker logs` can read it. The log FILE
+; receives only the startup lines, so stdout is the only usable channel.
+;
+; Every flag here is set to 1 rather than to true, and that matters. The manual documents
+; verbose and bverbose as booleans that accept true, but sverbose -- the server-to-server
+; trace, the one carrying the whole gossip handshake -- is undocumented and is not a
+; boolean. Measured: assigning it true is accepted and silently does nothing, with no
+; "changing sverbose" line and no trace, while assigning it 1 enables it. 1 is valid for
+; the real booleans too, so it is used throughout.
+verbose=1
+console=1
+logFile=1
+bverbose=1
+sverbose=1
+
+; --- obfuscation, added in 17.13 ---
+; portTCPOBF defaults to the value of port, and portUDPOBF to port plus 14; the bootstrap
+; crypt-ping always arrives on port plus 12 whatever those say. Left at defaults so the rig
+; behaves like a stock server.
+
+; --- server-to-server gossip ---
+; autoservlist names the file the server writes its known-peer list to, roughly every 225
+; seconds, and it records only servers it considers "working". The saveServers console
+; command forces a write immediately, which is what the test uses instead of waiting.
+autoservlist=server.met
+public=true
+
+; --- misc ---
+zlib_enable=true
+ping_delay=300

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -435,7 +436,7 @@ func (m *MySQLEngine) FindBySearch(expr *SearchExpr) []File {
 		 INNER JOIN files f ON s.id_file = f.id
 		 WHERE `+where+`
 		 GROUP BY s.id_file
-		 LIMIT 255`,
+		 LIMIT `+strconv.Itoa(MaxSearchResults)+``,
 		args...,
 	)
 	if err != nil {

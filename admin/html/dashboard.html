@@ -45,7 +45,8 @@ a{color:var(--accent)}
 <div class="card"><div class="label">Clients online</div><div class="value" id="clients">…</div></div>
 <div class="card"><div class="label">Files</div><div class="value" id="files">…</div></div>
 <div class="card"><div class="label">LowID registrations</div><div class="value" id="lowIDs">…</div></div>
-<div class="card"><div class="label">Peer servers</div><div class="value" id="servers">…</div></div>
+<div class="card"><div class="label">Peer servers</div><div class="value" id="servers">…</div><div class="desc" id="gossip" style="margin:0"></div></div>
+<div class="card"><div class="label">Blocked addresses</div><div class="value" id="blocked">…</div><div class="desc" id="blockedBreak" style="margin:0"></div></div>
 <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">…</div></div>
 </div>
 
@@ -96,6 +97,15 @@ async function refresh(){
     setText('files', d.files.toLocaleString());
     setText('lowIDs', d.lowIDs.toLocaleString());
     setText('servers', d.servers.toLocaleString());
+    // The headline figure is what OP_SERVERLIST would carry; the sub-line separates the
+    // gossip-learned share of it, so a table full of unverified or parked peers is
+    // visible rather than hidden behind one number.
+    setText('gossip', d.gossipKnown
+      ? 'gossip ' + d.gossipVerified + '/' + d.gossipKnown + ' verified'
+        + (d.gossipParked ? ', ' + d.gossipParked + ' parked' : '')
+      : 'no gossip peers');
+    setText('blocked', (d.filterBlockedIP + d.filterBlockedGeo).toLocaleString());
+    setText('blockedBreak', d.filterBlockedIP + ' ipfilter, ' + d.filterBlockedGeo + ' geoip');
     setText('uptime', fmtUptime(d.uptimeSeconds));
     setText('updated', 'updated ' + new Date(d.time).toLocaleTimeString());
     setStatus('live', 'ok');

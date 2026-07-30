@@ -25,6 +25,18 @@ vendor/
 logs/
 *.log
 
+# Everything the server writes at run time: the gossip peer list (server.met) and
+# the downloaded MaxMind GeoIP database. Operator-supplied inputs (ipfilter.dat,
+# misc/enode.sql) and config files deliberately stay in the repo root instead.
+data/
+
+# Vendored reference implementation: the original Lugdunum eserver 17.14 binaries, the
+# official manual and its Docker rig. ~25 MB of third-party, closed-source,
+# non-redistributable material, kept beside the code so tests/interop can build an image
+# from it, never committed. The tracked rig that consumes it is tests/interop/, which
+# skips itself when this tree is absent. See docs/interop-docker-tests.md.
+/lugdunum-eserver/
+
 # Local configuration and secrets (e.g. enode.local.yaml)
 *.local.*
 *.local

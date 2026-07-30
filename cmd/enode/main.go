@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"enode/config"
 	"enode/ed2k"
 	"enode/logging"
+	"enode/netfilter"
 	"enode/storage"
 )
 
@@ -229,13 +231,50 @@ func run(ctx context.Context, configPath string) error {
 			// dispatcher too, or the server clears the flag and keeps answering.
 			GetSources:     cfg.UDP.GetSources,
 			GetFiles:       cfg.UDP.GetFiles,
-			UDPPortObf:     cfg.UDP.PortObfuscated,
+			UDPPortObf:     advertisedUDPObfPort(cfg),
 			TCPPortObf:     cfg.TCP.PortObfuscated,
 			UDPServerKey:   cfg.UDP.ServerKey,
 			MaxConnections: uint32(cfg.TCP.MaxConnections),
 		},
 		engine,
 	)
+
+	// Access filters: ipfilter.dat ranges and MaxMind country blocking. A blocked address
+	// is dropped before any wire parsing on both transports.
+	//
+	// A missing ipfilter file is fatal — the operator named it, and silently serving
+	// everyone they meant to block is the wrong failure mode. A missing GeoIP database is
+	// not: it depends on a download from a third party, so it degrades to "no country
+	// matching" and says so in the log. See docs/access-filters.md.
+	accessFilter, err := netfilter.New(ctx, netfilter.Config{
+		IPFilterEnabled:       cfg.Filter.IPFilter.Enabled,
+		IPFilterFile:          cfg.IPFilterPath(),
+		IPFilterMinLevel:      cfg.Filter.IPFilter.MinLevel,
+		IPFilterReloadMinutes: cfg.Filter.IPFilter.ReloadMinutes,
+		GeoIPEnabled:          cfg.Filter.GeoIP.Enabled,
+		GeoIPDatabase:         cfg.GeoIPDatabasePath(),
+		BlockedCountries:      cfg.Filter.GeoIP.BlockedCountries,
+		Account:               maxmindAccount(cfg.Filter.GeoIP),
+		UpdateDays:            cfg.Filter.GeoIP.UpdateDays,
+	})
+	if err != nil {
+		return fmt.Errorf("access filter: %w", err)
+	}
+	if accessFilter != nil {
+		defer accessFilter.Close()
+		runtime.SetAccessFilter(accessFilter)
+	} else {
+		logging.Infof("access filters: disabled")
+	}
+
+	// The gossip peer table is attached here, before any listener binds: ServerRuntime's
+	// Gossip field is read without a lock by every accept and every datagram, so writing it
+	// once the listeners are live is a data race. Its sockets and timers start further
+	// down, once the main UDP socket the outbound loop sends from exists.
+	gossipHandler := buildGossipHandler(cfg, advertisedIP, serverIPv6)
+	if gossipHandler != nil {
+		runtime.SetGossipHandler(gossipHandler)
+	}
 
 	// Local admin status dashboard. Default on and bound to loopback; a bind
 	// failure is fatal because the operator asked for it. Static server facts are
@@ -269,13 +308,25 @@ func run(ctx context.Context, configPath string) error {
 			},
 			func() admin.LiveStats {
 				clients, files := runtime.Counts()
+				// Gossip.Stats() and accessFilter.Stats() are both nil-receiver safe and
+				// return zero values when the subsystem is off, so neither needs a branch.
+				gossip := gossipHandler.Stats()
+				blockedIP, blockedGeo := accessFilter.Stats()
 				return admin.LiveStats{
-					Clients:       clients,
-					Files:         files,
-					LowIDs:        int(runtime.LowIDs.Count()),
-					Servers:       runtime.Storage.ServersCount(),
-					UptimeSeconds: int64(time.Since(startTime).Seconds()),
-					Time:          time.Now().Format(time.RFC3339),
+					Clients: clients,
+					Files:   files,
+					LowIDs:  int(runtime.LowIDs.Count()),
+					// What a client is actually sent, not Storage.ServersCount(): the latter
+					// counts only configured peers and reads 0 for everything gossip learns.
+					Servers:          runtime.AdvertisedServerCount(),
+					UptimeSeconds:    int64(time.Since(startTime).Seconds()),
+					Time:             time.Now().Format(time.RFC3339),
+					GossipKnown:      gossip.Known,
+					GossipVerified:   gossip.Verified,
+					GossipParked:     gossip.Parked,
+					GossipAdmitted:   gossip.Admitted,
+					FilterBlockedIP:  blockedIP,
+					FilterBlockedGeo: blockedGeo,
 				}
 			},
 		)
@@ -291,12 +342,22 @@ func run(ctx context.Context, configPath string) error {
 		logging.Infof("admin dashboard: disabled")
 	}
 
-	ln, err := ed2k.RunTCPServer(tcpCfg, runtime.TCPHandler(false))
+	// Obfuscation is enabled on the *plaintext* listener too, which is what eserver does:
+	// its portTCPOBF defaults to the value of `port`, so obfuscated TCP shares the
+	// plaintext socket and is detected from the first bytes on the wire. Running the real
+	// binary, `print` reports portTCPOBF=4661 against port=4661, and eMule agrees —
+	// srchybrid/UDPSocket.cpp:394 falls back to nTCPObfuscationPort = pServer->GetPort().
+	//
+	// Additive, not a behaviour change for existing clients: handleBytes sniffs the first
+	// byte with IsProtocol and falls through to normal parsing for a plaintext frame (the
+	// H4 fix), so a plaintext login on this port still works exactly as before. The
+	// separate tcp.portObfuscated listener stays bound for clients pinned to it.
+	ln, err := ed2k.RunTCPServer(tcpCfg, runtime.TCPHandler(cfg.SupportCrypt))
 	if err != nil {
 		return fmt.Errorf("tcp server failed: %w", err)
 	}
 	defer ln.Close()
-	logging.Infof("listening: tcp %s:%d", tcpCfg.Address, tcpCfg.Port)
+	logging.Infof("listening: tcp %s:%d (obfuscation accepted: %t)", tcpCfg.Address, tcpCfg.Port, cfg.SupportCrypt)
 
 	udpMainHandler := runtime.UDPHandler(false)
 	if cfg.NAT.Enabled {
@@ -361,6 +422,9 @@ func run(ctx context.Context, configPath string) error {
 	defer udpConn.Close()
 	logging.Infof("listening: udp %s:%d", udpCfg.Address, udpCfg.Port)
 
+	// obfUDPConn is the tcp+12 obfuscated socket, kept in scope because gossip sends from
+	// it (see the gossip block below).
+	var obfUDPConn *net.UDPConn
 	if cfg.SupportCrypt {
 		tcpCryptCfg := tcpCfg
 		tcpCryptCfg.Port = cfg.TCP.PortObfuscated
@@ -379,12 +443,249 @@ func run(ctx context.Context, configPath string) error {
 			return fmt.Errorf("obfuscated udp server failed: %w", err)
 		}
 		defer udpConnCrypt.Close()
+		obfUDPConn = udpConnCrypt
 		logging.Infof("listening: udp-obfuscated %s:%d", udpCryptCfg.Address, udpCryptCfg.Port)
+	}
+
+	// Server-to-server gossip normally sends from the tcp+12 obfuscated socket above
+	// rather than a socket of its own, because two of eserver's rules have to hold
+	// together: the source port of our obfuscated frames must equal the portUDPOBF we
+	// advertise ("continue because portUDPobf(%d) != sin_port(%d)"), and it recovers our
+	// TCP port from that source port by subtracting 12. Only tcp+12 satisfies both — from
+	// tcp+14 it books our frames against a server that does not exist and never counts us
+	// as working. See config.setDefaults and docs/server-gossip.md §8.
+	//
+	// A separate socket is still bound when the operator sets a different udp.portGossip,
+	// or when obfuscation is off and there is therefore no tcp+12 socket to share.
+	//
+	// The handler itself was attached to the runtime before any listener bound (see
+	// buildGossipHandler above); only the sockets and timers start here. Nothing below
+	// writes a ServerRuntime field.
+	if gossipHandler != nil {
+		gossipConn := obfUDPConn
+		if gossipConn == nil || cfg.UDP.PortGossip != cfg.UDP.PortObfuscated {
+			gossipUDPCfg := udpCfg
+			gossipUDPCfg.Port = cfg.UDP.PortGossip
+			conn, err := ed2k.RunUDPServer(gossipUDPCfg, runtime.UDPHandler(true))
+			if err != nil {
+				return fmt.Errorf("gossip udp server failed: %w", err)
+			}
+			defer conn.Close()
+			gossipConn = conn
+			logging.Infof("listening: udp-gossip %s:%d", gossipUDPCfg.Address, gossipUDPCfg.Port)
+		} else {
+			logging.Infof("gossip shares the obfuscated udp socket on port %d (Lugdunum reads a peer's TCP port as this minus 12)",
+				cfg.UDP.PortGossip)
+		}
+
+		stopGossip := startGossipLoops(ctx, cfg, gossipHandler, udpConn, gossipConn)
+		defer stopGossip()
 	}
 
 	<-ctx.Done()
 	logging.Infof("shutdown signal received, stopping")
 	return nil
+}
+
+// buildGossipHandler creates the peer table and seeds it, or returns nil when gossip is
+// disabled.
+//
+// Separate from startGossipLoops, and called before any listener binds, because
+// ServerRuntime's Gossip field is read by every accept and every datagram without a lock.
+// Attaching it after the listeners are live is a genuine data race — the race detector
+// catches it — and the same pre-bind ordering is what SetNATHandler and SetAccessFilter
+// already rely on. The loops cannot start this early because phase 1 sends from the main
+// UDP socket, which does not exist yet.
+//
+// Seeding order mirrors eserver's: a persisted server.met wins, and the configured seeds
+// are the fallback for when that file is absent or empty. eserver documents
+// seedIP/seedPort as "used if no serverList.met file is present (or if it's empty)" for
+// the same reason — once a mesh is known, the operator's original bootstrap list is stale.
+func buildGossipHandler(cfg config.Config, advertisedIP string, serverIPv6 []byte) *ed2k.GossipHandler {
+	if !cfg.Gossip.EnabledOrDefault() {
+		logging.Infof("gossip: disabled, OP_SERVERLIST is served from the static servers list")
+		return nil
+	}
+
+	seeds := ed2k.GossipSeedsFromServers(configSeedsToServers(cfg.GossipSeeds()))
+	from := "config"
+	if cfg.Gossip.PersistOrDefault() {
+		metPath := cfg.ServerMetPath()
+		persisted, err := ed2k.ReadServerMet(metPath)
+		if err != nil {
+			// Not fatal. A corrupt or half-written peer file must not stop the server from
+			// booting — the configured seeds are a perfectly good starting point, and the
+			// next persistence tick overwrites the bad file.
+			logging.Warnf("gossip: cannot read %s, falling back to the configured seeds: %v", metPath, err)
+		} else if len(persisted) > 0 {
+			converted := make([]ed2k.PeerAddr, 0, len(persisted))
+			for _, e := range persisted {
+				converted = append(converted, ed2k.PeerAddr{IP: e.IP, Port: e.Port})
+			}
+			seeds, from = converted, metPath
+		}
+	}
+
+	gossipCfg := ed2k.GossipConfig{
+		SelfPort:          cfg.TCP.Port,
+		Name:              cfg.Name,
+		Desc:              cfg.Description,
+		MaxServers:        cfg.Gossip.MaxServers,
+		MaxFailures:       cfg.Gossip.MaxFailures,
+		AllowPrivatePeers: cfg.Gossip.AllowPrivatePeers,
+		PublishIPv6:       cfg.IPv6.EnabledOrDefault() && cfg.Gossip.PublishIPv6OrDefault(),
+		UDPPortObf:        cfg.UDP.PortGossip,
+		TCPPortObf:        cfg.TCP.PortObfuscated,
+	}
+	if ip := net.ParseIP(advertisedIP); ip != nil {
+		gossipCfg.SelfIPv4 = ip
+	}
+	if len(serverIPv6) == 16 {
+		gossipCfg.SelfIPv6 = net.IP(serverIPv6)
+	}
+
+	handler := ed2k.NewGossipHandler(gossipCfg, seeds)
+	// Register every address a peer could observe us on, so an echoed self-entry is
+	// recognised as us even when it is not the advertised IP — on a multi-homed or NATed
+	// host those differ, and re-ingesting the observed one is what recreates phantom
+	// self-entries.
+	handler.AddLocalIP(gossipCfg.SelfIPv4)
+	handler.AddLocalIP(gossipCfg.SelfIPv6)
+	for _, ip := range localInterfaceIPs() {
+		handler.AddLocalIP(ip)
+	}
+	logging.Infof("gossip: %d seed(s) from %s, interval %ds, maxServers %d, allowPrivatePeers=%t",
+		len(seeds), from, cfg.Gossip.IntervalSeconds, cfg.Gossip.MaxServers, cfg.Gossip.AllowPrivatePeers)
+	return handler
+}
+
+// startGossipLoops starts the per-seed round loop and the server.met persistence timer,
+// and returns a function that halts both. Touches only the handler, which carries its own
+// lock, so it is safe to call after the listeners are accepting.
+func startGossipLoops(
+	ctx context.Context,
+	cfg config.Config,
+	handler *ed2k.GossipHandler,
+	mainConn, gossipConn *net.UDPConn,
+) func() {
+	stopClient := handler.StartGossipClient(ed2k.GossipClientConfig{
+		Main:       mainConn,
+		Gossip:     gossipConn,
+		MainPort:   cfg.UDP.Port,
+		GossipPort: cfg.UDP.PortGossip,
+		Interval:   time.Duration(cfg.Gossip.IntervalSeconds) * time.Second,
+	})
+
+	stopPersist := func() {}
+	if cfg.Gossip.PersistOrDefault() {
+		stopPersist = startServerMetPersistence(ctx, cfg.ServerMetPath(),
+			time.Duration(cfg.Gossip.PersistIntervalSeconds)*time.Second, handler)
+	}
+	return func() {
+		stopClient()
+		stopPersist()
+	}
+}
+
+// startServerMetPersistence writes the verified peer table on a timer, and once more on
+// shutdown so a clean stop does not lose up to a full interval of learned peers.
+func startServerMetPersistence(ctx context.Context, path string, every time.Duration, handler *ed2k.GossipHandler) func() {
+	if every <= 0 {
+		every = 225 * time.Second
+	}
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		write := func() {
+			entries := handler.VerifiedEntries()
+			if len(entries) == 0 {
+				// Nothing verified yet. Deliberately not written: truncating a good file to
+				// zero entries because this boot has not finished its first handshake would
+				// throw away the mesh the file exists to preserve.
+				return
+			}
+			if err := ed2k.WriteServerMet(path, entries); err != nil {
+				logging.Warnf("gossip: cannot write %s: %v", path, err)
+				return
+			}
+			logging.Debugf("gossip: wrote %d verified peer(s) to %s", len(entries), path)
+		}
+		for {
+			select {
+			case <-ticker.C:
+				write()
+			case <-ctx.Done():
+				write()
+				return
+			case <-done:
+				write()
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
+}
+
+// advertisedUDPObfPort is the portUDPOBF value published at offset 32 of the extended
+// OP_GLOBSERVSTATRES.
+//
+// It must be the port gossip actually sends its obfuscated frames from, because a peer
+// checks our source port against this advertised value and skips us when the two disagree
+// — eserver logs exactly that: "continue because portUDPobf(%d) != sin_port(%d)". That
+// port is udp.portGossip, which defaults to the tcp+12 obfuscated socket for the reason
+// given in config.setDefaults: eserver also derives our TCP port from the same source port
+// by subtracting 12.
+//
+// This is one place we deliberately diverge from Lugdunum's own configuration. eserver
+// advertises portUDPOBF = port+14 while sending its obfuscated frames from port+12, so its
+// advertised value and its source port do not agree — a peer that enforced its own rule
+// against it would skip it. We publish the port we really use instead.
+//
+// With gossip off the client obfuscated port is published exactly as before.
+func advertisedUDPObfPort(cfg config.Config) uint16 {
+	if cfg.Gossip.EnabledOrDefault() && cfg.UDP.PortGossip != 0 {
+		return cfg.UDP.PortGossip
+	}
+	return cfg.UDP.PortObfuscated
+}
+
+// maxmindAccount converts the configured credentials, or nil when either half is
+// missing. Nil means "use only an existing local database and never contact MaxMind",
+// which is also what an operator gets by leaving both keys empty.
+func maxmindAccount(cfg config.GeoIPConfig) *netfilter.WebServiceAccount {
+	if !cfg.HasCredentials() {
+		return nil
+	}
+	return &netfilter.WebServiceAccount{AccountID: cfg.AccountID, LicenseKey: cfg.LicenseKey}
+}
+
+// configSeedsToServers adapts config entries to the storage.Server shape
+// GossipSeedsFromServers takes, so the config and server.met paths share one filter.
+func configSeedsToServers(entries []config.ServerEntry) []storage.Server {
+	out := make([]storage.Server, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, storage.Server{IP: e.IP, Port: e.Port})
+	}
+	return out
+}
+
+// localInterfaceIPs enumerates this host's addresses, used only for gossip
+// self-rejection. Failure is silent: the advertised IP is already registered, so this is
+// a widening of the check rather than the check itself.
+func localInterfaceIPs() []net.IP {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	out := make([]net.IP, 0, len(addrs))
+	for _, a := range addrs {
+		if ipnet, ok := a.(*net.IPNet); ok && ipnet.IP != nil {
+			out = append(out, ipnet.IP)
+		}
+	}
+	return out
 }
 
 func startBackgroundProcess(args []string) (int, error) {

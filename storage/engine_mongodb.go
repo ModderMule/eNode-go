@@ -515,7 +515,7 @@ func (m *MongoDBEngine) FindBySearch(expr *SearchExpr) []File {
 		pipeline = append(pipeline, bson.D{{Key: "$sort", Value: bson.M{"sources": -1}}})
 	}
 	pipeline = append(pipeline,
-		bson.D{{Key: "$limit", Value: 255}},
+		bson.D{{Key: "$limit", Value: MaxSearchResults}},
 	)
 
 	cur, err := m.db.Collection("sources").Aggregate(ctx, pipeline, options.Aggregate().SetAllowDiskUse(true))

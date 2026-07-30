@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,12 +77,24 @@ type UDPRuntimeConfig struct {
 }
 
 type ServerRuntime struct {
-	TCP      TCPRuntimeConfig
-	UDP      UDPRuntimeConfig
-	Storage  storage.Engine
-	LowIDs   *LowIDClients
-	NAT      *NATTraversalHandler
+	TCP     TCPRuntimeConfig
+	UDP     UDPRuntimeConfig
+	Storage storage.Engine
+	LowIDs  *LowIDClients
+	NAT     *NATTraversalHandler
+	// Gossip is the server-to-server peer table, or nil when gossip is disabled. Every
+	// dispatch case that touches it is gated on nil, so a server with gossip off has
+	// exactly its previous behaviour.
+	Gossip *GossipHandler
+	// Filter refuses blocked addresses before any parsing, or nil to filter nothing.
+	Filter   AccessFilter
 	counters *counterCache
+	// sessionsMu guards sessionsByHash, which indexes logged-in connections by user hash
+	// so a PR_NAT keepalive can extend the matching eD2K session's idle deadline. Keyed on
+	// hash rather than ID because that is what the NAT registry knows; the LowIDs table is
+	// keyed on the assigned ID and so cannot answer this lookup.
+	sessionsMu     sync.RWMutex
+	sessionsByHash map[[16]byte]*tcpClient
 	// firewallProbe indirects the IPv4 dial-back so a test can drive both branches
 	// of the login ID decision without a reachable listener, and can assert that
 	// the decision short-circuits before dialling at all. nil selects the real
@@ -109,8 +122,52 @@ func NewServerRuntime(tcp TCPRuntimeConfig, udp UDPRuntimeConfig, store storage.
 	}
 }
 
+// AccessFilter decides whether a peer address may talk to this server at all. The
+// interface is declared here rather than imported so the protocol package gains no
+// dependency on the filter implementation (netfilter, which pulls in MaxMind) and so a
+// test can substitute a stub.
+//
+// Blocked is called before any wire parsing on both transports, so implementations must
+// be cheap and safe for concurrent use from every UDP worker and accept goroutine.
+type AccessFilter interface {
+	Blocked(ip net.IP) (bool, string)
+}
+
+// SetAccessFilter attaches the ipfilter/GeoIP layer. nil disables filtering, and both
+// call sites are nil-guarded, so an unfiltered server pays one interface comparison.
+func (s *ServerRuntime) SetAccessFilter(f AccessFilter) {
+	s.Filter = f
+}
+
+// blockedPeer reports whether an address is refused, with a reason for the log.
+func (s *ServerRuntime) blockedPeer(ip net.IP) (bool, string) {
+	if s.Filter == nil || ip == nil {
+		return false, ""
+	}
+	return s.Filter.Blocked(ip)
+}
+
 func (s *ServerRuntime) TCPHandler(enableCrypt bool) func(net.Conn) {
 	return func(conn net.Conn) {
+		// Filtered before newTCPClient, so a blocked address is closed without a byte
+		// being read or a session goroutine, status ticker or crypt state being created.
+		// Closing silently rather than sending OP_SERVERMESSAGE first is deliberate: the
+		// reply would cost a round trip to an address we have already decided not to
+		// serve, and it tells a scanner it found an eD2K server.
+		if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+			if blocked, reason := s.blockedPeer(NormalizeIP(tcpAddr.IP)); blocked {
+				logging.Debugf("tcp connection refused remote=%s reason=%s", tcpAddr.IP, reason)
+				_ = conn.Close()
+				return
+			}
+		}
+		// Record every accepted address so gossip can refuse to admit a client as a peer.
+		// Placed after the filter so a blocked address is not tracked at all.
+		if s.Gossip != nil {
+			if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+				s.Gossip.NoteClient(tcpAddr.IP)
+			}
+		}
 		client := newTCPClient(s, conn, enableCrypt)
 		client.run()
 	}
@@ -128,6 +185,66 @@ func (s *ServerRuntime) advertisedAddress() string {
 
 func (s *ServerRuntime) SetNATHandler(handler *NATTraversalHandler) {
 	s.NAT = handler
+	// Bridge PR_NAT keepalives to eD2K session liveness. Registered here rather than in
+	// main.go so the wiring cannot be forgotten when a NAT handler is attached.
+	handler.SetSessionTouch(s.TouchSessionByHash)
+}
+
+// registerSession indexes a logged-in connection by user hash. Called from handShake, so
+// only a session that actually completed login can be found.
+func (s *ServerRuntime) registerSession(hash []byte, client *tcpClient) {
+	if len(hash) != 16 {
+		return
+	}
+	var key [16]byte
+	copy(key[:], hash)
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	if s.sessionsByHash == nil {
+		s.sessionsByHash = make(map[[16]byte]*tcpClient)
+	}
+	s.sessionsByHash[key] = client
+}
+
+// unregisterSession removes the index entry, but only when it still points at this
+// connection.
+//
+// The identity check matters: a duplicate login is rejected rather than allowed
+// (see handleLoginRequest), but a reconnect after a stale session finally times out can
+// have the two overlap briefly. Deleting unconditionally would then let the departing
+// session unregister the live one, and the live client would silently lose keepalive-based
+// liveness for the rest of its session.
+func (s *ServerRuntime) unregisterSession(hash []byte, client *tcpClient) {
+	if len(hash) != 16 {
+		return
+	}
+	var key [16]byte
+	copy(key[:], hash)
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	if s.sessionsByHash[key] == client {
+		delete(s.sessionsByHash, key)
+	}
+}
+
+// TouchSessionByHash extends the idle deadline of the eD2K session belonging to a user
+// hash. Invoked when that user's PR_NAT keepalive arrives.
+//
+// This is what stops a share-only LowID client from being reaped: such a client publishes
+// its files, keeps its PR_NAT registration fresh so it stays punchable, and then sends no
+// TCP traffic at all. The read deadline (disconnectTimeout, 3600 s by default) would close
+// it and drop every source it offered, even though the keepalives prove it is reachable.
+//
+// Refreshing lastSeen in the NAT registry alone was not enough — that governs whether the
+// client can be *paired*, not whether its eD2K session survives.
+func (s *ServerRuntime) TouchSessionByHash(hash [16]byte) {
+	s.sessionsMu.RLock()
+	client := s.sessionsByHash[hash]
+	s.sessionsMu.RUnlock()
+	if client == nil {
+		return
+	}
+	client.touchDeadline()
 }
 
 // Counts returns the cached online-client and file totals — the same briefly
@@ -136,6 +253,18 @@ func (s *ServerRuntime) SetNATHandler(handler *NATTraversalHandler) {
 // that frequent polling cannot turn into a flood of COUNT(*) queries.
 func (s *ServerRuntime) Counts() (clients, files int) {
 	return s.counters.Counts()
+}
+
+// AdvertisedServerCount reports how many peer servers a client would receive in
+// OP_SERVERLIST right now.
+//
+// The admin dashboard reads this rather than Storage.ServersCount(), which counts only
+// the configured entries and so reports 0 for every peer gossip learns. Delegating to
+// advertisableServers keeps one definition of "a peer we are willing to publish" — the
+// count and the wire list cannot drift apart, including the deduplication between a
+// configured seed and the same address arriving over gossip.
+func (s *ServerRuntime) AdvertisedServerCount() int {
+	return len(s.advertisableServers())
 }
 
 func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, *net.UDPConn) {
@@ -147,6 +276,13 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 		if len(data) == 0 {
 			return
 		}
+		// Filtered first, ahead of NewUDPCrypt and any decryption or parsing. A blocked
+		// address therefore costs one binary search and nothing else — which is the whole
+		// point on a socket that can be flooded.
+		if blocked, reason := s.blockedPeer(NormalizeIP(remote.IP)); blocked {
+			logging.Debugf("udp datagram dropped remote=%s len=%d reason=%s", remote, len(data), reason)
+			return
+		}
 		// The obfuscation key is per-client, derived from the source IP (see
 		// deriveUDPKey). Built per datagram, not once per listener: the handler
 		// runs concurrently across a worker pool (udpserver.go), so a shared crypt
@@ -155,9 +291,26 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 		// agree. On the plaintext listener the crypt does no crypto but still
 		// carries the derived key for the stat reply to advertise.
 		crypt := NewUDPCrypt(enableCrypt, deriveUDPKey(s.UDP.UDPServerKey, remote.IP))
+		// Whether the datagram genuinely arrived obfuscated, recorded before Decrypt
+		// replaces the buffer. This is not the same question as "which listener is this":
+		// Decrypt deliberately passes a plaintext PR_ED2K frame straight through (so a
+		// plaintext login on the obfuscated port still works, the H4 fix), and it also
+		// returns the input unchanged when decryption fails. So a plaintext 0xA0 aimed at
+		// the gossip port would otherwise be indistinguishable from a properly obfuscated
+		// one — and for gossip that distinction *is* the authentication. A frame counts as
+		// obfuscated only if the listener does crypto, the first byte was not a protocol
+		// constant, and what came out is a well-formed eD2K frame.
+		arrivedPlaintext := data[0] == PrED2K
 		if crypt.Status == CsEncrypting {
 			data = crypt.Decrypt(data)
 		}
+		// Neither of a *peer server's* two reply shapes can be read by the decrypt above,
+		// so gossip needs two more attempts. Both key/direction pairs below were measured
+		// against eserver 17.14 rather than inferred — see docs/server-gossip.md.
+		if enableCrypt && !arrivedPlaintext && (len(data) == 0 || data[0] != PrED2K) && s.Gossip != nil {
+			data = s.decryptPeerReply(data, remote.IP)
+		}
+		obfuscated := enableCrypt && !arrivedPlaintext && len(data) > 0 && data[0] == PrED2K
 		if s.NAT != nil {
 			if data[0] == PrNat || len(data) == 1 {
 				s.NAT.HandlePacket(data, remote, conn, crypt)
@@ -229,10 +382,67 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 				return
 			}
 			s.udpGlobSearchReq3(b, remote, conn, crypt, module)
+
+		// Server-to-server gossip, each gated on the handler being present so a server
+		// with gossip disabled behaves exactly as before. The obfuscated flag is threaded
+		// down rather than inferred from the listener — see where it is computed above.
+		case OpServerListReq:
+			if !s.gossipOpcodeEnabled(code, remote, false) {
+				return
+			}
+			s.udpServerListReq(b, remote, conn, obfuscated, module)
+		case OpServerListRes:
+			if !s.gossipOpcodeEnabled(code, remote, false) {
+				return
+			}
+			s.udpServerListRes(b, remote, false, obfuscated, module)
+		case OpServerListReq2:
+			if !s.gossipOpcodeEnabled(code, remote, false) {
+				return
+			}
+			s.udpServerListReq2(remote, conn, false, obfuscated, module)
+		case OpServerListReqIPv6:
+			if !s.gossipOpcodeEnabled(code, remote, true) {
+				return
+			}
+			s.udpServerListReq2(remote, conn, true, obfuscated, module)
+		case OpServerListResIPv6:
+			if !s.gossipOpcodeEnabled(code, remote, true) {
+				return
+			}
+			s.udpServerListRes(b, remote, true, obfuscated, module)
+		case OpGlobServStatRes:
+			// A peer answering our probe. Clients never send this, so it is only ever
+			// server-to-server traffic.
+			if !s.gossipOpcodeEnabled(code, remote, false) {
+				return
+			}
+			s.udpGlobServStatRes(b, remote, module)
+		case OpServerDescRes:
+			// A peer answering our name/description probe — the admission test.
+			if !s.gossipOpcodeEnabled(code, remote, false) {
+				return
+			}
+			s.udpServerDescRes(b, remote, module)
 		default:
 			logging.Debugf("udp unknown opcode remote=%s opcode=0x%x", remote, code)
 		}
 	}
+}
+
+// gossipOpcodeEnabled gates a gossip opcode on the handler being attached, and on the
+// IPv6 extension being on for the 0xa7/0xa8 pair. Mirrors udpOpcodeEnabled: the decision
+// and its log line live in one place rather than being repeated at each case.
+func (s *ServerRuntime) gossipOpcodeEnabled(code uint8, remote *net.UDPAddr, needIPv6 bool) bool {
+	if s.Gossip == nil {
+		logging.Debugf("udp gossip opcode ignored, gossip disabled remote=%s opcode=0x%x", remote, code)
+		return false
+	}
+	if needIPv6 && !s.Gossip.Config().PublishIPv6 {
+		logging.Debugf("udp gossip opcode ignored, publishIPv6 off remote=%s opcode=0x%x", remote, code)
+		return false
+	}
+	return true
 }
 
 type tcpClient struct {
@@ -266,6 +476,17 @@ type tcpClient struct {
 	info     storage.ClientInfo
 	logged   bool
 	hasLowID bool
+
+	// pendingResults holds the tail of a search whose first page has been sent, so
+	// OP_QUERY_MORE_RESULT can deliver the rest. Only this connection's own goroutine
+	// touches them — search and the More request both arrive on this socket — so no lock
+	// is needed, unlike the fields above which the status ticker and peer callbacks read.
+	//
+	// Held rather than re-queried because eMule's More request carries no payload at all
+	// (srchybrid/SearchResultsWnd.cpp:1282): there is nothing to re-run the query from.
+	// Bounded by storage.MaxSearchResults, so the memory a session can pin this way is
+	// bounded too.
+	pendingResults []storage.File
 
 	closeReason string
 }
@@ -374,6 +595,7 @@ func (c *tcpClient) run() {
 			c.server.LowIDs.Remove(info.ID)
 		}
 		if wasLogged {
+			c.server.unregisterSession(info.Hash, c)
 			c.server.Storage.Disconnect(info)
 		}
 		_ = c.conn.Close()
@@ -528,8 +750,16 @@ func (c *tcpClient) handleED2K(opcode uint8, data *Buffer) {
 		}
 	case OpSearchRequest:
 		c.handleSearchRequest(data)
+	case OpQueryMoreResult:
+		c.handleQueryMoreResult()
 	case OpCallbackRequest:
 		c.handleCallbackRequest(data)
+	case OpDisconnect:
+		// eMule sends this before closing. Acting on it releases the session, its LowID
+		// and its storage row immediately instead of after the read loop notices the FIN —
+		// and, more usefully, instead of after disconnectTimeout for a client whose socket
+		// dies without one. Empty payload.
+		c.closeWithReason("client-disconnect")
 	default:
 		logging.Debugf("tcp unhandled opcode remote=%s opcode=0x%x", c.remoteHost, opcode)
 	}
@@ -697,12 +927,33 @@ func (c *tcpClient) handShake() {
 	info := c.snapshotInfo()
 	logging.Infof("login handshake complete remote=%s storeID=%d id=%d lowID=%t", c.remoteHost, info.StoreID, info.ID, info.LowID)
 
+	// Indexed by user hash so a PR_NAT keepalive from this client can keep its session
+	// alive. Removed in run()'s defer.
+	c.server.registerSession(info.Hash, c)
+
 	c.sendServerMessage(c.server.TCP.MessageLogin)
 	c.sendServerMessage(fmt.Sprintf("server version %s (%s)", ENodeVersionStr, ENodeName))
 	c.sendServerStatus()
 	c.startPeriodicServerStatus()
 	c.sendIDChange(info.ID)
 	c.sendServerIdent()
+}
+
+// touchDeadline pushes the read deadline out by DisconnectTimeout, treating out-of-band
+// activity (a PR_NAT keepalive) as if a byte had arrived on the socket.
+//
+// Called from the NAT UDP worker pool, not this connection's own goroutine, so it takes
+// writeMu. That mutex already serialises socket operations against the status ticker and
+// peer callbacks, and SetReadDeadline is exactly such an operation — the read loop's own
+// SetReadDeadline is the one place it is touched without the lock, and that is safe
+// because a deadline set slightly early only costs one extra loop iteration.
+func (c *tcpClient) touchDeadline() {
+	if c.server.TCP.DisconnectTimeout <= 0 {
+		return
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_ = c.conn.SetReadDeadline(time.Now().Add(c.server.TCP.DisconnectTimeout))
 }
 
 func (c *tcpClient) setCloseReason(reason string) {
@@ -872,7 +1123,37 @@ func (c *tcpClient) handleSearchRequest(data *Buffer) {
 	// that reaches eMule's LocalEd2kSearchEnd, which is what cancels the 50 s
 	// local-search timer — on silence the client sits in "Searching…" for the
 	// full timeout and then gives up without ever showing "0 results".
-	c.sendSearchResult(files)
+	c.sendSearchPage(files)
+}
+
+// handleQueryMoreResult answers OP_QUERY_MORE_RESULT (0x21) with the next page of the
+// last search. Empty payload — eMule's More button sends nothing but the opcode — so the
+// remaining results have to have been kept from the original query.
+//
+// A request with nothing pending gets an empty result page rather than silence. Silence
+// would leave the client's search UI waiting on its local timer, which is the same
+// failure the zero-result reply above exists to avoid.
+func (c *tcpClient) handleQueryMoreResult() {
+	if len(c.pendingResults) == 0 {
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_QUERY_MORE_RESULT pending=0", c.remoteHost)
+		c.sendSearchResult(nil, false)
+		return
+	}
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_QUERY_MORE_RESULT pending=%d",
+		c.remoteHost, len(c.pendingResults))
+	c.sendSearchPage(c.pendingResults)
+}
+
+// sendSearchPage sends the first storage.MaxSearchPage of files, keeps the remainder for
+// OP_QUERY_MORE_RESULT, and sets the more-results flag accordingly.
+func (c *tcpClient) sendSearchPage(files []storage.File) {
+	page, rest := files, []storage.File(nil)
+	if len(files) > storage.MaxSearchPage {
+		page, rest = files[:storage.MaxSearchPage], files[storage.MaxSearchPage:]
+	}
+	// Assigned before the send so a write error cannot leave a stale page pending.
+	c.pendingResults = rest
+	c.sendSearchResult(page, len(rest) > 0)
 }
 
 func (c *tcpClient) handleCallbackRequest(data *Buffer) {
@@ -946,8 +1227,8 @@ func (c *tcpClient) sendFoundSources(hash []byte, sources []storage.Source, obfu
 	_ = c.writePacket(packet)
 }
 
-func (c *tcpClient) sendSearchResult(files []storage.File) {
-	packet, err := BuildSearchResultPacket(files)
+func (c *tcpClient) sendSearchResult(files []storage.File, moreAvailable bool) {
+	packet, err := BuildSearchResultPacket(files, moreAvailable)
 	if err != nil {
 		return
 	}
@@ -955,7 +1236,7 @@ func (c *tcpClient) sendSearchResult(files []storage.File) {
 }
 
 func (c *tcpClient) sendServerList() {
-	servers := c.server.Storage.ServersAll()
+	servers := c.server.advertisableServers()
 	// Append the IPv6 peer-server block under the same switch that gates every
 	// other outbound v6 wire extension (the source sentinel, the 0x26 callback).
 	packet, err := BuildServerListPacket(servers, c.server.publishV6Sources())
@@ -963,6 +1244,46 @@ func (c *tcpClient) sendServerList() {
 		return
 	}
 	_ = c.writePacket(packet)
+}
+
+// advertisableServers is the peer list clients receive in OP_SERVERLIST: the operator's
+// configured entries plus every peer gossip has verified.
+//
+// Configured entries are always included. An operator who names a peer has asserted it
+// exists, and dropping it because a handshake has not completed yet would make the list
+// empty for the first few minutes after every restart — and permanently empty for a
+// server whose peers are all behind something that blocks the obfuscated ports.
+//
+// Gossip contributes verified peers only: an unverified entry is one we have proved
+// nothing about, and publishing it to clients would spread addresses we cannot vouch
+// for. With gossip disabled this returns exactly what it always did.
+func (s *ServerRuntime) advertisableServers() []storage.Server {
+	configured := s.Storage.ServersAll()
+	if s.Gossip == nil {
+		return configured
+	}
+	verified := s.Gossip.Verified()
+	out := make([]storage.Server, 0, len(configured)+len(verified))
+	seen := make(map[string]struct{}, len(configured)+len(verified))
+	for _, sv := range configured {
+		key := sv.IP + ":" + strconv.Itoa(int(sv.Port))
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, sv)
+	}
+	for _, p := range verified {
+		// Keyed on the canonical string form of the parsed address so a configured
+		// "1.2.3.4" and a gossiped 1.2.3.4 collapse rather than appearing twice.
+		key := p.IP.String() + ":" + strconv.Itoa(int(p.Port))
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, storage.Server{IP: p.IP.String(), Port: p.Port})
+	}
+	return out
 }
 
 func (c *tcpClient) sendServerStatus() {
@@ -1642,7 +1963,7 @@ func (s *ServerRuntime) udpGlobServStatReq(b *Buffer, remote *net.UDPAddr, conn 
 	if err != nil {
 		return
 	}
-	packet, err := s.buildStatRes(challenge, crypt.ServerKey)
+	packet, err := s.buildStatRes(challenge, crypt.ServerKey, remote)
 	if err != nil {
 		return
 	}
@@ -1655,8 +1976,16 @@ func (s *ServerRuntime) udpGlobServStatReq(b *Buffer, remote *net.UDPAddr, conn 
 // the client adopts it for its own obfuscated traffic. The counts are cached:
 // both callers are unauthenticated and unthrottled, so serving them straight
 // from the database made a status flood cost two full table scans per datagram.
-func (s *ServerRuntime) buildStatRes(challenge uint32, udpKey uint32) (*Buffer, error) {
+//
+// remote supplies the observed address reflected in the 4 trailing bytes — the field
+// Lugdunum already sends and eMule discards. Taken from the socket, never from anything
+// the requester claimed, which is the same rule OP_IDCHANGE's observed-IP field follows.
+func (s *ServerRuntime) buildStatRes(challenge uint32, udpKey uint32, remote *net.UDPAddr) (*Buffer, error) {
 	clients, files := s.counters.Counts()
+	var observed net.IP
+	if remote != nil {
+		observed = NormalizeIP(remote.IP)
+	}
 	return BuildGlobServStatResPacket(challenge, UDPConfig{
 		Name:           s.UDP.Name,
 		Description:    s.UDP.Description,
@@ -1666,6 +1995,7 @@ func (s *ServerRuntime) buildStatRes(challenge uint32, udpKey uint32) (*Buffer, 
 		TCPPortObf:     s.UDP.TCPPortObf,
 		UDPServerKey:   udpKey,
 		MaxConnections: s.UDP.MaxConnections,
+		ObservedIP:     observed,
 	}, clients, files, int(s.LowIDs.Count()))
 }
 
@@ -1686,7 +2016,7 @@ func (s *ServerRuntime) udpCryptPingReply(data []byte, remote *net.UDPAddr, conn
 		// would be unusable — treat it as junk.
 		return
 	}
-	packet, err := s.buildStatRes(challenge, udpKey)
+	packet, err := s.buildStatRes(challenge, udpKey, remote)
 	if err != nil {
 		return
 	}

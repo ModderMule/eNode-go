@@ -38,6 +38,50 @@ const (
 	OpGlobFoundSources uint8 = 0x9b
 	OpServerDescReq    uint8 = 0xa2
 	OpServerDescRes    uint8 = 0xa3
+	OpDisconnect       uint8 = 0x18
+	// OpQueryMoreResult is the client's "More" button: an empty-payload request for the
+	// next page of a search whose reply set the more-results flag
+	// (srchybrid/SearchResultsWnd.cpp:1282).
+	OpQueryMoreResult uint8 = 0x21
+)
+
+// Server-to-server gossip opcodes (srchybrid/Opcodes.h:201-205). These are the
+// classic Lugdunum peer-exchange set, carried over UDP under PR_ED2K:
+//
+//	OpServerListReq  (0xa0)  "register me" — <ip 4 network order><port 2 LE>, and
+//	                         Lugdunum treats it as an implicit list request too.
+//	OpServerListRes  (0xa1)  the peer list — <count 1> then count × (<ip 4><port 2 LE>).
+//	OpServerListReq2 (0xa4)  explicit "send me your list", empty payload.
+//
+// Both 0xa0 and 0xa1 are accepted only from the obfuscated gossip channel: the
+// original binary logs "ignore non obfuscated OP_SERVER_LIST_REQ/_RES from %s" and
+// drops the plaintext forms. 0xa1 is also overloaded — mldonkey *clients* emit it
+// with an unrelated payload — so it is never trusted from a sender that has not
+// completed the handshake (eserver: "received a servlist from unknown server %s:%d").
+const (
+	OpServerListReq  uint8 = 0xa0
+	OpServerListRes  uint8 = 0xa1
+	OpServerListReq2 uint8 = 0xa4
+)
+
+// IPv6 gossip opcodes (eNode-go extension). Lugdunum's OP_SERVER_LIST_RES is
+// strictly IPv4 — <count 1> then count × (<ip 4><port 2>) — with no version field
+// and no room to widen it, so IPv6 peers travel in their own request/response pair
+// and 0xa1 stays byte-identical to what a real eserver emits.
+//
+//	OpServerListReqIPv6 (0xa7)  empty payload, the v6 analogue of 0xa4.
+//	OpServerListResIPv6 (0xa8)  <count 1> then count × (<ipv6 16 network order><port 2 LE>).
+//
+// 0xa7/0xa8 are free in the *server↔client* namespace: srchybrid/Opcodes.h ends that
+// block at OP_SERVER_LIST_REQ2 0xa4, and the OP_FWCHECKUDPREQ 0xa7 /
+// OP_KAD_FWTCPCHECK_ACK 0xa8 at :283-284 live in the separate client↔client block.
+// That is the same reasoning that allocated OpGlobGetSourcesIPv6 0xa5 / 0xa6 above,
+// which likewise coexist with client↔client OP_CHATCAPTCHAREQ/RES. Sent only to a
+// peer that advertised FlagIPv6 in its OP_GLOBSERVSTATRES udpflags, so a stock
+// eserver never sees them.
+const (
+	OpServerListReqIPv6 uint8 = 0xa7
+	OpServerListResIPv6 uint8 = 0xa8
 )
 
 // IPv6 source-exchange opcodes (eNode-go extension).

@@ -1,0 +1,35 @@
+# Lugdunum eserver 17.14 (2007) for the interop rig — the arbiter for every wire-level
+# claim in docs/server-gossip.md.
+#
+# The build context is staged in a temp directory by the Go test, which copies this file,
+# entrypoint.eserver.sh, donkey.ini.tmpl and the ELF out of the gitignored
+# lugdunum-eserver/run/ tree. That indirection exists because a Dockerfile has to live
+# inside its own context, and the binaries must not be committed.
+#
+# THE 32-BIT BUILD UNDER qemu-i386 IS NOT OPTIONAL. Three emulation facts, all measured:
+#   1. Rosetta cannot run it at all — eserver calls the deprecated _sysctl syscall (156)
+#      before main(), which Rosetta aborts on. So the image stays native to the host arch
+#      and uses QEMU user-mode emulation, which returns -ENOSYS instead of trapping.
+#   2. qemu-x86_64 survives startup and then takes a SIGSEGV on the first inbound packet.
+#      qemu-i386 running the 32-bit build does not.
+#   3. noepoll=true and tcpthreads=1 are mandatory under QEMU (see donkey.ini.tmpl).
+FROM debian:stable-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends qemu-user-static ca-certificates iproute2 \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /eserver
+
+COPY eserver.i686 /eserver/eserver
+COPY donkey.ini.tmpl /eserver/donkey.ini.tmpl
+COPY entrypoint.eserver.sh /usr/local/bin/entrypoint.sh
+RUN chmod 755 /eserver/eserver /usr/local/bin/entrypoint.sh
+
+# TCP: 4661 client sessions AND obfuscated TCP — portTCPOBF defaults to `port`, it is not
+#      a separate listener.   5656 nbuser admin listener.
+# UDP: 4661 Overnet backcall   4665 main (port+4)   4669 wrong-port detect (port+8)
+#      4673 obfuscated bootstrap ping (port+12)   4675 portUDPOBF, gossip (port+14)
+EXPOSE 4661/tcp 4661/udp 4665/udp 4669/udp 4673/udp 4675/udp
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

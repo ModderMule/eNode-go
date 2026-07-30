@@ -45,11 +45,73 @@ udp:
   # only source port it accepts the reply from on first contact. See
   # docs/server-udp-crypt-ping.md.
   portObfuscated: 5567
+  # The port obfuscated server-to-server frames are sent from, and the portUDPOBF value
+  # published to peers. Defaults to portObfuscated above, which is then shared rather
+  # than bound twice — and tcp.port+12 is forced, not preferred: Lugdunum recovers a
+  # peer's TCP port from this source port by subtracting 12, so a frame sent from
+  # tcp.port+14 is filed against a server that does not exist and we never count as one
+  # of its "working" servers. Change it only for a peer known to want something else.
+  # See docs/server-gossip.md.
+  portGossip: 5567
   getSources: true
   getFiles: true
   # Server-wide secret: each client's UDP obfuscation key is derived from this
   # seed + the client's IP (not sent verbatim). See docs/server-udp-crypt-ping.md.
   serverKey: 305419896
+
+# Server-to-server gossip: the Lugdunum OP_SERVER_LIST_REQ/RES handshake. When on,
+# this server registers itself with each seed, harvests their peer lists, and answers
+# other servers' requests — so OP_SERVERLIST is populated from the live network
+# instead of only from the static `servers:` list above. See docs/server-gossip.md.
+gossip:
+  enabled: true
+  # Servers to bootstrap from. Empty falls back to the top-level `servers:` list, so
+  # no new keys are needed to participate.
+  seeds: []
+  # How often each peer is re-contacted. Lugdunum's own keepalive is ~165 s, so 150
+  # keeps our entry from lapsing on a peer between rounds.
+  intervalSeconds: 150
+  maxServers: 4096      # eserver's maxservers default; a DoS guard, not a tuning knob
+  maxFailures: 5        # consecutive failed rounds before a peer is parked
+  publishIPv6: true     # use the OP_SERVER_LIST_*_IPV6 (0xa7/0xa8) extension
+  # Permit LAN/loopback peers — eMule's FilterLANIPs preference, inverted. Off by
+  # default. Turn it on to gossip with a server on this host or LAN (including the
+  # Lugdunum reference container), which is otherwise rejected outright.
+  allowPrivatePeers: false
+  # Persist verified peers so a restart does not have to re-earn the mesh. Mirrors
+  # eserver's autoservlist. Written by the server, hence under data/.
+  persist: true
+  serverMetFile: "data/server.met"
+  persistIntervalSeconds: 225
+
+# Access filters: who may talk to this server at all. A blocked address is dropped
+# before any wire parsing, on both TCP and UDP. Both halves are off by default —
+# each needs operator-supplied data no default can invent. See docs/access-filters.md.
+filter:
+  # Static range list in the eMule/guarding.p2p ipfilter.dat format (eserver's
+  # ipfilter.srv netmask form is also accepted). Operator-supplied, so not under data/.
+  ipfilter:
+    enabled: false
+    file: "ipfilter.dat"
+    # A range is blocked when its level is *below* this value — the convention is
+    # inverted, so raising this blocks more. 100 is eMule's default.
+    minLevel: 100
+    reloadMinutes: 30   # re-read the file on a timer; 0 disables reloading
+  # Country blocking from a MaxMind GeoLite2 database. A deny-list: an address that
+  # resolves to no country is never blocked.
+  geoip:
+    enabled: false
+    # Downloaded and refreshed by the server, hence under data/.
+    database: "data/GeoLite2-Country.mmdb"
+    blockedCountries: []          # ISO 3166-1 alpha-2 codes, e.g. ["CN", "RU"]
+    # MaxMind download credentials. Leave both empty to use only an existing local
+    # database and never contact MaxMind. Put real values in enode.local.yaml, which
+    # is gitignored — do not commit them here.
+    accountID: ""
+    licenseKey: ""
+    # GeoLite2-Country is republished weekly. The check is conditional on the current
+    # file's MD5, so an unchanged database transfers nothing.
+    updateDays: 7
 
 natTraversal:
   enabled: true

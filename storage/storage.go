@@ -12,6 +12,21 @@ import (
 // wire-format ceiling, not a tuning knob.
 const MaxWireSources = 255
 
+// MaxSearchResults is the most files FindBySearch may return for one query.
+//
+// Unlike MaxWireSources this *is* a tuning knob: OP_SEARCHRESULT carries its count in a
+// uint32, so nothing on the wire forces a limit. Every engine previously capped at 255,
+// which happened to equal the page size — so a deeper result set was silently truncated
+// with no way for a client to ask for the rest. Now that OP_QUERY_MORE_RESULT paging
+// exists the fetch ceiling and the page size are separate concerns, and this is the
+// former. For scale, Lugdunum's own maxSearchCount defaults to 300.
+const MaxSearchResults = 1000
+
+// MaxSearchPage is how many results go in one OP_SEARCHRESULT packet. Kept at the
+// historical 255 so a single reply is byte-for-byte the size it always was; the rest of
+// the set is delivered through OP_QUERY_MORE_RESULT.
+const MaxSearchPage = 255
+
 type ClientInfo struct {
 	ID    uint32
 	IPv4  uint32
@@ -272,7 +287,7 @@ func (m *MemoryEngine) FindBySearch(expr *SearchExpr) []File {
 	for _, f := range m.files {
 		if MatchSearchExpr(expr, f) {
 			out = append(out, f)
-			if len(out) >= 255 {
+			if len(out) >= MaxSearchResults {
 				break
 			}
 		}

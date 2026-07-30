@@ -449,6 +449,10 @@ func tagName(code uint8) string {
 		return "type"
 	case TagFormat:
 		return "format"
+	case TagDescription:
+		// ST_DESCRIPTION. Named here because server.met entries carry it (see
+		// ReadServerMet) and the numeric fallback "0xb" is a fragile thing to key on.
+		return "description"
 	case TagVersion:
 		return "version"
 	case TagPort:

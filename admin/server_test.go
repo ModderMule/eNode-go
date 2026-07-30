@@ -30,12 +30,18 @@ func testServer(t *testing.T) (string, LiveStats) {
 		ServerIndependent: true,
 	}
 	live := LiveStats{
-		Clients:       42,
-		Files:         1337,
-		LowIDs:        7,
-		Servers:       3,
-		UptimeSeconds: 90,
-		Time:          "2026-07-22T10:00:00Z",
+		Clients:          42,
+		Files:            1337,
+		LowIDs:           7,
+		Servers:          3,
+		UptimeSeconds:    90,
+		Time:             "2026-07-22T10:00:00Z",
+		GossipKnown:      5,
+		GossipVerified:   2,
+		GossipParked:     1,
+		GossipAdmitted:   19,
+		FilterBlockedIP:  64,
+		FilterBlockedGeo: 8,
 	}
 	s := New(Config{}, static, func() LiveStats { return live })
 	ts := httptest.NewServer(s.http.Handler)
@@ -68,6 +74,25 @@ func TestStatsJSONReturnsSnapshot(t *testing.T) {
 	if got != want {
 		t.Errorf("stats=%+v, want %+v", got, want)
 	}
+
+	// The JSON key names are a consumed contract, not an internal detail: the dashboard
+	// script reads them, and tests/interop polls gossipVerified to decide when a handshake
+	// has completed. Round-tripping through LiveStats above would keep passing after a
+	// rename, so the wire names are asserted against the raw object.
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("decode raw JSON: %v", err)
+	}
+	for _, key := range []string{
+		"clients", "files", "lowIDs", "servers", "uptimeSeconds", "time",
+		"gossipKnown", "gossipVerified", "gossipParked", "gossipAdmitted",
+		"filterBlockedIP", "filterBlockedGeo",
+	} {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("stats.json missing key %q", key)
+		}
+	}
+	t.Logf("output: %d keys, gossipVerified=%v servers=%v", len(raw), raw["gossipVerified"], raw["servers"])
 }
 
 func TestIndexRendersStaticOnly(t *testing.T) {
@@ -93,7 +118,10 @@ func TestIndexRendersStaticOnly(t *testing.T) {
 		}
 	}
 	// Placeholder elements the script fills must be present.
-	for _, id := range []string{`id="clients"`, `id="files"`, `id="lowIDs"`, `id="servers"`, `id="uptime"`} {
+	for _, id := range []string{
+		`id="clients"`, `id="files"`, `id="lowIDs"`, `id="servers"`, `id="uptime"`,
+		`id="gossip"`, `id="blocked"`, `id="blockedBreak"`,
+	} {
 		if !strings.Contains(html, id) {
 			t.Errorf("index HTML missing placeholder element %s", id)
 		}

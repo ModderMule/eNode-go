@@ -3,11 +3,24 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"enode/storage"
+	"enode/tests"
 	"gopkg.in/yaml.v3"
 )
+
+// DataDir holds everything the server *writes* — the gossip server.met, the
+// downloaded GeoIP database. Config files, the MySQL DDL and operator-supplied
+// filter lists stay in the repo root, so a `git status` is never noisy with runtime
+// state and `data/` can be gitignored wholesale.
+//
+// Paths under it are resolved through tests.FixRelativeTestingPath (see
+// ResolveDataPath), which walks up to the go.mod directory. That makes a relative
+// path mean the same thing whether the server was started from the repo root or a
+// test is running from a package subdirectory.
+const DataDir = "data"
 
 type Config struct {
 	Name         string   `yaml:"name"`
@@ -36,11 +49,13 @@ type Config struct {
 	AuxiliarPort bool `yaml:"auxiliarPort"`
 	IPInLogin    bool `yaml:"IPinLogin"`
 
-	TCP   TCPConfig   `yaml:"tcp"`
-	UDP   UDPConfig   `yaml:"udp"`
-	NAT   NATConfig   `yaml:"natTraversal"`
-	IPv6  IPv6Config  `yaml:"ipv6"`
-	Admin AdminConfig `yaml:"admin"`
+	TCP    TCPConfig    `yaml:"tcp"`
+	UDP    UDPConfig    `yaml:"udp"`
+	NAT    NATConfig    `yaml:"natTraversal"`
+	IPv6   IPv6Config   `yaml:"ipv6"`
+	Admin  AdminConfig  `yaml:"admin"`
+	Gossip GossipConfig `yaml:"gossip"`
+	Filter FilterConfig `yaml:"filter"`
 
 	Storage StorageConfig `yaml:"storage"`
 	Debug   DebugConfig   `yaml:"debug"`
@@ -81,8 +96,21 @@ type TCPConfig struct {
 type UDPConfig struct {
 	Port           uint16 `yaml:"port"`
 	PortObfuscated uint16 `yaml:"portObfuscated"`
-	GetSources     bool   `yaml:"getSources"`
-	GetFiles       bool   `yaml:"getFiles"`
+	// PortGossip is the socket obfuscated server-to-server frames are sent from, and the
+	// portUDPOBF value published to peers.
+	//
+	// It defaults to tcp.Port + 12 — the same socket as PortObfuscated, which is then
+	// shared rather than bound twice. tcp+12 is not a free choice: Lugdunum derives a
+	// peer's TCP port from the UDP source port of an obfuscated frame by subtracting 12,
+	// so a frame we send from any other port is attributed to a server that does not
+	// exist. Measured, see docs/server-gossip.md §8.
+	//
+	// Setting it to anything else binds a separate socket and advertises that port. Only
+	// do so for a peer implementation known to want it: against a real eserver it breaks
+	// the ping bookkeeping that decides whether we count as a "working" server.
+	PortGossip uint16 `yaml:"portGossip"`
+	GetSources bool   `yaml:"getSources"`
+	GetFiles   bool   `yaml:"getFiles"`
 	// ServerKey is a server-wide secret seed, not the key sent to clients: each
 	// client's UDP obfuscation key is derived from it plus the client's IP
 	// (ed2k.deriveUDPKey). See docs/server-udp-crypt-ping.md.
@@ -158,6 +186,113 @@ type AdminConfig struct {
 
 // EnabledOrDefault reports whether the admin dashboard is served, defaulting to true.
 func (c AdminConfig) EnabledOrDefault() bool { return boolOrDefault(c.Enabled, true) }
+
+// GossipConfig controls server-to-server peer exchange — the Lugdunum
+// OP_SERVER_LIST_REQ/RES handshake. When enabled the server registers itself with
+// each seed, harvests their peer lists, and answers other servers' requests, so
+// OP_SERVERLIST is populated from the live network instead of from `servers:`.
+//
+// Enabled and Persist are *bool so an absent key can be told from an explicit false;
+// both default on. See docs/server-gossip.md for the wire protocol.
+type GossipConfig struct {
+	Enabled *bool `yaml:"enabled"`
+	// Seeds are the servers to bootstrap from. Empty falls back to the top-level
+	// `servers:` list, so an existing config needs no new keys to participate.
+	Seeds []ServerEntry `yaml:"seeds"`
+	// IntervalSeconds is how often each peer is re-contacted. Lugdunum's own keepalive
+	// is ~165 s; the default 150 s stays just inside that so our entry never expires
+	// on a peer between rounds.
+	IntervalSeconds int `yaml:"intervalSeconds"`
+	// MaxServers caps the peer table, matching eserver's maxservers default of 4096.
+	// A cap is a DoS guard, not a tuning knob: without it a hostile peer can grow the
+	// table without bound by echoing fabricated entries.
+	MaxServers int `yaml:"maxServers"`
+	// MaxFailures parks a peer after this many consecutive failed rounds.
+	MaxFailures int `yaml:"maxFailures"`
+	// PublishIPv6 emits and consumes the OP_SERVER_LIST_*_IPV6 (0xa7/0xa8) extension.
+	// *bool, defaults on; only effective when the top-level ipv6 is also enabled.
+	PublishIPv6 *bool `yaml:"publishIPv6"`
+	// AllowPrivatePeers permits LAN/loopback peer addresses, the equivalent of eMule's
+	// FilterLANIPs preference being off. Default false. Needed to gossip with a server
+	// on the same host or LAN — including the Lugdunum reference container — because
+	// ed2k.IsGoodIP otherwise rejects those addresses outright.
+	AllowPrivatePeers bool `yaml:"allowPrivatePeers"`
+	// Persist writes verified peers to ServerMetFile so a restart does not have to
+	// re-earn the mesh. *bool, defaults on. Mirrors eserver's autoservlist.
+	Persist *bool `yaml:"persist"`
+	// ServerMetFile is the eMule-format server.met written by the persistence loop.
+	// Under ./data because the server writes it; see docs/server-gossip.md.
+	ServerMetFile string `yaml:"serverMetFile"`
+	// PersistIntervalSeconds is the write cadence, eserver's ~225 s.
+	PersistIntervalSeconds int `yaml:"persistIntervalSeconds"`
+}
+
+// EnabledOrDefault reports whether gossip runs, defaulting to true.
+func (c GossipConfig) EnabledOrDefault() bool { return boolOrDefault(c.Enabled, true) }
+
+// PublishIPv6OrDefault reports whether the 0xa7/0xa8 IPv6 extension is used,
+// defaulting to true (subject to the top-level ipv6.enabled gate).
+func (c GossipConfig) PublishIPv6OrDefault() bool { return boolOrDefault(c.PublishIPv6, true) }
+
+// PersistOrDefault reports whether the peer table is written to disk, defaulting to true.
+func (c GossipConfig) PersistOrDefault() bool { return boolOrDefault(c.Persist, true) }
+
+// FilterConfig controls who may talk to the server at all. Both halves are
+// independently optional and both default off: they need operator-supplied data
+// (a range list, MaxMind credentials) that no default can invent.
+//
+// A blocked address is dropped before any wire parsing on both TCP and UDP.
+// See docs/access-filters.md.
+type FilterConfig struct {
+	IPFilter IPFilterConfig `yaml:"ipfilter"`
+	GeoIP    GeoIPConfig    `yaml:"geoip"`
+}
+
+// IPFilterConfig is the static range list: an eMule/guarding.p2p ipfilter.dat or an
+// eserver ipfilter.srv. Operator-supplied, so File is not under ./data.
+type IPFilterConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	File    string `yaml:"file"`
+	// MinLevel blocks a range whose level is strictly *below* this value. The
+	// convention is inverted from what the name suggests — a low level means high
+	// confidence the range is bad — so raising it blocks more. Zero uses eMule's
+	// default of 100.
+	MinLevel int `yaml:"minLevel"`
+	// ReloadMinutes re-reads the file on a timer so a range list can be updated
+	// without a restart. Zero disables reloading.
+	ReloadMinutes int `yaml:"reloadMinutes"`
+}
+
+// GeoIPConfig is country-based blocking from a MaxMind GeoLite2 country database.
+//
+// A deny-list, deliberately: that is how operators use eserver's obfcountries, and an
+// allow-list on a public eD2K server would refuse most of the network the moment a
+// code was mistyped. An address that resolves to no country is never blocked.
+type GeoIPConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Database is the .mmdb path. Downloaded and refreshed by the server, so under
+	// ./data rather than the repo root.
+	Database string `yaml:"database"`
+	// BlockedCountries are ISO 3166-1 alpha-2 codes, case-insensitive.
+	BlockedCountries []string `yaml:"blockedCountries"`
+	// AccountID and LicenseKey are MaxMind download credentials. Leave both empty to
+	// use only an existing local database and never contact MaxMind. Keep real values
+	// out of the committed config — enode.local.yaml is gitignored.
+	AccountID  string `yaml:"accountID"`
+	LicenseKey string `yaml:"licenseKey"`
+	// UpdateDays is how often to check for a newer database. GeoLite2-Country is
+	// republished weekly, and the check is conditional on the current file's MD5 —
+	// an unchanged database transfers nothing. Zero uses 7.
+	UpdateDays int `yaml:"updateDays"`
+}
+
+// HasCredentials reports whether MaxMind download credentials were supplied. Both
+// halves are required: an account ID without a licence key cannot authenticate, and
+// treating that as "configured" would turn a half-filled config into a download error
+// on every refresh instead of the intended local-file-only mode.
+func (c GeoIPConfig) HasCredentials() bool {
+	return c.AccountID != "" && c.LicenseKey != ""
+}
 
 // boolOrDefault returns *p, or def when p is nil. The *bool pattern lets an absent
 // YAML key be told from an explicit false (see the IPv6 and cleanup toggles).
@@ -301,6 +436,23 @@ func setDefaults(cfg *Config) error {
 	if cfg.UDP.PortObfuscated == 0 {
 		cfg.UDP.PortObfuscated = cfg.TCP.Port + 12
 	}
+	// The obfuscated server-to-server channel shares the tcp+12 socket above, and tcp+12
+	// is forced by the reference implementation rather than chosen.
+	//
+	// Two of eserver's constraints have to hold at once. It skips a peer whose obfuscated
+	// frames do not arrive from the portUDPOBF that peer advertised ("continue because
+	// portUDPobf(%d) != sin_port(%d)"), so the port we send from must be the port we
+	// publish. And it recovers a peer's *TCP* port from the UDP source port of an
+	// obfuscated frame by subtracting 12 — measured directly: a frame from our 5567 was
+	// booked to 5555, one from 5569 to a nonexistent 5557, after which its ping
+	// bookkeeping never confirmed and we stayed out of its "working servers" list and
+	// therefore out of its server.met.
+	//
+	// tcp+14 (eserver's own portUDPOBF default) satisfies the first constraint and breaks
+	// the second, so it cannot be used. See docs/server-gossip.md §8.
+	if cfg.UDP.PortGossip == 0 {
+		cfg.UDP.PortGossip = cfg.UDP.PortObfuscated
+	}
 	if cfg.NAT.Port == 0 {
 		cfg.NAT.Port = 2004
 	}
@@ -314,6 +466,37 @@ func setDefaults(cfg *Config) error {
 	}
 	if cfg.Admin.Port == 0 {
 		cfg.Admin.Port = 4560
+	}
+	// Gossip cadence. 150 s sits just inside Lugdunum's own ~165 s keepalive, so our
+	// entry never lapses on a peer between rounds; 4096 is eserver's maxservers.
+	if cfg.Gossip.IntervalSeconds <= 0 {
+		cfg.Gossip.IntervalSeconds = 150
+	}
+	if cfg.Gossip.MaxServers <= 0 {
+		cfg.Gossip.MaxServers = 4096
+	}
+	if cfg.Gossip.MaxFailures <= 0 {
+		cfg.Gossip.MaxFailures = 5
+	}
+	if cfg.Gossip.PersistIntervalSeconds <= 0 {
+		cfg.Gossip.PersistIntervalSeconds = 225
+	}
+	// Under DataDir because the server writes it, unlike the operator-supplied
+	// ipfilter and schema files which stay where the operator put them.
+	if cfg.Gossip.ServerMetFile == "" {
+		cfg.Gossip.ServerMetFile = filepath.Join(DataDir, "server.met")
+	}
+	if cfg.Filter.IPFilter.MinLevel <= 0 {
+		cfg.Filter.IPFilter.MinLevel = 100
+	}
+	if cfg.Filter.IPFilter.File == "" {
+		cfg.Filter.IPFilter.File = "ipfilter.dat"
+	}
+	if cfg.Filter.GeoIP.Database == "" {
+		cfg.Filter.GeoIP.Database = filepath.Join(DataDir, "GeoLite2-Country.mmdb")
+	}
+	if cfg.Filter.GeoIP.UpdateDays <= 0 {
+		cfg.Filter.GeoIP.UpdateDays = 7
 	}
 	if cfg.Storage.Engine == "" {
 		cfg.Storage.Engine = "memory"
@@ -353,6 +536,44 @@ func setDefaults(cfg *Config) error {
 		cfg.Debug.FixturesFile = "tests/data/debug_fixtures.yaml"
 	}
 	return nil
+}
+
+// ResolveDataPath makes a config path usable from any working directory by resolving
+// it against the module root (the directory holding go.mod).
+//
+// This matters for two different callers. A server started from somewhere other than
+// the repo root would otherwise create a second `data/` beside wherever it was
+// launched. And a test in ed2k/ or netfilter/ runs with its own package directory as
+// the working directory, so a bare "data/server.met" would resolve differently in
+// every package. An absolute path is returned unchanged, and a deployed binary with no
+// go.mod above it gets the path back as-is — the correct fallback in both cases.
+func ResolveDataPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	return tests.FixRelativeTestingPath(path)
+}
+
+// ServerMetPath is the resolved location of the gossip peer file.
+func (c Config) ServerMetPath() string { return ResolveDataPath(c.Gossip.ServerMetFile) }
+
+// GeoIPDatabasePath is the resolved location of the MaxMind country database.
+func (c Config) GeoIPDatabasePath() string { return ResolveDataPath(c.Filter.GeoIP.Database) }
+
+// IPFilterPath is the resolved location of the operator-supplied range list. It is
+// resolved the same way even though it is not under DataDir, so that naming
+// "ipfilter.dat" works from a subdirectory too.
+func (c Config) IPFilterPath() string { return ResolveDataPath(c.Filter.IPFilter.File) }
+
+// GossipSeeds returns the servers to bootstrap from: gossip.seeds when set, otherwise
+// the top-level `servers:` list. Falling back means an existing config participates in
+// gossip without gaining a single new key, and an operator who wants the two lists to
+// differ — advertise these, bootstrap from those — can still say so explicitly.
+func (c Config) GossipSeeds() []ServerEntry {
+	if len(c.Gossip.Seeds) > 0 {
+		return c.Gossip.Seeds
+	}
+	return c.Servers
 }
 
 func (c Config) StorageEngineConfig() storage.Config {

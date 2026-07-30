@@ -148,6 +148,77 @@ func TestUDPCryptPingRoundTrip(t *testing.T) {
 	}
 }
 
+// TestUDPStatResReflectsObservedIP covers the 4 trailing bytes at payload offset +40.
+//
+// Lugdunum already sends this field — measured against eserver 17.14, its extended reply
+// is 44 payload bytes and the last four are the address it saw the requester on. eMule
+// discards them, logging only "contains %d additional bytes"
+// (srchybrid/UDPSocket.cpp:384-388), so the field is additive; a client taught to read it
+// gets IPv4 reflection from eserver and from us alike.
+//
+// The value must come from the socket, never from anything the requester claimed, which
+// is why this test drives a real datagram rather than calling the builder.
+func TestUDPStatResReflectsObservedIP(t *testing.T) {
+	const challenge uint32 = 0xDEADBEEF
+	cfg := UDPRuntimeConfig{UDPServerKey: 0x12345678, UDPPortObf: 5567, TCPPortObf: 5565}
+
+	req := NewBuffer(4)
+	_ = req.PutUInt32LE(challenge)
+	reply := cryptProbe(t, cfg, req.Bytes())
+	if reply == nil {
+		t.Fatal("no reply to the crypt-ping")
+	}
+	pt := decryptServerReply(t, reply, challenge)
+	if pt == nil {
+		t.Fatal("reply not decryptable")
+	}
+	// proto(1) + opcode(1) + 40 payload bytes + 4 observed-IP bytes.
+	t.Logf("input: crypt-ping from a loopback client")
+	t.Logf("output: decrypted payload %d bytes % x", len(pt), pt)
+	if len(pt) != 2+44 {
+		t.Fatalf("decrypted length = %d, want %d (2 header + 40 stat + 4 observed IP)", len(pt), 2+44)
+	}
+	observed := net.IP(pt[len(pt)-4:]).To4()
+	t.Logf("output: observed client IP at payload +40 = %s", observed)
+	if !observed.Equal(net.IPv4(127, 0, 0, 1)) {
+		t.Fatalf("observed IP = %s, want 127.0.0.1 (cryptProbe's client binds loopback)", observed)
+	}
+}
+
+// TestBuildStatResOmitsObservedIPWhenUnknown pins the no-regression half: a caller that
+// sets no ObservedIP gets the packet byte-for-byte as it was before reflection existed.
+func TestBuildStatResOmitsObservedIPWhenUnknown(t *testing.T) {
+	without, err := BuildGlobServStatResPacket(1, UDPConfig{UDPPortObf: 5567, TCPPortObf: 5565}, 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	with, err := BuildGlobServStatResPacket(1, UDPConfig{
+		UDPPortObf: 5567, TCPPortObf: 5565, ObservedIP: net.ParseIP("192.168.65.1"),
+	}, 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("without ObservedIP: %d bytes % x", len(without.Bytes()), without.Bytes())
+	t.Logf("with ObservedIP:    %d bytes % x", len(with.Bytes()), with.Bytes())
+	if len(without.Bytes()) != 42 {
+		t.Errorf("no-reflection form = %d bytes, want 42 (2 header + 40 payload)", len(without.Bytes()))
+	}
+	if len(with.Bytes()) != 46 {
+		t.Errorf("reflection form = %d bytes, want 46 — matches eserver's measured reply", len(with.Bytes()))
+	}
+	// A v6 address has no 4-byte form and must be omitted rather than truncated.
+	v6, err := BuildGlobServStatResPacket(1, UDPConfig{
+		UDPPortObf: 5567, TCPPortObf: 5565, ObservedIP: net.ParseIP("2001:db8::1"),
+	}, 0, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("with an IPv6 ObservedIP: %d bytes (field omitted)", len(v6.Bytes()))
+	if len(v6.Bytes()) != 42 {
+		t.Fatalf("v6 observed address produced %d bytes; it must be omitted, not truncated", len(v6.Bytes()))
+	}
+}
+
 // The crypt-ping heuristic must be tight: only 4..19-byte undecryptable datagrams,
 // and never a zero challenge (eMule never sends one and would not decrypt a
 // zero-keyed reply).

@@ -1,0 +1,113 @@
+# eNode-go config for the interop rig. Rendered by entrypoint.enode.sh, which fills
+# __SELF_IP__ / __SELF_IP6__ from the container's own interfaces and __SEEDS__ / __NAME__
+# / __IPFILTER_ENABLED__ from the environment. Not a template for real deployments: the
+# intervals here are far shorter than any public server should use.
+
+name: "__NAME__"
+description: "eNode-go interop node (tests/interop)"
+
+# Bind the dual-stack wildcard; advertise the container's own address. Deliberately NOT
+# dynIp: "auto" — that resolves over the public internet and would advertise the Docker
+# host's WAN address, which no peer on this network can reach.
+address: ""
+dynIp: "__SELF_IP__"
+# Emptied so nothing in this image can ever reach out to the internet: with dynIp set to a
+# literal these are unused, and an empty list makes that structural rather than incidental.
+testUrls: []
+
+messageLowID: "You have LowID."
+messageLogin: "Welcome to the eNode-go interop node!"
+
+# Peers come from gossip, never from a static list — that is the point of the exercise.
+servers: []
+
+noAssert: false
+logLevel: "debug"
+# Logs go to stdout so `docker logs` is the single place the test reads evidence from.
+logFile: ""
+
+supportCrypt: true
+requestCrypt: true
+requireCrypt: true
+auxiliarPort: false
+IPinLogin: false
+
+tcp:
+  port: 5555
+  portObfuscated: 5565
+  maxConnections: 1000
+  connectionTimeout: 2000
+  disconnectTimeout: 3600
+  allowLowIDs: true
+  minLowID: 1
+  maxLowID: 16777215
+
+udp:
+  port: 5559
+  portObfuscated: 5567   # tcp.port + 12, where eMule's first crypt-ping always lands
+  # Shares the socket above. tcp.port+12 is required, not preferred: eserver reads a peer's
+  # TCP port as this value minus 12, so anything else files our frames against a phantom
+  # server and we never reach its "working servers" list. See docs/server-gossip.md §8.
+  portGossip: 5567
+  getSources: true
+  getFiles: true
+  serverKey: 305419896
+
+gossip:
+  enabled: true
+  seeds: __SEEDS__
+  # 10s instead of 150s: a test that waited out the production cadence would take minutes
+  # per handshake. Nothing about the protocol depends on the interval.
+  intervalSeconds: 10
+  maxServers: 4096
+  maxFailures: 5
+  publishIPv6: true
+  # False on purpose. The rig runs on 203.0.113.0/24 (TEST-NET-3) precisely so the
+  # production default is what gets exercised — Docker's own 172.17/172.18 pool is LAN
+  # under IsLANIP and would force this to true.
+  allowPrivatePeers: false
+  persist: true
+  serverMetFile: "data/server.met"
+  # 5s so the file is a usable observation surface; production default is 225s.
+  persistIntervalSeconds: 5
+
+filter:
+  ipfilter:
+    enabled: __IPFILTER_ENABLED__
+    file: "ipfilter.dat"
+    minLevel: 100
+    reloadMinutes: 0
+  geoip:
+    enabled: false
+    database: "data/GeoLite2-Country.mmdb"
+    blockedCountries: []
+    accountID: ""
+    licenseKey: ""
+    updateDays: 7
+
+natTraversal:
+  enabled: false
+
+ipv6:
+  enabled: true
+  address: ""
+  # Empty when the network is v4-only. Never "auto" here, for the dynIp reason above.
+  dynIp6: "__SELF_IP6__"
+  publishSources: true
+  probeReachability: false
+  testUrls6: []
+
+admin:
+  enabled: true
+  # Published to the host so the test can poll /stats.json instead of sleeping. Safe only
+  # because this is a throwaway container on a private network.
+  bindIP: "0.0.0.0"
+  port: 4560
+
+storage:
+  engine: memory
+  cleanup:
+    enabled: false
+
+debug:
+  seedFixtures: false

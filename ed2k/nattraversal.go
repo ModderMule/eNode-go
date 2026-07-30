@@ -66,6 +66,36 @@ type NATTraversalHandler struct {
 	// isLocalMember gates SYNC2 to hashes currently logged into this server.
 	serverIndependent bool
 	isLocalMember     func(hash [16]byte) bool
+	// sessionTouch, when set, is called with a user hash whose PR_NAT keepalive just
+	// arrived, so the eD2K TCP session for that user can have its idle deadline extended.
+	// A hook rather than a direct dependency because NATTraversalHandler must stay usable
+	// without a ServerRuntime — the natsim tools and most of its tests do exactly that.
+	sessionTouch func(hash [16]byte)
+}
+
+// SetSessionTouch registers the callback invoked when a PR_NAT keepalive identifies a
+// user. Mirrors SetLocalMembership: the runtime supplies it, and it is optional.
+func (h *NATTraversalHandler) SetSessionTouch(fn func(hash [16]byte)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.sessionTouch = fn
+}
+
+// touchSession invokes the callback outside the handler's lock.
+//
+// Outside deliberately: the callback reaches into ServerRuntime to find a session and set
+// a socket deadline, and holding the NAT lock across that would couple two independent
+// lock orders — the classic way to acquire a deadlock later.
+func (h *NATTraversalHandler) touchSession(hash [16]byte) {
+	h.mu.RLock()
+	fn := h.sessionTouch
+	h.mu.RUnlock()
+	if fn != nil {
+		fn(hash)
+	}
 }
 
 func NewNATTraversalHandler(registrationTTL time.Duration) *NATTraversalHandler {
@@ -247,12 +277,15 @@ func (h *NATTraversalHandler) processPacket(data []byte, remote *net.UDPAddr, lo
 		return nil
 	}
 	if len(data) == 1 {
-		matched := h.touchByAddr(remote)
+		hash, matched := h.touchByAddr(remote)
 		logging.Debugf(
 			"[module=nat] dir=recv, remote=%s, opcode=KEEPALIVE(1-byte), value=0x%02x, matched=%t",
 			remote.String(), data[0], matched,
 		)
 		if matched {
+			// The 1-byte keepalive counts as session liveness too, exactly as the full
+			// OP_NATKEEPALIVE does — a client using the short form is no less alive.
+			h.touchSession(hash)
 			return []natOutbound{{
 				to:     cloneUDPAddr(remote),
 				packet: encodeNATPacket(OpNatPing, nil),
@@ -286,12 +319,18 @@ func (h *NATTraversalHandler) processPacket(data []byte, remote *net.UDPAddr, lo
 	case OpNatRegisterEx:
 		return h.handleRegister(remote, payload, localPort, true)
 	case OpNatKeepAlive:
-		matched := h.touchByAddr(remote)
+		hash, matched := h.touchByAddr(remote)
 		logging.Debugf(
 			"[module=nat] dir=recv, remote=%s, opcode=%s, payloadLen=%d, matched=%t",
 			remote.String(), natOpcodeLabel(OpNatKeepAlive), len(payload), matched,
 		)
 		if matched {
+			// A keepalive proves the client is alive, so it also counts as liveness for its
+			// eD2K TCP session. Without this a share-only LowID client — one that publishes
+			// files, keeps its PR_NAT registration fresh, but sends no TCP traffic for hours
+			// — is reaped by the TCP read deadline (disconnectTimeout, 3600 s by default)
+			// and all of its sources vanish, even though it is plainly reachable.
+			h.touchSession(hash)
 			return []natOutbound{{
 				to:     cloneUDPAddr(remote),
 				packet: encodeNATPacket(OpNatPing, nil),
@@ -497,7 +536,13 @@ func (h *NATTraversalHandler) upsert(hash [16]byte, remote *net.UDPAddr, version
 	h.entries[hash] = entry
 }
 
-func (h *NATTraversalHandler) touchByAddr(remote *net.UDPAddr) bool {
+// touchByAddr refreshes the candidate matching a source address and reports whether one
+// was found, along with the user hash it belongs to.
+//
+// The hash is returned so a keepalive can also count as liveness for that user's eD2K TCP
+// session — see SetSessionTouch. Without it the caller has proof the client is alive but
+// no way to say which client.
+func (h *NATTraversalHandler) touchByAddr(remote *net.UDPAddr) (hash [16]byte, matched bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := time.Now()
@@ -506,14 +551,14 @@ func (h *NATTraversalHandler) touchByAddr(remote *net.UDPAddr) bool {
 		// refreshes the stored candidate directly.
 		if entry.v4 != nil && sameEndpoint(entry.v4.addr, remote) {
 			entry.v4.lastSeen = now
-			return true
+			return entry.hash, true
 		}
 		if entry.v6 != nil && sameEndpoint(entry.v6.addr, remote) {
 			entry.v6.lastSeen = now
-			return true
+			return entry.hash, true
 		}
 	}
-	return false
+	return hash, false
 }
 
 // get returns a deep copy of the entry so the caller holds a stable snapshot after

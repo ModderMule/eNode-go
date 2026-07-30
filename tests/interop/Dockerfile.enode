@@ -1,0 +1,37 @@
+# eNode-go, built for the interop rig in tests/interop.
+#
+# The build context is the MODULE ROOT, not this directory — the build needs go.mod and
+# every package. The test passes the context explicitly through
+# dockertest.BuildOptions{ContextDir, Dockerfile}; the repo's .dockerignore is what keeps
+# the 25 MB vendored eserver tree and .git out of it.
+#
+# CGO_ENABLED=0 matches .github/workflows/linux.yml: every dependency here (mysql,
+# mongo, maxminddb) is pure Go, so the binary is static and the runtime stage needs no
+# libc beyond busybox.
+
+FROM golang:1.23-alpine AS build
+WORKDIR /src
+
+# Modules first, so an edit to a .go file does not re-download the dependency graph.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/enode ./cmd/enode
+
+FROM alpine:3.20
+
+# The entrypoint renders the config template, so it needs no more than busybox sh —
+# `hostname -i` is what supplies the container's own address.
+WORKDIR /rig
+COPY tests/interop/entrypoint.enode.sh /usr/local/bin/entrypoint.sh
+COPY tests/interop/enode.interop.yaml.tmpl /rig/enode.yaml.tmpl
+COPY --from=build /out/enode /usr/local/bin/enode
+RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/enode
+
+# TCP: 5555 client + obfuscated (portTCPOBF shares the plaintext port, as eserver does)
+#      5565 dedicated obfuscated listener   4560 admin dashboard
+# UDP: 5559 main   5567 crypt-ping bootstrap (tcp+12)   5569 gossip (tcp+14)
+EXPOSE 5555/tcp 5565/tcp 4560/tcp 5559/udp 5567/udp 5569/udp
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

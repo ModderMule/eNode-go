@@ -1,6 +1,10 @@
 package ed2k
 
-import "enode/storage"
+import (
+	"net"
+
+	"enode/storage"
+)
 
 type UDPConfig struct {
 	Name           string
@@ -11,6 +15,11 @@ type UDPConfig struct {
 	TCPPortObf     uint16
 	UDPServerKey   uint32
 	MaxConnections uint32
+	// ObservedIP is the address the server saw this requester on, appended to the 0x97
+	// reply as 4 trailing bytes. Nil omits the field entirely, which keeps the packet
+	// byte-identical to the pre-reflection form for any caller that does not set it.
+	// See BuildGlobServStatResPacket.
+	ObservedIP net.IP
 }
 
 func BuildGlobSearchResPackets(files []storage.File) ([]*Buffer, error) {
@@ -83,6 +92,30 @@ func buildGlobFoundSources(fileHash []byte, sources []storage.Source, format Sou
 	return MakeUDPPacket(PrED2K, pack)
 }
 
+// BuildGlobServStatResPacket builds OP_GLOBSERVSTATRES (0x97). Payload offsets, counted
+// from just after the opcode:
+//
+//	+0   challenge(4)
+//	+4   users(4) files(4) maxusers(4) softfiles(4) hardfiles(4)
+//	+24  udpflags(4)
+//	+28  lowidusers(4)
+//	+32  portUDPOBF(2)   — eMule reads these three at exactly these offsets,
+//	+34  portTCPOBF(2)     srchybrid/UDPSocket.cpp:376-380
+//	+36  ServerKey(4)
+//	+40  observed client IPv4(4)   — appended only when cfg.ObservedIP is set
+//
+// The trailing observed-IP field is what Lugdunum already sends: measured against
+// eserver 17.14 the extended reply is 44 payload bytes and the last four carry the
+// address the server saw the requester on (192.168.65.1 in the container). eMule does not
+// parse them — it logs only "OP_GlobServStatRes contains %d additional bytes"
+// (UDPSocket.cpp:384-388) and discards the tail — so this is additive and cannot break a
+// stock client, while a client that learns to read +40 gets IPv4 address reflection from
+// eserver and from us alike.
+//
+// Unlike Lugdunum we send the full extended form on both the plain and the obfuscated
+// channel. eserver answers a plain 0x96 with the short 32-byte form and only gives ports
+// and ServerKey over the obfuscated one; being more generous breaks nothing and saves a
+// client the extra round trip.
 func BuildGlobServStatResPacket(challenge uint32, cfg UDPConfig, clientsCount int, filesCount int, lowIDCount int) (*Buffer, error) {
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpGlobServStatRes},
@@ -97,6 +130,12 @@ func BuildGlobServStatResPacket(challenge uint32, cfg UDPConfig, clientsCount in
 		{Type: TypeUint16, Value: cfg.UDPPortObf},
 		{Type: TypeUint16, Value: cfg.TCPPortObf},
 		{Type: TypeUint32, Value: cfg.UDPServerKey},
+	}
+	// Only IPv4 has a 4-byte form here. A v6 requester is told its observed address
+	// through the CT_MOD_YOUR_IP tag in OP_SERVERIDENT instead, which is 16 bytes wide;
+	// truncating a v6 address into this field would reflect something meaningless.
+	if v4 := cfg.ObservedIP.To4(); v4 != nil {
+		pack = append(pack, PacketItem{Type: TypeUint32, Value: uint32FromV4(v4)})
 	}
 	return MakeUDPPacket(PrED2K, pack)
 }

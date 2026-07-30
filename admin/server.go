@@ -50,6 +50,12 @@ type StaticInfo struct {
 // LiveStats holds the figures that change over the life of the server. It is
 // produced fresh per request by the snapshot function and served as JSON to the
 // page's polling script — it is never baked into the rendered HTML.
+//
+// Servers is what a client would actually be sent in OP_SERVERLIST, which is not the
+// same as the number of configured peers once gossip is running. The Gossip* and
+// Filter* fields are zero when the corresponding subsystem is off, and the caller's
+// snapshot function is expected to read them from nil-safe accessors, so "disabled" and
+// "enabled but idle" both render as 0 rather than needing a tri-state.
 type LiveStats struct {
 	Clients       int    `json:"clients"`
 	Files         int    `json:"files"`
@@ -57,6 +63,20 @@ type LiveStats struct {
 	Servers       int    `json:"servers"`
 	UptimeSeconds int64  `json:"uptimeSeconds"`
 	Time          string `json:"time"`
+
+	// Server-to-server gossip. Known counts every peer in the table whatever its state;
+	// Verified counts the subset advertisable to clients; Parked counts those retired
+	// after maxFailures consecutive failed rounds; Admitted is a monotonic total of
+	// entries ever accepted from a peer list.
+	GossipKnown    int    `json:"gossipKnown"`
+	GossipVerified int    `json:"gossipVerified"`
+	GossipParked   int    `json:"gossipParked"`
+	GossipAdmitted uint64 `json:"gossipAdmitted"`
+
+	// Access filters, counted per layer: addresses refused by the ipfilter range list
+	// and by the GeoIP country deny-list respectively.
+	FilterBlockedIP  int64 `json:"filterBlockedIP"`
+	FilterBlockedGeo int64 `json:"filterBlockedGeo"`
 }
 
 // Server is the admin dashboard HTTP server.

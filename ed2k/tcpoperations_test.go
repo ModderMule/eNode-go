@@ -274,7 +274,7 @@ func TestBuildSearchAndSources(t *testing.T) {
 
 	sp, err := BuildSearchResultPacket([]storage.File{{
 		Hash: fileHash, Name: "a.bin", Size: 10, Type: "Pro", Sources: 1, Completed: 1, SourceID: 11, SourcePort: 22,
-	}})
+	}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestBuildSearchResultPacketCanCompress(t *testing.T) {
 			Sources: 1, Completed: 1, SourceID: 11, SourcePort: 22,
 		})
 	}
-	packet, err := BuildSearchResultPacket(files)
+	packet, err := BuildSearchResultPacket(files, false)
 	if err != nil {
 		t.Fatal(err)
 	}

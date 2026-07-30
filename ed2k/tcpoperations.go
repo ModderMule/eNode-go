@@ -184,7 +184,20 @@ func isLowID(id uint32) bool {
 	return id > 0 && id <= 0x00FFFFFF
 }
 
-func BuildSearchResultPacket(files []storage.File) (*Buffer, error) {
+// BuildSearchResultPacket builds OP_SEARCHRESULT (0x33): a uint32 result count, that many
+// file records, then a single "more results available" byte.
+//
+// eMule's contract for that trailing byte is exact and narrow
+// (srchybrid/SearchList.cpp:266-277): it must be the *only* trailing byte, and its value
+// must be 0x00 or 0x01. Anything else — two bytes, or a 0x02 — is logged as unexpected
+// AddData and the more-results flag is left false. So it is always emitted, with 0x00
+// meaning "that was everything", rather than being omitted when there is no more: sending
+// it unconditionally is what makes the length predictable, and 0x00 is exactly what a
+// client that ignores the byte would infer anyway.
+//
+// Without this byte eMule never shows its "More" button, so a result set larger than one
+// packet was silently truncated with no way for the user to ask for the rest.
+func BuildSearchResultPacket(files []storage.File, moreAvailable bool) (*Buffer, error) {
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpSearchResult},
 		{Type: TypeUint32, Value: uint32(len(files))},
@@ -207,6 +220,12 @@ func BuildSearchResultPacket(files []storage.File) (*Buffer, error) {
 			SourcePort: file.SourcePort,
 		})
 	}
+	more := uint8(0)
+	if moreAvailable {
+		more = 1
+	}
+	pack = append(pack, PacketItem{Type: TypeUint8, Value: more})
+
 	packet, err := MakePacket(PrED2K, pack)
 	if err != nil {
 		return nil, err

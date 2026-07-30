@@ -25,6 +25,8 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_GETSOURCES` | `0x19` | Client -> Server | Request sources for a file. |
 | `OP_GETSOURCES_OBFU` | `0x23` | Client -> Server | Obfuscated source request variant. |
 | `OP_SEARCHREQUEST` | `0x16` | Client -> Server | Search query request. |
+| `OP_QUERY_MORE_RESULT` | `0x21` | Client -> Server | Next page of the last search. Empty payload — the client's "More" button sends only the opcode (`srchybrid/SearchResultsWnd.cpp:1282`), so the remaining results are held per connection. |
+| `OP_DISCONNECT` | `0x18` | Client -> Server | Client is leaving. Releases the session, its LowID and its storage row at once, instead of waiting for the read loop to see a FIN — or, for a socket that dies without one, for `disconnectTimeout`. |
 | `OP_CALLBACKREQUEST` | `0x1c` | Client -> Server | Ask server to callback a LowID client. |
 | `OP_SERVERMESSAGE` | `0x38` | Server -> Client | Human-readable server message. |
 | `OP_SERVERSTATUS` | `0x34` | Server -> Client | Current server counters/status. |
@@ -33,17 +35,43 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_SERVERIDENT` | `0x41` | Server -> Client | Server identity/tags response. |
 | `OP_FOUNDSOURCES` | `0x42` | Server -> Client | Source list for requested file. |
 | `OP_FOUNDSOURCES_OBFU` | `0x44` | Server -> Client | Obfuscated found-sources response (adds per-source obfuscation settings byte). |
-| `OP_SEARCHRESULT` | `0x33` | Server -> Client | Search results list. |
+| `OP_SEARCHRESULT` | `0x33` | Server -> Client | Search results list, followed by a single "more results available" byte. |
 | `OP_CALLBACKREQUESTED` | `0x35` | Server -> LowID client | Notify LowID client to connect back. |
 | `OP_CALLBACKFAILED` | `0x36` | Server -> Client | Callback target unavailable/failure. |
 | `OP_GETSOURCES_IPV6` | `0x24` | Client -> Server | IPv6 tag-block source query (opt-in); payload as `OP_GETSOURCES2`. |
 | `OP_FOUNDSOURCES_IPV6` | `0x25` | Server -> Client | IPv6 tag-block source response (per source: `id+port+tagCount+tags`). |
 | `OP_CALLBACKREQUESTED_IPV6` | `0x26` | Server -> v6-capable client | IPv6 form of `OP_CALLBACKREQUESTED`; sent when the requester has no usable IPv4 but a reachable public IPv6. |
 
+### Search paging
+
+`OP_SEARCHRESULT` now ends with one "more results available" byte, and eMule's contract for
+it is exact (`srchybrid/SearchList.cpp:266-277`): it must be the *only* trailing byte and
+its value must be `0x00` or `0x01`. Two trailing bytes, or a `0x02`, are logged as
+unexpected AddData and the flag is left false — so the client's More button never appears.
+The byte is therefore always emitted, `0x00` meaning "that was everything".
+
+Results are paged at `storage.MaxSearchPage` (255) per packet, with the remainder held on
+the connection and served by `OP_QUERY_MORE_RESULT`. The engines' fetch ceiling is
+`storage.MaxSearchResults` (1000): previously it was also 255, i.e. the same number as the
+page size, so a deeper result set was silently truncated with no way for a client to ask
+for the rest.
+
 IPv6 is additive and opt-in; classic packets are byte-identical to before. See
 [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.md) for the
 full IPv6 wire formats (login `CT_MOD_IP_V6 0xAE` tag, the `0xFFFFFFFF` source
 sentinel, `CT_MOD_SVR_IP_V6 0xAF` in `OP_SERVERIDENT`, and `SRV_*FLG_IPV6 0x4000`).
+
+### Client -> Server TCP opcodes not handled
+
+These reach the default branch in `handleED2K` (`ed2k/server_runtime.go`) and are
+logged, not answered. None of them breaks a session:
+
+| OP constant | Hex | Why it is safe to ignore |
+|---|---:|---|
+| `OP_SEARCH_USER` | `0x1a` | Never sent by the surveyed clients to a server. |
+
+`OP_DISCONNECT (0x18)` and `OP_QUERY_MORE_RESULT (0x21)` used to be listed here. Both are
+now handled — see the TCP table above and the search-paging note below.
 
 ## UDP OP Codes
 
@@ -52,7 +80,7 @@ sentinel, `CT_MOD_SVR_IP_V6 0xAF` in `OP_SERVERIDENT`, and `SRV_*FLG_IPV6 0x4000
 | `OP_GLOBGETSOURCES` | `0x9a` | Client -> Server | UDP source query by hash. |
 | `OP_GLOBGETSOURCES2` | `0x94` | Client -> Server | UDP source query with hash+size. |
 | `OP_GLOBSERVSTATREQ` | `0x96` | Client -> Server | UDP server stats request. |
-| `OP_SERVERDESCREQ` | `0xa2` | Client -> Server | UDP server description request. |
+| `OP_SERVERDESCREQ` | `0xa2` | Client -> Server, and Server -> Server | UDP server description request. Also *sent* by us to a gossip peer as the admission probe, and its `0xa3` reply parsed — see [`server-gossip.md`](server-gossip.md). |
 | `OP_GLOBSEARCHREQ` | `0x98` | Client -> Server | UDP search request. |
 | `OP_GLOBSEARCHREQ3` | `0x90` | Client -> Server | Extended UDP search request (tree/tags). |
 | `OP_GLOBFOUNDSOURCES` | `0x9b` | Server -> Client | UDP source response. |
@@ -61,6 +89,15 @@ sentinel, `CT_MOD_SVR_IP_V6 0xAF` in `OP_SERVERIDENT`, and `SRV_*FLG_IPV6 0x4000
 | `OP_GLOBSEARCHRES` | `0x99` | Server -> Client | UDP search results response. |
 | `OP_GLOBGETSOURCES_IPV6` | `0xa5` | Client -> Server | IPv6 tag-block UDP source query (opt-in); payload as `OP_GLOBGETSOURCES2`. |
 | `OP_GLOBFOUNDSOURCES_IPV6` | `0xa6` | Server -> Client | IPv6 tag-block UDP source response. |
+| `OP_SERVER_LIST_REQ` | `0xa0` | Server <-> Server | Gossip: "register me", `<ip 4><port 2>` + optional `<challenge 4>`. |
+| `OP_SERVER_LIST_RES` | `0xa1` | Server <-> Server | Gossip: peer list, `<count 1>` then count × (`<ip 4><port 2>`). |
+| `OP_SERVER_LIST_REQ2` | `0xa4` | Server <-> Server | Gossip: explicit list request, empty payload. |
+| `OP_SERVER_LIST_REQ_IPV6` | `0xa7` | Server <-> Server | **eNode-go extension**: v6 list request, empty payload. |
+| `OP_SERVER_LIST_RES_IPV6` | `0xa8` | Server <-> Server | **eNode-go extension**: `<count 1>` then count × (`<ipv6 16><port 2>`). |
+
+The five gossip opcodes are only dispatched when `gossip.enabled` is set; otherwise they
+reach the unknown-opcode log exactly as before. `0xa0`/`0xa1` are accepted only over the
+obfuscated channel. See [`server-gossip.md`](server-gossip.md).
 
 ## NAT Traversal UDP OP Codes (`PR_NAT = 0xf1`)
 
@@ -87,7 +124,7 @@ layouts: [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.
 | `OP_NAT_SYNC_IPV6` | `0xed` | NAT Server -> Client | v6 peer endpoint exchange (`peerIPv6(16)+peerPort(2, BE)+peerHash(16)+connAck(4)+version(1)`). |
 | `OP_NAT_PING` | `0xe2` | NAT Server -> Client | NAT keepalive ACK ping (empty payload) after accepted keepalive. |
 | `OP_NAT_FAILED` | `0xe5` | NAT Server -> Client | Pairing failed (`reason(1) + targetHash(16)`; reason `0x01` = target not registered, `0x02` = no common address family, `0x03` = rendezvous restricted — server-independent off and a peer not logged in here). |
-| `OP_NAT_KEEPALIVE` | `0xe6` | Client -> NAT Server | NAT keepalive with NAT envelope; refreshes `lastSeen` and receives `OP_NAT_PING` when endpoint is registered. |
+| `OP_NAT_KEEPALIVE` | `0xe6` | Client -> NAT Server | NAT keepalive with NAT envelope; refreshes `lastSeen`, extends the matching eD2K session's read deadline (see below), and receives `OP_NAT_PING` when endpoint is registered. |
 | keepalive (non-`PR_NAT`, legacy) | n/a | Client -> NAT Server | Legacy raw 1-byte UDP heartbeat; still accepted and receives `OP_NAT_PING` when endpoint is registered. |
 
 ## Payload Data Format
@@ -129,7 +166,21 @@ offset +36; see [server-udp-crypt-ping.md](server-udp-crypt-ping.md).
 |---|---|---|
 | `OP_GLOBFOUNDSOURCES` | Server -> Client | `fileHash(hash16) + sourceCount(uint8) + repeated(source entry)` |
 | `OP_GLOBSEARCHRES` | Server -> Client | One file per UDP packet: `fileRecord = fileHash + sourceID + sourcePort + tags` |
-| `OP_GLOBSERVSTATRES` | Server -> Client | `challenge(uint32) + users(uint32) + files(uint32) + maxConnections(uint32) + softLimit(uint32) + hardLimit(uint32) + udpFlags(uint32) + lowIDUsers(uint32) + udpPortObf(uint16) + tcpPortObf(uint16) + udpServerKey(uint32, per-client — derived from the client IP)` |
+| `OP_GLOBSERVSTATRES` | Server -> Client | `challenge(uint32) + users(uint32) + files(uint32) + maxConnections(uint32) + softLimit(uint32) + hardLimit(uint32) + udpFlags(uint32) + lowIDUsers(uint32) + udpPortObf(uint16) + tcpPortObf(uint16) + udpServerKey(uint32, per-client — derived from the client IP) + observedClientIPv4(uint32)` |
+
+The trailing `observedClientIPv4` is the address the server saw the requester on — the same
+4 bytes Lugdunum `eserver` already sends and eMule discards, logging only *"contains %d
+additional bytes"* (`srchybrid/UDPSocket.cpp:384-388`). Purely additive: a stock client
+ignores it, and one taught to read payload offset +40 gets IPv4 address reflection. Omitted
+for an IPv6 requester, which has no 4-byte form — those learn their address from the
+`CT_MOD_YOUR_IP` tag in `OP_SERVERIDENT` instead.
+
+With `gossip.enabled`, `udpPortObf` advertises `udp.portGossip`, because a peer checks the
+source port of our obfuscated frames against this value. That port defaults to
+`udp.portObfuscated` (`tcp.port + 12`) and shares the same socket, so in practice the
+advertised value is unchanged from a gossip-less server — `tcp.port + 14` was tried and
+does not work, since Lugdunum reads a peer's TCP port as this value minus 12. See
+`server-gossip.md` §1.
 | `OP_SERVERDESCRES` (old) | Server -> Client | `name(string) + description(string)` |
 | `OP_SERVERDESCRES` (extended) | Server -> Client | `challenge(uint32) + tags` |
 
@@ -148,6 +199,13 @@ offset +36; see [server-udp-crypt-ping.md](server-udp-crypt-ping.md).
 | `OP_NAT_PING` | Empty payload (`payloadLen=0`) |
 | legacy keepalive (non-`PR_NAT`) | Raw single-byte UDP packet (no NAT envelope/opcode) |
 
+A matched keepalive of either form also counts as **eD2K session liveness**: the user hash
+it identifies is looked up among logged-in connections and that socket's read deadline is
+pushed out by `tcp.disconnectTimeout`. Without this, a share-only LowID client — one that
+publishes files, keeps its `PR_NAT` registration fresh so it stays punchable, and sends no
+TCP traffic for hours — was reaped by the idle path and all of its sources vanished, even
+though the keepalives proved it reachable.
+
 ## Notes
 
 - Exact field encoding for each payload is implemented in:
@@ -155,3 +213,9 @@ offset +36; see [server-udp-crypt-ping.md](server-udp-crypt-ping.md).
   - `ed2k/udpoperations.go`
   - `ed2k/packet.go`
   - `ed2k/nattraversal.go`
+- There is no server-to-server gossip: the `OP_SERVERLIST` we return is the static
+  `servers:` list from config, and the UDP `SERVER_LIST_REQ/RES` (`0xa0`/`0xa1`)
+  exchange other servers use to trade peers is not implemented.
+- For how this surface compares to other server implementations — in particular
+  which extensions are ours alone and which LowID↔LowID design belongs to whom —
+  see [`ed2k-server-rust-comparison.local.md`](ed2k-server-rust-comparison.local.md).
