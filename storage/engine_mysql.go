@@ -462,7 +462,7 @@ func (m *MySQLEngine) ServersCount() int {
 }
 
 func (m *MySQLEngine) AddServer(server Server) {
-	m.servers = append(m.servers, server)
+	m.servers, _ = appendUniqueServer(m.servers, server)
 }
 
 func (m *MySQLEngine) ServersAll() []Server {

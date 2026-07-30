@@ -167,6 +167,21 @@ storage:
     # discovers the hash in the first place. Defaults to true when omitted.
     keepZeroSourceFiles: true
     batchSize: 1000
+  # Persist the in-RAM index to disk so a restart does not have to re-learn it from
+  # client re-offers. Memory engine only: mysql and mongodb already persist, and
+  # enabling this under them is a logged no-op. Written every intervalMinutes and
+  # once more on shutdown; loaded at startup.
+  #
+  # Off by default — it trades disk and a periodic write for a warm start, and the
+  # file can be large (see docs/memory-footprint.md for the RAM figures it tracks).
+  # Restoring matches what a mysql server looks like after a restart: files come
+  # back searchable, but sources and clients do not come back online, so source
+  # lists stay empty until each client re-offers. See docs/storage-snapshot.md.
+  snapshot:
+    enabled: false
+    file: "data/storage.gob"
+    intervalMinutes: 15
+    compress: true      # gzip the gob; the reader detects either form on load
   mysql:
     database: enode
     host: localhost

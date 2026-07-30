@@ -28,6 +28,9 @@
 - IPv6 双栈：接受 IPv6 登录、记录并校验各客户端的 IPv6、发布 IPv6 源，并在 `OP_SERVERLIST` 中通告 IPv6 对端服务器（兼容 eMuleAI/eMuleQt 的 `CT_MOD_*`）。详见 [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md)。设置 `ipv6.enabled: false` 可恢复纯 IPv4 行为。
 - 支持大于 4 GiB 的文件
 - 管理状态面板：仅用 Go 标准库（零第三方依赖）通过 HTTP 提供的单页自包含 HTML，展示实时的客户端 / 文件 / LowID / 对等服务器数量、监听端口、已启用特性、版本与运行时长。默认开启且仅绑定 `127.0.0.1`；实时数据轮询 `/stats.json` 接口。详见 [`docs/admin-status-dashboard.md`](docs/admin-status-dashboard.md)。
+- 内存引擎快照：可将内存中的索引按周期及关闭时持久化为 gob 文件，并在启动时重新载入，
+  重启后无需再依赖客户端重新上报来重建索引。默认关闭；恢复后的状态与 mysql 引擎重启后
+  完全一致。详见 [`docs/storage-snapshot.md`](docs/storage-snapshot.md)。
 - 易于扩展多种存储引擎
 
 ## NAT Traversal 传输截图
@@ -125,6 +128,11 @@ storage:
     intervalMinutes: 60      # 清理扫描的执行间隔
     keepZeroSourceFiles: true # 保留最后一个源离线的文件（默认 true）
     batchSize: 1000          # 每批删除的行数
+  snapshot:                  # 将内存引擎索引持久化，跨重启保留
+    enabled: false           # 默认关闭；仅对 memory 引擎生效
+    file: "data/storage.gob" # 由服务端写入，故置于 data/ 下
+    intervalMinutes: 15      # 快照重写间隔
+    compress: true           # 对 gob 进行 gzip 压缩；读取时自动识别两种格式
   mysql:
     host: localhost          # MySQL 主机
     port: 3306               # MySQL 端口

@@ -303,4 +303,21 @@ const (
 	ENodeVersionStr = "v0.1.0"
 	ENodeVersionInt = 0x00000003
 	ENodeName       = "eNode-go"
+
+	// GossipCompatVersion is a protocol-compatibility claim, not our own version, and it
+	// is load-bearing. Lugdunum eserver parses the ST_VERSION (0x91) tag of our
+	// OP_SERVER_DESC_RES with sscanf("%d.%d") and refuses to flag a peer `working` below
+	// 17.7 — silently, with no log line. A non-working peer is absent from its server.met
+	// and from BOTH of its peer-list replies, so without this we are invisible to every
+	// client and every server behind a real eserver. See docs/server-gossip.md §3 and
+	// docs/interop-docker-tests.md §5.
+	GossipCompatVersion = "17.14"
+
+	// GossipVersionStr is what that tag actually carries: "17.14 (eNode-go v0.1.0)".
+	// eserver's sscanf stops at the space and ignores the rest; eMule displays the whole
+	// string in its server-list Version column, so the part eserver ignores is where we
+	// say who we really are. Concatenated from the constants above rather than spelled
+	// out, so a release bump of ENodeVersionStr carries here with nothing to remember —
+	// scripts/publish-release.sh checks that this stays true.
+	GossipVersionStr = GossipCompatVersion + " (" + ENodeName + " " + ENodeVersionStr + ")"
 )

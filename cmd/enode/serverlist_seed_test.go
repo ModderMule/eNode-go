@@ -64,6 +64,29 @@ func TestServerListSeedsPublicIPv6(t *testing.T) {
 	}
 }
 
+// TestServerListSeedSkipsDuplicates covers a peer listed more than once under
+// `servers:`. eMule's AddServer keeps the entry it already has and discards the
+// incoming duplicate (srchybrid/ServerList.cpp:230-234); we do the same, and the
+// two IPv6 spellings here are one peer, not two.
+func TestServerListSeedSkipsDuplicates(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	entries := []config.ServerEntry{
+		{IP: "111.222.111.222", Port: 1234},
+		{IP: "111.222.111.222", Port: 1234}, // exact duplicate
+		{IP: "2001:db8::1", Port: 4661},
+		{IP: "2001:DB8::1", Port: 4661},     // same peer, different spelling
+		{IP: "111.222.111.222", Port: 4661}, // same host, other port: kept
+	}
+	t.Logf("input: %d entries, 2 of them duplicates", len(entries))
+	seedServers(engine, entries)
+
+	got := engine.ServersAll()
+	t.Logf("output: %d server(s) seeded: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("want 3 unique servers, got %d: %+v", len(got), got)
+	}
+}
+
 // TestServerListEmptyByDefault confirms an omitted `servers:` seeds nothing — the
 // unchanged default, and correct where the Node original shipped invalid dummies.
 func TestServerListEmptyByDefault(t *testing.T) {

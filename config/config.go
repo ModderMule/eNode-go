@@ -304,10 +304,28 @@ func boolOrDefault(p *bool, def bool) bool {
 }
 
 type StorageConfig struct {
-	Engine  string        `yaml:"engine"`
-	Cleanup CleanupConfig `yaml:"cleanup"`
-	MySQL   MySQLConfig   `yaml:"mysql"`
-	MongoDB MongoDBConfig `yaml:"mongodb"`
+	Engine   string         `yaml:"engine"`
+	Cleanup  CleanupConfig  `yaml:"cleanup"`
+	Snapshot SnapshotConfig `yaml:"snapshot"`
+	MySQL    MySQLConfig    `yaml:"mysql"`
+	MongoDB  MongoDBConfig  `yaml:"mongodb"`
+}
+
+// SnapshotConfig persists the memory engine's index to disk so a restart does not
+// start empty. It applies to the memory engine only — mysql and mongodb already
+// persist, and enabling it under those is a logged no-op rather than an error.
+//
+// Enabled is a plain bool, not a *bool: the default is off, which is exactly what
+// an absent key already yields, so there is nothing for the pointer to disambiguate
+// (unlike CleanupConfig.KeepZeroSourceFiles, whose default is on).
+type SnapshotConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	File            string `yaml:"file"`
+	IntervalMinutes int    `yaml:"intervalMinutes"`
+	// Compress gzip-wraps the gob stream, roughly halving a file that is dominated
+	// by filenames. The reader sniffs the gzip magic rather than trusting this, so
+	// flipping it does not orphan the snapshot already on disk.
+	Compress bool `yaml:"compress"`
 }
 
 type CleanupConfig struct {
@@ -507,6 +525,17 @@ func setDefaults(cfg *Config) error {
 	if cfg.Storage.Cleanup.IntervalMinutes <= 0 {
 		cfg.Storage.Cleanup.IntervalMinutes = 60
 	}
+	// Fifteen minutes bounds how much of the index a crash can cost while keeping
+	// the write off the hot path; an orderly shutdown flushes regardless, so this
+	// only matters for a kill.
+	if cfg.Storage.Snapshot.IntervalMinutes <= 0 {
+		cfg.Storage.Snapshot.IntervalMinutes = 15
+	}
+	// Under DataDir for the same reason as server.met: the server writes it, unlike
+	// the operator-supplied ipfilter and schema files.
+	if cfg.Storage.Snapshot.File == "" {
+		cfg.Storage.Snapshot.File = filepath.Join(DataDir, "storage.gob")
+	}
 	if cfg.Storage.MySQL.Port == 0 {
 		cfg.Storage.MySQL.Port = 3306
 	}
@@ -556,6 +585,9 @@ func ResolveDataPath(path string) string {
 
 // ServerMetPath is the resolved location of the gossip peer file.
 func (c Config) ServerMetPath() string { return ResolveDataPath(c.Gossip.ServerMetFile) }
+
+// StorageSnapshotPath is the resolved location of the memory-engine snapshot.
+func (c Config) StorageSnapshotPath() string { return ResolveDataPath(c.Storage.Snapshot.File) }
 
 // GeoIPDatabasePath is the resolved location of the MaxMind country database.
 func (c Config) GeoIPDatabasePath() string { return ResolveDataPath(c.Filter.GeoIP.Database) }

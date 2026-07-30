@@ -157,7 +157,11 @@ func BuildServerDescResPacket(challenge uint32, cfg UDPConfig) (*Buffer, error) 
 			{Type: TypeString, Code: TagName, Data: cfg.Name},
 			{Type: TypeString, Code: TagDescription, Data: cfg.Description},
 			{Type: TypeString, Code: TagDynIP, Data: cfg.DynIP},
-			{Type: TypeUint32, Code: TagVersion2, Data: uint32(ENodeVersionInt)},
+			// String rather than uint32, and not ENodeVersionInt. Both forms reach the same
+			// sscanf("%d.%d") in eserver, which admits a peer to its `working` set only at
+			// 17.7 or above; the string form lets the part it ignores name us honestly,
+			// since this reply answers clients as well as peer servers. See GossipVersionStr.
+			{Type: TypeString, Code: TagVersion2, Data: GossipVersionStr},
 			{Type: TypeString, Code: TagAuxPortsList, Data: ""},
 		}},
 	}

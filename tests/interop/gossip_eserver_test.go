@@ -9,10 +9,13 @@ import (
 	"enode/ed2k"
 )
 
-// Paths inside the containers.
+// Paths inside the containers. eserver's console `saveServers` resolves its filename
+// against its working directory, which the Dockerfile sets to /eserver, so the bare name
+// is what the command takes and the absolute path is what we read back.
 const (
-	enodeServerMet   = "/rig/data/server.met"
-	eserverServerMet = "/eserver/server.met"
+	enodeServerMet       = "/rig/data/server.met"
+	eserverServerMetName = "server.met"
+	eserverServerMet     = "/eserver/" + eserverServerMetName
 )
 
 // eserverRejections are eserver's own log strings for a refused peer. Each one names a
@@ -122,9 +125,10 @@ func TestGossipWithLugdunumEserver(t *testing.T) {
 	// `dynip=… version=… enode`, which can only have come from the tags in our 0xa3 — but
 	// whether it is still there when the row is sampled is a coin flip: it turns up on
 	// roughly one run in three, and every round logs `Updating server … name= desc=` with
-	// both fields empty. That is eserver's own bookkeeping, part of the same unreliability
-	// as the `working` flag in docs/interop-docker-tests.md §5, so it is logged rather than
-	// asserted. Phase 4 itself is covered by the `servdescreply(` check above.
+	// both fields empty. That is eserver's add/update path (fcn.0042f7d0) overwriting the
+	// strings from a round that carried no tags, unrelated to the version gate below, so
+	// it is logged rather than asserted. Phase 4 itself is covered by the `servdescreply(`
+	// check above.
 	const nameMarker = "enode"
 	// The richest row observed is kept rather than the latest, because eserver takes the
 	// name back out again on later rounds. `ask` is issued once, before this loop and never
@@ -169,26 +173,41 @@ func TestGossipWithLugdunumEserver(t *testing.T) {
 		}
 	}
 
-	// eserver's server.met, forced with saveServers rather than waited for — autoservlist
-	// writes on a fixed ~225s tick.
+	// eserver's server.met. Its writer (fcn.00430300, `cmp dword [rax+0x18], 1`) emits only
+	// peers it has flagged `working`, and the sole writer of that flag is the version gate
+	// in its 0xa3 handler — so this file is the sharpest available assertion that our
+	// ST_VERSION tag is being accepted. It was a known gap until we started advertising
+	// GossipVersionStr; see docs/interop-docker-tests.md §5.
 	//
-	// Reported, not asserted, and the distinction is deliberate. The manual says the file
-	// holds "only working known servers", and `working` is an internal flag of a
-	// closed-source binary that we have not been able to make it set for us: measured over
-	// four minutes, its ping counters for our row freeze after an initial burst and do not
-	// move again, with or without a client and a published file on our side. Its live table
-	// above is the authoritative evidence that it admitted us; making the run fail on a
-	// heuristic we cannot drive would be asserting something we do not understand.
+	// The filename argument is mandatory: fcn.0042c3a0 hands the rest of the console line
+	// to the writer, which returns -1 on an empty one, so a bare `saveServers` writes
+	// nothing and logs nothing. Polled, because the console, its UDP workers and our gossip
+	// rounds all run on separate clocks.
 	//
-	// Read through our own ReadServerMet, so eserver's own entry in it still validates our
+	// Read through our own ReadServerMet, so eserver's own entry in it also validates our
 	// parser against the 2007 writer.
-	eserver.console("saveServers")
-	theirMet := eserver.serverMet(eserverServerMet)
+	var theirMet []ed2k.ServerMetEntry
+	waitFor(t, 60*time.Second, "eserver's server.met to contain us", func() bool {
+		eserver.console("saveServers " + eserverServerMetName)
+		theirMet = eserver.serverMet(eserverServerMet)
+		return containsEntry(theirMet, enode.ip, enodeTCPPort)
+	})
 	t.Logf("output: eserver %s -> %s", eserverServerMet, describeEntries(theirMet))
-	if containsEntry(theirMet, enode.ip, enodeTCPPort) {
-		t.Logf("output: eserver now persists us in its own server.met — the `working` flag it withholds has flipped; this assertion can be made fatal")
-	} else {
-		t.Logf("output: KNOWN GAP — eserver has us in its live table but not in server.met; it never marks us `working`. See docs/interop-docker-tests.md")
+	if !containsEntry(theirMet, enode.ip, enodeTCPPort) {
+		t.Errorf("eserver holds us in its live table but never wrote us to %s: it has not flagged us "+
+			"`working`, which means the ST_VERSION tag in our 0xa3 no longer parses as >= 17.7 "+
+			"(ed2k.GossipVersionStr). A peer below that bar is never named to a client or to another server",
+			eserverServerMet)
+	}
+
+	// The working count, as corroboration. Sampled from a `vs` issued *after* the poll
+	// above and read from the newest of those lines: the flag can flip several seconds
+	// after the row itself is complete, so a total taken any earlier reads `0 working
+	// servers` on a run where the peer demonstrably is working. Logged, not asserted — the
+	// total is over every peer it holds.
+	eserver.console("vs")
+	if totals := allLinesMatching(eserver.logs(), "working servers"); len(totals) > 0 {
+		t.Logf("output: eserver %s", strings.TrimSpace(totals[len(totals)-1]))
 	}
 
 	// --- what a client sees --------------------------------------------------------------

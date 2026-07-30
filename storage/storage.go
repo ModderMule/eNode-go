@@ -304,7 +304,7 @@ func (m *MemoryEngine) ServersCount() int {
 func (m *MemoryEngine) AddServer(server Server) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.servers = append(m.servers, server)
+	m.servers, _ = appendUniqueServer(m.servers, server)
 }
 
 func (m *MemoryEngine) ServersAll() []Server {

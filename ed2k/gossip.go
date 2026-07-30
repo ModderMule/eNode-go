@@ -14,12 +14,16 @@ import (
 // gossipclient.go. See docs/server-gossip.md.
 //
 // The table lives here rather than behind storage.Engine deliberately. MySQLEngine and
-// MongoDBEngine implement AddServer/ServersAll as bare slice appends with no mutex
+// MongoDBEngine implement AddServer/ServersAll as unsynchronized slice operations
 // (storage/engine_mysql.go, storage/engine_mongodb.go) — safe today only because
 // seedServers() is their single caller and runs before any listener binds. Gossip
 // writes from the UDP worker pool, so routing it through Engine would introduce a data
 // race in two of the three engines. GossipHandler carries its own lock instead, and
 // the client-facing OP_SERVERLIST merges the two sources at send time.
+//
+// The two tables deduplicate independently: gossip keys g.peers by address, and the
+// engines deduplicate on storage.ServerAddrKey, with advertisableServers collapsing
+// what is left across both sources when it builds the reply.
 
 // peerState is a peer's position in the admission sequence. Advancing past peerKeyed
 // requires the peer to answer a frame we encrypted with the ServerKey it issued for our

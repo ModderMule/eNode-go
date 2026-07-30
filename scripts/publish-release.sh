@@ -9,6 +9,12 @@ set -euo pipefail
 # read that same constant to name their artifacts, so tag, artifact and the
 # version the binary reports all stay in lockstep.
 #
+# GossipVersionStr -- the ST_VERSION (0x91) value we advertise to peer servers
+# and to clients -- IS bumped, but by derivation: it is a const expression built
+# from ENodeVersionStr, so the single sed below carries it. Its leading "17.14"
+# is a Lugdunum protocol-compatibility claim and must never move with a release;
+# see the guard further down.
+#
 # ENodeVersionInt (the ed2k wire-protocol version) is deliberately NOT bumped
 # here; it changes only when the protocol changes.
 #
@@ -71,6 +77,18 @@ if [[ "$GOT" != "$NEW" ]]; then
   git checkout -- "$CONST_FILE"
   exit 1
 fi
+
+# GossipVersionStr -- the ST_VERSION we advertise to peer servers and to clients --
+# is derived from ENodeVersionStr, so the bump above carries it. Checked rather than
+# assumed: if it is ever unpicked into a literal, a release would keep telling the
+# ed2k network the previous version, and nothing else in the build would notice.
+if ! grep -qE 'GossipVersionStr[[:space:]]*=.*ENodeVersionStr' "$CONST_FILE"; then
+  echo "error: GossipVersionStr in ${CONST_FILE} no longer derives from ENodeVersionStr;" >&2
+  echo "       the version advertised over ed2k would not have been bumped" >&2
+  git checkout -- "$CONST_FILE"
+  exit 1
+fi
+
 git add "$CONST_FILE"
 
 # --- confirm ----------------------------------------------------------------

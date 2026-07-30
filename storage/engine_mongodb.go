@@ -789,7 +789,7 @@ func (m *MongoDBEngine) ServersCount() int {
 }
 
 func (m *MongoDBEngine) AddServer(server Server) {
-	m.servers = append(m.servers, server)
+	m.servers, _ = appendUniqueServer(m.servers, server)
 }
 
 func (m *MongoDBEngine) ServersAll() []Server {

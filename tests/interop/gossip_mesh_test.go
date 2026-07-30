@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"enode/ed2k"
 )
 
 // TestGossipBetweenTwoENodes covers what no run against eserver can: our own inbound
@@ -67,10 +69,14 @@ func TestGossipBetweenTwoENodes(t *testing.T) {
 // never told about, from a third party.
 //
 // enode-b registers with eserver; enode-a is seeded with eserver *only* and must end up
-// knowing b. Whether eserver serves its peer list to us at all was genuinely unknown before
-// this test existed — it had never had a peer to serve — so a failure here is a finding
-// about the reference implementation, not necessarily a defect in ours. The failure message
-// says so.
+// knowing b. This was a skip until we started advertising a Lugdunum-compatible
+// ST_VERSION: eserver builds every peer list — for clients and for servers alike — from
+// one function that skips peers it has not flagged `working` (fcn.00430010), and the sole
+// writer of that flag is the version gate in its 0xa3 handler. With no qualifying entry it
+// sends no datagram at all, so the old run saw silence rather than an empty list.
+//
+// Both halves therefore have to hold for this to pass: eserver must flag B `working`, and
+// it must then serve B to A. The first is checked directly below so a failure says which.
 func TestGossipPropagatesThroughEserver(t *testing.T) {
 	pool := requireInterop(t)
 	network := newNetwork(t, pool, false)
@@ -90,6 +96,24 @@ func TestGossipPropagatesThroughEserver(t *testing.T) {
 		eserver.console("vs")
 		return lineContaining(eserver.logs(), fmt.Sprintf("%s:%d {", nodeB.ip, enodeTCPPort)) != ""
 	})
+
+	// Holding B is necessary but not sufficient: a peer eserver has not flagged `working`
+	// is in its table, pinged forever, and invisible to its peer-list builder. Its
+	// server.met has the same gate, so it is the one artifact that separates "eserver never
+	// accepted B" from "eserver accepted B but did not pass it on" — and without this check
+	// the failure below could mean either.
+	var theirMet []ed2k.ServerMetEntry
+	if !waitFor(t, 60*time.Second, "eserver's server.met to contain B", func() bool {
+		eserver.console("saveServers " + eserverServerMetName)
+		theirMet = eserver.serverMet(eserverServerMet)
+		return containsEntry(theirMet, nodeB.ip, enodeTCPPort)
+	}) {
+		t.Fatalf("eserver holds B in its table but never wrote it to %s (%s): B is not flagged `working`, "+
+			"so eserver's peer-list builder skips it and A cannot possibly learn it. The ST_VERSION tag in "+
+			"B's 0xa3 must parse as >= 17.7 — see ed2k.GossipVersionStr",
+			eserverServerMet, describeEntries(theirMet))
+	}
+	t.Logf("output: eserver %s -> %s (B is `working`)", eserverServerMet, describeEntries(theirMet))
 
 	// A knows only eserver. Anything it learns about B came through eserver's peer list.
 	nodeA := startEnode(t, pool, network, enodeOptions{
@@ -131,14 +155,17 @@ func TestGossipPropagatesThroughEserver(t *testing.T) {
 		}
 	}
 
-	t.Skipf("eserver does not propagate peers to us: A sent 0xA4 list requests and received %d "+
-		"non-empty replies, while eserver's own table holds both %s and %s.\n\n"+
-		"Same root cause as the server.met gap in TestGossipWithLugdunumEserver — eserver publishes "+
-		"only servers it has flagged `working`, reports `0 working servers`, and nothing we send makes "+
-		"it set that flag. So propagation *through a Lugdunum node* is not reachable from our side. "+
-		"Our own propagation is covered by TestGossipBetweenTwoENodes. Kept as a skip rather than "+
-		"deleted: if a later change makes eserver flag us working, this starts passing and says so.\n"+
-		"See docs/interop-docker-tests.md.\n\neserver gossip lines:\n%s",
+	// Every 0xA1 we received was empty, and B is `working` — checked above — so eserver had
+	// something to say and did not say it. That is a change in the reference server's
+	// behaviour, or in the request we send it, and either way it is a real failure now.
+	t.Fatalf("A never learned B through eserver: it sent 0xA4 list requests and got %d non-empty "+
+		"replies, while eserver's table and server.met both hold %s and %s.\n\n"+
+		"eserver serves both OP_SERVERLIST and OP_SERVER_LIST_RES from one builder that skips "+
+		"peers it has not flagged `working`, and B clears that gate, so an empty list means the "+
+		"request itself was refused rather than the peer being withheld. Check the refusal strings "+
+		"in the trace below — `ignore non obfuscated OP_SERVER_LIST_REQ` and `from unknown server` "+
+		"are the two that produce exactly this.\nSee docs/interop-docker-tests.md.\n\n"+
+		"eserver gossip lines:\n%s",
 		len(replies), nodeA.ip, nodeB.ip, gossipLines(eserver.logs()))
 }
 

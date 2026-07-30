@@ -123,6 +123,39 @@ func run(ctx context.Context, configPath string) error {
 		}
 	}()
 
+	// Restore the persisted index before anything can serve it, and start the
+	// writer. The stopper is deferred after engine.Close() was registered above, so
+	// LIFO unwinding flushes the final snapshot while the engine is still alive.
+	if cfg.Storage.Snapshot.Enabled {
+		snapshotPath := cfg.StorageSnapshotPath()
+		if loader, ok := engine.(*storage.MemoryEngine); ok {
+			stats, err := loader.LoadSnapshot(snapshotPath)
+			switch {
+			case err != nil:
+				// Not fatal. A corrupt or half-written snapshot must not stop the
+				// server from booting; it starts empty and rebuilds from re-offers.
+				logging.Warnf("storage snapshot: cannot read %s, starting with an empty index: %v",
+					snapshotPath, err)
+			case stats.Files > 0:
+				logging.Infof("storage snapshot: restored %d file(s) from %s in %s "+
+					"(%d source(s) and %d client(s) in the file were not restored: they are offline after a restart)",
+					stats.Files, snapshotPath, stats.Took.Round(time.Millisecond), stats.Sources, stats.Clients)
+			default:
+				// Covers both a first start with no file yet and a snapshot that
+				// held nothing, which are the same thing from here.
+				logging.Infof("storage snapshot: no usable snapshot at %s, starting with an empty index",
+					snapshotPath)
+			}
+		}
+		stopSnapshot := storage.StartSnapshot(
+			engine,
+			snapshotPath,
+			time.Duration(cfg.Storage.Snapshot.IntervalMinutes)*time.Minute,
+			cfg.Storage.Snapshot.Compress,
+		)
+		defer stopSnapshot()
+	}
+
 	seedServers(engine, cfg.Servers)
 
 	// Debug-only: pre-populate the engine with dummy peers and files so the search /
@@ -594,7 +627,9 @@ func startServerMetPersistence(ctx context.Context, path string, every time.Dura
 		every = 225 * time.Second
 	}
 	done := make(chan struct{})
+	finished := make(chan struct{})
 	go func() {
+		defer close(finished)
 		ticker := time.NewTicker(every)
 		defer ticker.Stop()
 		write := func() {
@@ -624,8 +659,16 @@ func startServerMetPersistence(ctx context.Context, path string, every time.Dura
 			}
 		}
 	}()
+	// The stopper blocks until the final write has actually finished. Signalling and
+	// returning would let main's remaining defers run and the process exit while
+	// WriteServerMet is still writing — a small file usually wins that race, but
+	// "usually" is the whole problem: the losing case silently drops a shutdown flush
+	// and leaves a temp file behind. Same shape as storage.StartSnapshot's stopper.
 	var once sync.Once
-	return func() { once.Do(func() { close(done) }) }
+	return func() {
+		once.Do(func() { close(done) })
+		<-finished
+	}
 }
 
 // advertisedUDPObfPort is the portUDPOBF value published at offset 32 of the extended
@@ -773,12 +816,23 @@ func serverIdentitySeed(advertisedIP, configuredAddress string) string {
 // entry classified as neither is skipped with a warning rather than aborting, so
 // one typo cannot silence the whole list. Empty config (the default) seeds nothing.
 func seedServers(store storage.Engine, entries []config.ServerEntry) {
+	// The engines deduplicate on their own, so this set exists only to name the
+	// offending entry: an operator who listed a peer twice should be told which one
+	// was dropped rather than left to notice a count that does not match the file.
+	seen := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
 		if _, _, fam := ed2k.ClassifyServerIP(e.IP); fam == 0 {
 			logging.Warnf("skipping server list entry %q:%d: not a valid IPv4 or public IPv6", e.IP, e.Port)
 			continue
 		}
-		store.AddServer(storage.Server{IP: e.IP, Port: e.Port})
+		server := storage.Server{IP: e.IP, Port: e.Port}
+		key := storage.ServerAddrKey(server)
+		if _, dup := seen[key]; dup {
+			logging.Warnf("duplicate server list entry %q:%d ignored", e.IP, e.Port)
+			continue
+		}
+		seen[key] = struct{}{}
+		store.AddServer(server)
 	}
 	if n := store.ServersCount(); n > 0 {
 		logging.Infof("advertising %d server(s) in OP_SERVERLIST", n)

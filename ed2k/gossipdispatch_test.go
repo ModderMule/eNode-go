@@ -375,6 +375,60 @@ func TestAdvertisableServersUnchangedWithoutGossip(t *testing.T) {
 	}
 }
 
+// duplicateServerEngine hands back a peer list containing duplicates, which the
+// real engines can no longer produce now that AddServer deduplicates. It exists to
+// prove advertisableServers does not *depend* on that: the wire list is the last
+// thing between storage and the client, so it collapses duplicates itself.
+type duplicateServerEngine struct {
+	storage.Engine
+	servers []storage.Server
+}
+
+func (d duplicateServerEngine) ServersAll() []storage.Server { return d.servers }
+
+// TestAdvertisableServersDeduplicatesWithoutGossip covers the path that had no
+// deduplication at all: with gossip disabled the function used to return
+// Storage.ServersAll() verbatim, so anything duplicated upstream was published twice.
+func TestAdvertisableServersDeduplicatesWithoutGossip(t *testing.T) {
+	rt, _ := dispatchRuntime(t, false, nil)
+	in := []storage.Server{
+		{IP: "192.0.2.10", Port: 4661},
+		{IP: "192.0.2.10", Port: 4661},
+		{IP: "192.0.2.10", Port: 5661},
+	}
+	rt.Storage = duplicateServerEngine{Engine: rt.Storage, servers: in}
+
+	got := rt.advertisableServers()
+	t.Logf("input:  gossip off, storage returns %d entries %v", len(in), in)
+	t.Logf("output: %d entries %v", len(got), got)
+
+	if len(got) != 2 {
+		t.Fatalf("got %d entries %v, want 2 — the duplicate was not collapsed", len(got), got)
+	}
+}
+
+// TestAdvertisableServersCollapsesIPv6Spellings is the bug this dedup pass exists
+// for. Configured entries were keyed on the raw config string while gossip peers
+// were keyed on net.IP.String(), so an operator who wrote an IPv6 literal in any
+// form but the canonical one got the same peer listed twice.
+func TestAdvertisableServersCollapsesIPv6Spellings(t *testing.T) {
+	rt, g := dispatchRuntime(t, true, nil)
+	rt.Storage.AddServer(storage.Server{IP: "2001:DB8::1", Port: 4661})
+
+	addr := PeerAddr{IP: net.ParseIP("2001:db8::1"), Port: 4661}
+	g.mu.Lock()
+	g.peers[addr.String()] = &PeerServer{Addr: addr, State: peerVerified}
+	g.mu.Unlock()
+
+	got := rt.advertisableServers()
+	t.Logf("input:  configured %q, gossip-verified %q (the same peer)", "2001:DB8::1", "2001:db8::1")
+	t.Logf("output: %d entries %v", len(got), got)
+
+	if len(got) != 1 {
+		t.Fatalf("got %d entries %v, want 1 — the two spellings did not collapse", len(got), got)
+	}
+}
+
 // TestGossipSeedsFromServersFiltersJunk covers the shared config/server.met filter.
 func TestGossipSeedsFromServersFiltersJunk(t *testing.T) {
 	in := []storage.Server{

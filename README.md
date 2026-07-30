@@ -54,6 +54,11 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   (eMuleAI/eMuleQt `CT_MOD_*` compatible). See
   [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md).
   Disable with `ipv6.enabled: false` for the exact IPv4-only behaviour.
+- Memory-engine snapshots: the in-RAM index can be persisted to a gob file
+  periodically and on shutdown, and reloaded at startup, so a restart does not have
+  to re-learn the index from client re-offers. Off by default; restoring reproduces
+  what a mysql-backed server looks like after a restart. See
+  [`docs/storage-snapshot.md`](docs/storage-snapshot.md).
 - Easy support for multiple storage engines
 
 ## NAT Traversal Transfer Screenshot
@@ -152,6 +157,11 @@ storage:
     intervalMinutes: 60      # How often the cleanup sweep runs
     keepZeroSourceFiles: true # Keep files whose last source went offline (default true)
     batchSize: 1000          # Rows deleted per sweep batch
+  snapshot:                  # Persist the memory-engine index across restarts
+    enabled: false           # Off by default; memory engine only
+    file: "data/storage.gob" # Written by the server, hence under data/
+    intervalMinutes: 15      # How often the snapshot is rewritten
+    compress: true           # gzip the gob; the reader detects either form
   mysql:
     host: localhost          # MySQL host
     port: 3306               # MySQL port

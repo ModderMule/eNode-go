@@ -223,6 +223,23 @@ characters; the description may be empty but is bounded at 512. Those strings re
 the peer table and other servers' lists, so an unbounded or control-laden value from an
 unauthenticated source is not storable.
 
+**eserver reads one more field here than the name and description, and it is decisive.**
+The `ST_VERSION` (`0x91`) tag — string, or uint32 with major in the high half and minor in
+the low half — is parsed as `%d.%d`, and a peer is admitted to its `working` set only if
+`major > 17`, or `major == 17` and minor is at least 7. That set is what its `server.met`
+and *both* of its peer-list replies are drawn from, so a peer below the bar is held in
+memory, named in `vs`, pinged forever — and never mentioned to anyone. There is no
+rejection log for it, on either side.
+
+We therefore send `ed2k.GossipVersionStr` — `"17.14 (eNode-go v0.1.0)"` — as a **string**
+tag. Both tag forms end at the same `sscanf`, which stops at the space and ignores
+everything after the minor, so the compatibility claim and our real identity fit in one
+value. That matters because this reply is not gossip-only: the same handler answers a
+client's `0xA2`, and eMule shows the tag verbatim in its server-list Version column. The
+`17.14` prefix is a claim about protocol compatibility with a 2007 binary and never moves;
+the rest is derived from `ENodeVersionStr` so a release carries it. See §8 and
+`interop-docker-tests.md` §5.
+
 ---
 
 ## 4. Opcodes
@@ -330,6 +347,26 @@ A peer that produces no inbound frame for `gossip.maxFailures` consecutive round
 **parked**: no longer contacted, but retained, so any inbound frame revives it. A server
 down for an afternoon should not have to be rediscovered.
 
+### Deduplication
+
+Peers are identified by **(canonical address, TCP port)**, which is
+`CServerList::AddServer`'s rule: the address string, compared case-insensitively,
+with the port qualifying it, so two ports on one host stay two entries
+(`srchybrid/ServerList.cpp:202-240`). On a duplicate the entry already held wins and
+the incoming one is discarded.
+
+Three places apply it, because peers arrive by three routes:
+
+- the gossip table keys `g.peers` by address, so a peer harvested twice is one entry;
+- `Engine.AddServer` deduplicates the configured list on `storage.ServerAddrKey`, so
+  a peer listed twice under `servers:` is seeded once and logs a warning naming it;
+- `advertisableServers` collapses what is left across both sources when it builds
+  `OP_SERVERLIST`.
+
+The canonicalization matters for IPv6: an operator who writes `2001:DB8::1` in the
+config and a peer that reports `2001:db8::1` are the same server, and comparing the
+raw strings would advertise it twice.
+
 ---
 
 ## 6. Persistence — `server.met`
@@ -363,6 +400,12 @@ Two details that matter:
   peer list — losing the mesh the file exists to preserve.
 - An empty verified set is **not** written. Truncating a good file to zero entries because
   this boot has not finished its first handshake would throw the mesh away.
+- The shutdown write **blocks**. A clean stop flushes once more so it does not lose up to a
+  full interval of learned peers, and the stopper waits for that write to finish rather
+  than only signalling it — otherwise `main`'s remaining defers run and the process exits
+  mid-write. A file this small usually won that race, which is why the bug went unnoticed:
+  when it lost, the flush vanished and a `server.met.tmp-*` was left behind. Same shape as
+  the snapshot stopper in [`docs/storage-snapshot.md`](storage-snapshot.md).
 
 An entry whose IP field is 0 is skipped on read: eMule writes 0 for a dynIP server
 deliberately, and we have no hostname field to resolve it from — but its tags are still
@@ -444,14 +487,18 @@ Getting here cost two real defects, both invisible to unit tests and both descri
 move from `P+14` to `P+12`, and the unsolicited `0x97` echo had to go. The second was
 masked by the first.
 
-**Still open: eserver never marks us `working`.** It holds us in memory but does not write
-us to its `server.met` and does not name us to other servers — both gated on an internal
-flag it reports as `0 working servers`. Correcting the source port advanced its ping
-counters from `0/0` to `7/0`, but nothing tried since has flipped the flag: forcing rounds
-with `ask`, waiting four minutes, or giving our side a live client and a published file. The
-tests assert its live table and report the `server.met` state without failing on it, and
-`TestGossipPropagatesThroughEserver` is skipped for the same root cause with its evidence
-attached. §5 of the interop doc has the detail.
+**eserver marks us `working`, and getting there took a third defect.** It used to hold us
+in memory while refusing to write us to its `server.met` or name us to other servers — both
+gated on an internal flag whose only writer requires the `ST_VERSION` tag in our `0xA3`
+reply to parse as `>= 17.7`, where we advertised `0.3`. The same flag gates its peer-list
+builder, shared by `OP_SERVERLIST` and `OP_SERVER_LIST_RES`, so a non-`working` peer is
+never named to anyone — which is why `TestGossipPropagatesThroughEserver` saw no reply at
+all rather than an empty one, and was a skip.
+
+Sending `GossipVersionStr` (§3) fixed all three at once. Both interop cases now assert
+eserver's `server.met` instead of reporting it, and the propagation case is live. §5 of the
+interop doc has the detail; the address-level derivation is in
+`eserver-working-flag-disassembly.local.md`.
 
 ### Client-facing regression
 

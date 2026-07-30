@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1259,29 +1258,33 @@ func (c *tcpClient) sendServerList() {
 // for. With gossip disabled this returns exactly what it always did.
 func (s *ServerRuntime) advertisableServers() []storage.Server {
 	configured := s.Storage.ServersAll()
-	if s.Gossip == nil {
-		return configured
+	var verified []PeerAddr
+	if s.Gossip != nil {
+		verified = s.Gossip.Verified()
 	}
-	verified := s.Gossip.Verified()
+
 	out := make([]storage.Server, 0, len(configured)+len(verified))
 	seen := make(map[string]struct{}, len(configured)+len(verified))
-	for _, sv := range configured {
-		key := sv.IP + ":" + strconv.Itoa(int(sv.Port))
+	// Both sides go through storage.ServerAddrKey, which canonicalizes the address
+	// before comparing. Keying the configured entries on their raw config string
+	// instead would let the same peer appear twice whenever the operator spelled an
+	// IPv6 literal differently from the way gossip reports it ("2001:DB8::1" against
+	// 2001:db8::1). Deduplication runs even with gossip disabled, because a repeated
+	// entry under `servers:` is just as duplicated on the wire.
+	add := func(sv storage.Server) {
+		key := storage.ServerAddrKey(sv)
 		if _, dup := seen[key]; dup {
-			continue
+			return
 		}
 		seen[key] = struct{}{}
 		out = append(out, sv)
 	}
+
+	for _, sv := range configured {
+		add(sv)
+	}
 	for _, p := range verified {
-		// Keyed on the canonical string form of the parsed address so a configured
-		// "1.2.3.4" and a gossiped 1.2.3.4 collapse rather than appearing twice.
-		key := p.IP.String() + ":" + strconv.Itoa(int(p.Port))
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, storage.Server{IP: p.IP.String(), Port: p.Port})
+		add(storage.Server{IP: p.IP.String(), Port: p.Port})
 	}
 	return out
 }

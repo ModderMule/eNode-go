@@ -87,6 +87,72 @@ func fetchServerList(t *testing.T, hostIP, hostPort string) serverListReply {
 	}
 }
 
+// loginFrames is what the server volunteers to a client on the way in: every
+// OP_SERVERMESSAGE text, plus the OP_SERVERIDENT payload that closes the batch.
+type loginFrames struct {
+	Messages []string
+	Ident    []byte
+}
+
+// fetchLoginFrames logs in over TCP and collects those frames, stopping at
+// OP_SERVERIDENT. That opcode is a sound terminator rather than a guess: handShake sends
+// both server messages, the status and the ID change before it, unconditionally
+// (ed2k/server_runtime.go:933-938), so once it arrives nothing else is still in flight.
+//
+// Decoding is hand-rolled for the reason at the top of this file — the point is to read
+// what a *client* reads, and OP_SERVERMESSAGE is <len:2 LE><text>.
+func fetchLoginFrames(t *testing.T, hostIP, hostPort string) loginFrames {
+	t.Helper()
+
+	addr := net.JoinHostPort(hostIP, hostPort)
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		t.Fatalf("dial %s: %v", addr, err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(45 * time.Second))
+
+	// A hash distinct from the other clients in this package, so two cases running against
+	// the same server are two sessions rather than one being displaced by the other.
+	login := make([]byte, 0, 26)
+	for i := 0; i < 16; i++ {
+		login = append(login, byte(0xD0+i))
+	}
+	login = binary.LittleEndian.AppendUint32(login, 0)
+	login = binary.LittleEndian.AppendUint16(login, 4662)
+	login = binary.LittleEndian.AppendUint32(login, 0)
+	if err := writeFrame(conn, ed2k.OpLoginRequest, login); err != nil {
+		t.Fatalf("write OP_LOGINREQUEST: %v", err)
+	}
+	t.Logf("input: OP_LOGINREQUEST to %s (%d payload bytes)", addr, len(login))
+
+	var out loginFrames
+	seen := make([]string, 0, 8)
+	for {
+		opcode, payload, err := readFrame(conn)
+		if err != nil {
+			t.Fatalf("no OP_SERVERIDENT before %v (frames seen: %v)", err, seen)
+		}
+		seen = append(seen, fmt.Sprintf("0x%02x/%dB", opcode, len(payload)))
+		switch opcode {
+		case ed2k.OpServerMessage:
+			if len(payload) < 2 {
+				t.Fatalf("OP_SERVERMESSAGE payload is %d bytes, too short for a length prefix", len(payload))
+			}
+			n := int(binary.LittleEndian.Uint16(payload[:2]))
+			if 2+n > len(payload) {
+				t.Fatalf("OP_SERVERMESSAGE declares %d text bytes but carries %d", n, len(payload)-2)
+			}
+			out.Messages = append(out.Messages, string(payload[2:2+n]))
+		case ed2k.OpServerIdent:
+			out.Ident = payload
+			t.Logf("output: frames %v", seen)
+			t.Logf("output: %d server message(s): %q", len(out.Messages), out.Messages)
+			return out
+		}
+	}
+}
+
 // writeFrame emits <protocol:1><size:4 LE><opcode:1><payload>, where size counts the
 // opcode.
 func writeFrame(conn net.Conn, opcode uint8, payload []byte) error {
