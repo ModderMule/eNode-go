@@ -114,4 +114,25 @@ git push "${REMOTE}" "${NEW}"
 
 echo
 echo "Released ${NEW}."
-echo "Next: GitHub -> Actions -> run the Linux/Windows/macOS workflows to build artifacts for this tag."
+echo "Next: GitHub -> Actions -> run the Linux/Windows/macOS workflows to (re-)build artifacts for this tag."
+
+# --- optional: dispatch the builds manually ---------------------------------
+# Not needed while .github/workflows/*.yml carry their `push: tags: ['v*']`
+# trigger -- the tag push above already starts all three, and dispatching here
+# would build every release twice. Uncomment only if that trigger is removed
+# again, or to force a rebuild of this tag.
+#
+# Requires a gh account with write access to the repo; dispatch is an
+# actions:write operation, so a read-only login fails with 403. `|| true`
+# keeps a failed dispatch from taking down an otherwise-successful release,
+# since `set -e` is in effect and the tag is already pushed by this point.
+#
+# if command -v gh >/dev/null 2>&1; then
+#   read -r -p "Trigger the build workflows for ${NEW} now? [y/N]: " BUILD
+#   if [[ "${BUILD,,}" == "y" ]]; then
+#     for wf in linux.yml windows.yml macos.yml; do
+#       gh workflow run "$wf" --ref "${NEW}" || true
+#     done
+#     echo "Dispatched; watch with: gh run list --limit 3"
+#   fi
+# fi
