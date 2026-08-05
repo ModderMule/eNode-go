@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"enode/storage"
@@ -393,6 +394,11 @@ func Load(path string) (Config, error) {
 }
 
 func setDefaults(cfg *Config) error {
+	// Client-facing message text is stored LF-separated whatever the YAML style. The
+	// wire layer converts to CRLF on the way out — see ed2k.BuildServerMessagePacket.
+	cfg.MessageLogin = normalizeMessageText(cfg.MessageLogin)
+	cfg.MessageLowID = normalizeMessageText(cfg.MessageLowID)
+
 	// With IPv6 disabled, an empty bind pins to the IPv4 wildcard exactly as
 	// before. With IPv6 enabled, an empty bind is left empty so the listener binds
 	// the dual-stack wildcard ([::]) and accepts both families; an operator who
@@ -638,4 +644,39 @@ func (c Config) StorageEngineConfig() storage.Config {
 		MySQL:   mysqlCfg,
 		MongoDB: mongoCfg,
 	}
+}
+
+// normalizeMessageText canonicalises a client-facing message to LF line endings, so
+// everything downstream — the wire builder, the logs, the admin page — sees one
+// representation regardless of how the operator wrote it.
+//
+// Three input styles are accepted and all mean the same thing:
+//
+//	messageLogin: |-          # block scalar: real newlines
+//	  first
+//	  second
+//	messageLogin: "first\nsecond"   # double-quoted: YAML decodes \n itself
+//	messageLogin: 'first\nsecond'   # single-quoted/plain: YAML does NOT, so we do
+//
+// The last case is the reason the backslash forms are decoded here. YAML only honours
+// escapes inside double quotes, so without this an operator who reached for single
+// quotes would ship the literal two characters `\` `n` to every client and see no
+// error. The cost is that a message wanting a literal backslash-n cannot have one,
+// which no welcome banner has ever needed.
+//
+// Trailing newlines are trimmed. They add nothing a client displays — both eMule
+// trees skip empty tokens when splitting the message — but a naive third-party
+// splitter would render one as a blank line.
+func normalizeMessageText(s string) string {
+	if s == "" {
+		return ""
+	}
+	// Backslash escapes first: decoding them can only introduce more line endings,
+	// and doing it before the CR/LF pass means \r\n written either way converges.
+	s = strings.ReplaceAll(s, `\r\n`, "\n")
+	s = strings.ReplaceAll(s, `\n`, "\n")
+	// Real line endings second. CRLF before lone CR, so a CRLF does not become two.
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.Trim(s, "\n")
 }

@@ -11,7 +11,11 @@ testUrls:
   - "https://www.cloudflare.com/cdn-cgi/trace"
 
 messageLowID: "You have LowID."
-messageLogin: "Welcome to eNode!"
+
+# Keep it ASCII
+messageLogin: |-
+  Welcome to eNode!
+  An experimental ed2k server written in Go.
 
 # Peer servers advertised to clients in OP_SERVERLIST (never this server itself —
 # its own identity travels in OP_SERVERIDENT). Empty is valid and the default.

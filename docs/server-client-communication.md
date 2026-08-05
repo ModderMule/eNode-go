@@ -144,7 +144,7 @@ layouts: [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.
 | OP | Direction | Payload Format |
 |---|---|---|
 | `OP_LOGINREQUEST` | Client -> Server (parsed) | `hash16 + clientID(uint32) + clientPort(uint16) + tags` |
-| `OP_SERVERMESSAGE` | Server -> Client | `message(string)` |
+| `OP_SERVERMESSAGE` | Server -> Client | `message(string)`. May carry several lines in one packet, CRLF-separated — see [Multi-line server messages](#multi-line-server-messages) below. |
 | `OP_SERVERSTATUS` | Server -> Client | `clients(uint32) + files(uint32)` |
 | `OP_IDCHANGE` | Server -> Client | `clientID(uint32) + tcpFlags(uint32) + primaryTCPPort(uint32) + observedClientIPv4(uint32)`. eMule's full documented layout (`srchybrid/Opcodes.h:182`); it lower-bounds the size only, reading the flags at size >= 8 and the observed IP at size >= 16. `primaryTCPPort` is annotated "unused" by the reference and ignored by both surveyed clients. `observedClientIPv4` is the address the socket arrived from — the only public-IPv4 source a LowID client has — and is `0` when the server has no routable IPv4 for the session (v6-only, or a value a client would reject as a LowID). Such a session is assigned a LowID as well — an address ending in `.0` packs into the LowID range, so it cannot be a HighID either — which keeps `clientID` and `observedClientIPv4` consistent. See [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.md) §2 and §3a. |
 | `OP_SERVERLIST` | Server -> Client | `v4count(uint8) + repeated(serverIP(uint32) + serverPort(uint16))` [`+ v6count(uint8) + repeated(serverIPv6(hash16) + serverPort(uint16))`]. The trailing IPv6 block is appended only when IPv6 publication is on and a peer server has a public IPv6; it is pure trailing data after the self-terminating v4 count, so a v4-only client ignores it. See [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.md) §8. |
@@ -155,6 +155,46 @@ layouts: [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.
 | `OP_CALLBACKREQUESTED` | Server -> LowID Client | `targetIP(uint32) + targetPort(uint16)` |
 | `OP_CALLBACKREQUESTED_IPV6` | Server -> v6-capable LowID Client | `targetIPv6(hash16) + targetPort(uint16)` |
 | `OP_CALLBACKFAILED` | Server -> Client | Empty payload |
+
+#### Multi-line server messages
+
+`messageLogin` and `messageLowID` may span several lines. They travel as **one**
+`OP_SERVERMESSAGE`, not one packet per line: servers from 16.40 on batch them and eMule has
+split them client-side ever since (`srchybrid/ServerSocket.cpp:169-174`).
+
+Any newline style works in the YAML — a literal block scalar, or a `\n` / `\r\n` escape in
+any quoting style. `config.normalizeMessageText` folds them all to LF at load, and
+`ed2k.BuildServerMessagePacket` emits **CRLF** on the wire.
+
+CRLF is emitted even though both eMule trees accept a bare LF:
+
+- **MFC** tokenises with `strMessages.Tokenize(_T("\r\n"), iPos)`. `CString::Tokenize` takes
+  a *set of delimiter characters*, not a substring — the same idiom appears as
+  `Tokenize(_T(" \t\r\n"))` with the comment *"tokenize by whitespace"*
+  (`srchybrid/DirectDownloadDlg.cpp:87`). So CR and LF each end a line, and runs of them
+  collapse.
+- **Qt** folds CR into LF and splits with `Qt::SkipEmptyParts`
+  (`src/core/server/ServerConnect.cpp:1114-1128`), whose comment records that splitting on
+  the literal `"\r\n"` had missed bare-newline servers.
+
+A third-party client that splits on the literal two-character sequence has no such
+tolerance, and CRLF is the only encoding both strategies read identically. Pinned by
+`ed2k/servermessage_test.go`.
+
+Two consequences worth knowing when writing the text:
+
+- **Blank lines vanish.** Both trees skip empty tokens, so an empty line is not a blank
+  line in the client's info pane. Trailing newlines are trimmed at config load for the same
+  reason — invisible to eMule, but a naive splitter would draw one.
+- **Three line prefixes are reserved.** A line starting with `server version` sets the
+  server's displayed version; `ERROR` and `WARNING` are diverted to the log with
+  `bOutputMessage = false` and never shown as message text (`ServerSocket.cpp:176-201`).
+  Matching is anchored at the start of each line, so mentioning the words mid-sentence is
+  fine.
+- **Keep it ASCII.** The text is decoded as UTF-8 only once the client knows the server's
+  `SRV_TCPFLG_UNICODE` bit (`ServerSocket.cpp:159`), and that bit arrives in `OP_IDCHANGE`
+  (`ServerSocket.cpp:291`) — which the handshake sends *after* both messages. On a first-ever
+  connect the flag is still `0` and non-ASCII is read as ANSI.
 
 ### UDP Payloads (Implemented Here)
 

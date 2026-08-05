@@ -1,6 +1,8 @@
 package ed2k
 
 import (
+	"strings"
+
 	"enode/storage"
 )
 
@@ -415,10 +417,24 @@ func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
 	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
+// BuildServerMessagePacket builds OP_SERVERMESSAGE (0x38). A multi-line message is one
+// packet, not one per line: 16.40+ servers batch them and every client since expects it
+// (srchybrid/ServerSocket.cpp:169-174).
+//
+// Line endings are forced to CRLF here rather than at any call site, so no future caller
+// can bypass it. Both eMule trees would accept bare LF — the MFC client tokenises on
+// _T("\r\n") and CString::Tokenize treats that as a *set of delimiter characters*, not a
+// substring (the same idiom appears as Tokenize(_T(" \t\r\n")) "tokenize by whitespace"
+// at srchybrid/DirectDownloadDlg.cpp:87), and the Qt client folds CR into LF before
+// splitting. CRLF is emitted anyway because it is the convention every other server on
+// the network uses, so it is the only form third-party clients are known to have been
+// tested against: a client that splits on the literal two-character "\r\n" sees one line
+// where we meant several, which is exactly the bug the Qt client carried until it
+// switched to a character-set split.
 func BuildServerMessagePacket(message string) (*Buffer, error) {
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpServerMessage},
-		{Type: TypeString, Value: message},
+		{Type: TypeString, Value: crlfMessageLines(message)},
 	}
 	packet, err := MakePacket(PrED2K, pack)
 	if err != nil {
@@ -457,6 +473,23 @@ func BuildCallbackRequestedIPv6Packet(ipv6 []byte, port uint16) (*Buffer, error)
 		return nil, err
 	}
 	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
+}
+
+// crlfMessageLines rewrites a server message's line endings to CRLF. See
+// BuildServerMessagePacket, its only caller, for why CRLF.
+//
+// Idempotent, so it is safe on text that already arrived CRLF-separated — the config
+// layer hands us LF (config.normalizeMessageText), but the hardcoded messages in
+// server_runtime.go and anything a future caller passes go through the same path.
+func crlfMessageLines(s string) string {
+	if !strings.ContainsAny(s, "\r\n") {
+		return s
+	}
+	// Down to LF first — CRLF before lone CR, so a CRLF does not become two newlines —
+	// then back up to CRLF in one pass.
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.ReplaceAll(s, "\n", "\r\n")
 }
 
 // capWireSources truncates to what a single-byte count can describe. Applied at
