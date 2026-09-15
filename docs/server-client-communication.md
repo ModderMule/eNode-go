@@ -82,6 +82,7 @@ now handled — see the TCP table above and the search-paging note below.
 | `OP_GLOBSERVSTATREQ` | `0x96` | Client -> Server | UDP server stats request. |
 | `OP_SERVERDESCREQ` | `0xa2` | Client -> Server, and Server -> Server | UDP server description request. Also *sent* by us to a gossip peer as the admission probe, and its `0xa3` reply parsed — see [`server-gossip.md`](server-gossip.md). |
 | `OP_GLOBSEARCHREQ` | `0x98` | Client -> Server | UDP search request. |
+| `OP_GLOBSEARCHREQ2` | `0x92` | Client -> Server | UDP search request, payload identical to `0x98` (bare search tree, no tag block). Sent by a client that believes we do ext-get-files but not large files. Answered by the same handler as `0x98`. |
 | `OP_GLOBSEARCHREQ3` | `0x90` | Client -> Server | Extended UDP search request (tree/tags). |
 | `OP_GLOBFOUNDSOURCES` | `0x9b` | Server -> Client | UDP source response. |
 | `OP_GLOBSERVSTATRES` | `0x97` | Server -> Client | UDP server stats response. |

@@ -1,6 +1,7 @@
 package ed2k
 
 import (
+	"bytes"
 	"net"
 	"testing"
 	"time"
@@ -79,6 +80,41 @@ func TestUDPExtendedOpcodesRespectConfig(t *testing.T) {
 				t.Fatalf("replied=%t, want %t", got, tc.wantReply)
 			}
 		})
+	}
+}
+
+// OP_GLOBSEARCHREQ2 (0x92) had no dispatch case at all: it fell through to the
+// unknown-opcode branch and the client got nothing back. It is 0x98 with a
+// different client belief about us — a bare search tree, no tag block — and
+// eMule reaches for it when its cached UDP flags carry EXT_GETFILES without
+// LARGEFILES (SearchExprParser.cpp:999-1000), which a stale or third-party
+// server.met entry can say even though BuildUDPFlags never does.
+//
+// Driven through the real dispatcher on purpose: udpGlobSearchReq itself was
+// always fine, so a test calling it directly passes with or without the fix.
+// Counting FindBySearch alongside the reply is what separates "the switch
+// routed it" from "something else answered".
+func TestGlobSearchReq2IsRouted(t *testing.T) {
+	spy := &searchSpy{Engine: seededEngine(t)}
+	rt := NewServerRuntime(TCPRuntimeConfig{}, UDPRuntimeConfig{GetFiles: true}, spy)
+
+	request := append([]byte{PrED2K, OpGlobSearchReq2}, 0x01, 0x04, 0x00, 'f', 'o', 'o', 'd')
+	t.Logf("input: % x", request)
+
+	reply := probeUDP(t, rt, request)
+	t.Logf("output: searches=%d reply=% x", spy.searches, reply)
+
+	if spy.searches != 1 {
+		t.Fatalf("ran %d search(es), want 1 — the dispatcher dropped 0x92", spy.searches)
+	}
+	if len(reply) < 2 {
+		t.Fatalf("reply = %d bytes, want a full OP_GLOBSEARCHRES datagram", len(reply))
+	}
+	if reply[1] != OpGlobSearchRes {
+		t.Fatalf("reply opcode = 0x%02x, want 0x%02x", reply[1], OpGlobSearchRes)
+	}
+	if !bytes.Contains(reply, []byte("food.bin")) {
+		t.Fatal("reply carried no seeded file, so the search result never made it back")
 	}
 }
 

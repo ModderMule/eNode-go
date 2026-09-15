@@ -63,6 +63,30 @@ udp:
   # seed + the client's IP (not sent verbatim). See docs/server-udp-crypt-ping.md.
   serverKey: 305419896
 
+# How many files one client may publish to this server. Per-client publish caps, not
+# server capacity figures — the soft limit is the only lever the protocol gives a server
+# over how large its index grows. See docs/file-publish-limits.md, and
+# docs/memory-footprint.md §4 for what a given cap costs in RAM.
+#
+# Counted cumulatively across every OP_OFFERFILES of one TCP session, which is the only
+# way either cap can bite: eMule sends at most min(softLimit, 200) files per packet and
+# republishes the remainder every 60 s until its whole share is registered, so no single
+# packet reveals how much a client is publishing.
+#
+# Both are also advertised at OP_GLOBSERVSTATRES offsets +16/+20 and stored by clients as
+# the server.met ST_SOFTFILES / ST_HARDFILES tags, so a client is held to the numbers it
+# was given. 0 means unlimited on either key; omitting a key uses the default shown.
+# hardLimit below softLimit is rejected at load — the client would be disconnected before
+# the soft-limit warning could ever be sent.
+files:
+  # Past this the excess is ignored and the client gets one WARNING message per session;
+  # it stays connected. Lugdunum's default is 1000; 10000 is what eNode-go has always
+  # advertised, kept so enabling enforcement does not also change what clients are told.
+  softLimit: 10000
+  # Past this the client is sent an ERROR message and disconnected. Lugdunum's default
+  # is 4000.
+  hardLimit: 20000
+
 # Server-to-server gossip: the Lugdunum OP_SERVER_LIST_REQ/RES handshake. When on,
 # this server registers itself with each seed, harvests their peer lists, and answers
 # other servers' requests — so OP_SERVERLIST is populated from the live network

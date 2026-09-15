@@ -52,6 +52,7 @@ type Config struct {
 
 	TCP    TCPConfig    `yaml:"tcp"`
 	UDP    UDPConfig    `yaml:"udp"`
+	Files  FilesConfig  `yaml:"files"`
 	NAT    NATConfig    `yaml:"natTraversal"`
 	IPv6   IPv6Config   `yaml:"ipv6"`
 	Admin  AdminConfig  `yaml:"admin"`
@@ -93,6 +94,42 @@ type TCPConfig struct {
 	MinLowID          uint32 `yaml:"minLowID"`
 	MaxLowID          uint32 `yaml:"maxLowID"`
 }
+
+// FilesConfig caps how many files a single client may publish to this server.
+//
+// Both are per-client publish caps, not statements about server capacity, and both
+// are Lugdunum's own concepts. From its documentation, vendored at
+// lugdunum-eserver/docs/kiten-20071012.txt:462 — "softLimit: If a client tries to
+// publish more than softLimit files, the server sends him a WARNING message and
+// ignores files in excess" — and :349 — "hardLimit: If a client tries to publish
+// more than hardLimit files, the server disconnects him (before receiving the whole
+// list)". eserver's defaults are 1000 and 4000; ours stay at the values eNode-go has
+// always advertised, so enabling enforcement does not also change what clients are
+// told. Both are enforced per TCP session in handleOfferFiles and advertised at
+// OP_GLOBSERVSTATRES offsets +16/+20. See docs/file-publish-limits.md.
+//
+// Pointers, not plain ints, for the same reason the *bool toggles are pointers: zero
+// is a meaningful value here (it means unlimited), so an absent key has to be
+// distinguishable from an explicit 0. tcp.maxConnections gets away with a plain int
+// only because it is never defaulted at all.
+type FilesConfig struct {
+	SoftLimit *int `yaml:"softLimit"`
+	HardLimit *int `yaml:"hardLimit"`
+}
+
+// DefaultSoftFileLimit and DefaultHardFileLimit are the values eNode-go has published
+// at OP_GLOBSERVSTATRES +16/+20 since it was written (previously hard-coded in
+// BuildGlobServStatResPacket). Kept rather than adopting eserver's 1000/4000 so that
+// turning enforcement on is a change of behaviour only, not of what we advertise.
+const (
+	DefaultSoftFileLimit = 10000
+	DefaultHardFileLimit = 20000
+)
+
+// SoftLimitOrDefault and HardLimitOrDefault resolve the configured caps. Zero is
+// returned as zero — unlimited — and is not replaced by the default.
+func (c FilesConfig) SoftLimitOrDefault() int { return intOrDefault(c.SoftLimit, DefaultSoftFileLimit) }
+func (c FilesConfig) HardLimitOrDefault() int { return intOrDefault(c.HardLimit, DefaultHardFileLimit) }
 
 type UDPConfig struct {
 	Port           uint16 `yaml:"port"`
@@ -298,6 +335,16 @@ func (c GeoIPConfig) HasCredentials() bool {
 // boolOrDefault returns *p, or def when p is nil. The *bool pattern lets an absent
 // YAML key be told from an explicit false (see the IPv6 and cleanup toggles).
 func boolOrDefault(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
+}
+
+// intOrDefault returns *p, or def when p is nil. The *int counterpart of
+// boolOrDefault, for a key whose zero value means something (files.softLimit /
+// files.hardLimit: 0 is "unlimited", not "unset").
+func intOrDefault(p *int, def int) int {
 	if p == nil {
 		return def
 	}
@@ -557,6 +604,23 @@ func setDefaults(cfg *Config) error {
 	if cfg.Storage.MySQL.Dialect != storage.DialectMariaDB && cfg.Storage.MySQL.Dialect != storage.DialectMySQL {
 		return fmt.Errorf("storage.mysql.dialect %q is invalid: use %q or %q",
 			cfg.Storage.MySQL.Dialect, storage.DialectMariaDB, storage.DialectMySQL)
+	}
+	// The publish caps are rejected rather than clamped, on the same reasoning as the
+	// dialect above: both mistakes below are typos with a silent, wrong-behaviour
+	// outcome, and this package has no logger to warn through.
+	//
+	// hardLimit below softLimit is the interesting one. The two are checked in that
+	// order per record, so the session is closed before the soft warning could ever be
+	// sent — the operator has written a soft limit that can never fire and would have
+	// no way to tell.
+	softFiles, hardFiles := cfg.Files.SoftLimitOrDefault(), cfg.Files.HardLimitOrDefault()
+	if softFiles < 0 || hardFiles < 0 {
+		return fmt.Errorf("files.softLimit (%d) and files.hardLimit (%d) must not be negative; 0 means unlimited",
+			softFiles, hardFiles)
+	}
+	if softFiles > 0 && hardFiles > 0 && hardFiles < softFiles {
+		return fmt.Errorf("files.hardLimit (%d) is below files.softLimit (%d): a client would be disconnected before the soft-limit warning could be sent",
+			hardFiles, softFiles)
 	}
 	if cfg.Storage.MongoDB.Port == 0 {
 		cfg.Storage.MongoDB.Port = 27017

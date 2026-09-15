@@ -23,11 +23,16 @@ Measurement environment: Go 1.25.3, `darwin/arm64`, default `GOGC`, no `GOMEMLIM
 | Idle server, nothing connected | **12 MiB** RSS |
 
 Which collapses to: **~0.6 GB per million files, ~160 MB per 10,000 online users**,
-plus 50% headroom for the garbage collector (§5).
+plus 50% headroom for the garbage collector (§6).
 
 The file cost applies to the `memory` storage engine only. With `mysql` or
 `mongodb` the index lives in the database and the Go process pays only the session
-cost — see §6.
+cost — see §7.
+
+For what those unit costs come to at one concrete server size — and for the per-client
+`softLimit` that decides how large the index gets in the first place — see §4, and
+[`file-publish-limits.md`](file-publish-limits.md) for how that cap is configured and
+enforced.
 
 ---
 
@@ -148,7 +153,108 @@ Two observations worth keeping in mind:
 
 ---
 
-## 4. Reproducing this
+## 4. A 44,000-user server, and what `softLimit` has to do with it
+
+### 4.1 The soft and hard file limits are per-client publish caps
+
+Not server capacity figures — which matters here, because the number that drives RAM is
+the sum of what every client publishes, and the soft limit is the only lever the protocol
+gives a server over it.
+
+- **Definition.** Lugdunum's own documentation, vendored at
+  [`lugdunum-eserver/docs/kiten-20071012.txt:462`](../lugdunum-eserver/docs/kiten-20071012.txt):
+  *"softLimit: If a client tries to publish more than softLimit files, the server sends him
+  a WARNING message and ignores files in excess. Default value: 1000"*, and at `:349`
+  *"hardLimit: If a client tries to publish more than hardLimit files, the server
+  disconnects him (before receiving the whole list)… Default value: 4000"*. eserver reports
+  both in its live stats line (`lugdunum-eserver/docs/eserver-17.14-strings.txt:20339`,
+  `…:softLimit=%u:hardLimit=%u:…`).
+- **On the wire.** Offsets +16 and +20 of `OP_GLOBSERVSTATRES`
+  (layout comment at `ed2k/gossipoperations.go:311`, parsed into
+  `StatResFields.SoftFiles/HardFiles` at `:288-289`),
+  and persisted per server in `server.met` as `ST_SOFTFILES 0x88` / `ST_HARDFILES 0x89`
+  (`eMuleQt/src/core/utils/Opcodes.h:371`, `src/core/server/Server.cpp:209`).
+- **What the client does with it.** `eMuleQt/src/core/files/SharedFileList.cpp:639`:
+  `limit = srv->softFiles();` then `if (limit == 0 || limit > kMaxOfferedFiles) limit = 200;`
+  — mirroring `srchybrid/SharedFileList.cpp:832-834`. So one `OP_OFFERFILES` never carries
+  more than 200 files and the server's soft limit can only lower that; the client
+  republishes the remainder every 60 s (`kEd2kRepublishSecs`) until its whole share is
+  registered. The soft limit therefore bounds a client's **cumulative** share on the
+  server, not the size of one packet.
+- **What eNode-go does with it.** Both limits are configured under `files:` — `softLimit`
+  defaulting to 10000, `hardLimit` to 20000, the values that used to be hardcoded in
+  `BuildGlobServStatResPacket` — and both are now enforced. `handleOfferFiles`
+  (`ed2k/server_runtime.go`) counts the records each session publishes, ignores everything
+  past the soft limit after one `WARNING` message, and disconnects past the hard one. The
+  advertised numbers and the enforced numbers come from the same two config keys, so a
+  client is never told one thing and held to another. The count is cumulative across the
+  session's packets, which is the only way either cap can bite given the 200-file packet
+  ceiling above; it counts records rather than distinct hashes, which is the same number
+  for a conforming client. See [`file-publish-limits.md`](file-publish-limits.md).
+
+  This is what makes the middle row below a real ceiling rather than a projection. The
+  third row now takes a deliberate act — raising `files.softLimit` — rather than merely a
+  client that felt like it.
+
+### 4.2 Scenarios at 44,000 online users
+
+Arithmetic from the measured unit costs in §2 — 560 B per distinct file, 130 B per extra
+source, 15.8 KiB per session, 12 MiB base — assuming **1.2 sources per distinct file**, the
+same dedup assumption as §3.
+
+The unit costs were re-measured for this section on 2026-09-13 under Go 1.27.0,
+`darwin/arm64` (the §2 figures are Go 1.25.3), in-package, heap delta around a fresh
+`MemoryEngine`: 300k files with 62-char names and one source each came to **483 B/file**, a
+second source on 20% of them added **80 B per extra source** (499 B/file overall at 1.2
+sources), and 44,000 `Connect()` calls cost **239 B per client record**. All within the
+map-growth spread of §2.1, so the planning numbers stand.
+
+Sessions are noise at this scale: 44,000 × 15.8 KiB = **0.66 GiB** regardless of the index.
+
+| Files published per user | Offer records | Distinct files | Index | Total live | Provision (×1.5) |
+|---|---:|---:|---:|---:|---:|
+| **589** — the network average¹ | 25.9 M | 21.6 M | 11.8 GiB | 12.5 GiB | **~19 GiB** |
+| **10,000** — every user at the default soft limit | 440 M | 366.7 M | 200.1 GiB | 200.8 GiB | **~300 GiB** |
+| **100,000** — every user at a raised `files.softLimit` | 4.4 B | 3.67 B | 2001 GiB | 2002 GiB | **~3 TiB** |
+
+¹ 27,397,581 files / 46,516 users, from eMule Sunrise in the §3 table — the largest server
+on the public network, and the closest thing to a measured files-per-user figure we have.
+
+Dedup sensitivity, as in §3: 1.0 source per file → +15%, 2.0 → −30%.
+
+Inverted, the same model says what a given box holds with 44,000 users connected:
+
+| Host RAM | Distinct files | Sustainable files published per user |
+|---:|---:|---:|
+| 16 GB | 18.3 M | ~500 |
+| 32 GB | 37.9 M | ~1,030 |
+| 64 GB | 76.9 M | ~2,100 |
+| 128 GB | 155 M | ~4,230 |
+| 256 GB | 311 M | ~8,500 |
+
+### 4.3 Reading those tables
+
+- **Only the first row is a real machine.** 44k users sharing at eD2K-typical rates is
+  ~19 GiB provisioned — comfortable on a 32 GB host with `GOMEMLIMIT` set (§6). If every
+  user filled the default `files.softLimit` of 10,000, the same server is a 300 GiB working
+  set, and a `softLimit` raised to 100,000 is 3 TiB. Those are the DB engines' territory
+  (§7), where the same 44k sessions cost ~0.7 GiB of Go process.
+- **RAM is not the wall that arrives first.** `MemoryEngine.FindBySearch`
+  (`storage/storage.go:280-296`) is a full map scan under `RLock`; at 366 M entries every
+  search walks the whole table before the `MaxSearchResults` cap can stop it. That is the
+  §8 caveat restated at this scale: the index becomes a CPU and lock-hold problem an order
+  of magnitude before it becomes a memory problem.
+- **`pendingResults` scales with users, not files.** 44,000 sessions each pinning a
+  1000-file search tail is ~8.6 GiB on top of the index (§8), and it is the one per-session
+  cost that is not a flat 16 KiB.
+- **Two costs that sit outside the heap**: ~44k × 4–10 KiB of kernel socket buffers
+  (180–440 MB), and the snapshot file at ~120 MB per million files compressed — 2.6 GB for
+  the first row, 44 GB for the second, written by walking the whole index in 10,000-file
+  batches (`storage/snapshot.go:68-73`).
+
+---
+
+## 5. Reproducing this
 
 The probe was a scratch program, deliberately not kept in the tree. To rebuild it:
 
@@ -186,7 +292,7 @@ string constants share one backing array and understate metadata cost to zero.
 
 ---
 
-## 5. Provisioning
+## 6. Provisioning
 
 The figures above are *live heap*. With the default `GOGC=100` the heap is allowed to
 double before a collection runs, so under steady-state churn (logins, offers, cleanup)
@@ -211,7 +317,7 @@ build monotonically and generate almost no garbage — do not plan from those.
 
 ---
 
-## 6. Database engines
+## 7. Database engines
 
 With `storage.engine: mysql` or `mongodb` the file index is not in the Go process at
 all. The process then costs:
@@ -226,7 +332,7 @@ the trade: RAM for query latency.
 
 ---
 
-## 7. Caveats
+## 8. Caveats
 
 - **`pendingResults` pins search tails.** A session that ran a search wider than one
   page holds up to `storage.MaxSearchResults` (1000) `File` values until it pages

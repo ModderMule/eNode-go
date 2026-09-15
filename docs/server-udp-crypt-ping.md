@@ -45,8 +45,8 @@ Before a client holds `baseKey` it can't obfuscate anything, so it bootstraps
 | +4 | current users (+2000) | |
 | +8 | current files | |
 | +12 | max users | |
-| +16 | soft file limit (10000) | |
-| +20 | hard file limit (20000) | |
+| +16 | soft file limit | `files.softLimit`, default 10000 — see [`file-publish-limits.md`](file-publish-limits.md) |
+| +20 | hard file limit | `files.hardLimit`, default 20000 |
 | +24 | UDP flags | |
 | +28 | low-ID users (+1000) | |
 | +32 | UDP obf port (uint16) | |

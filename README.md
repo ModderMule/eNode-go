@@ -59,6 +59,11 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   to re-learn the index from client re-offers. Off by default; restoring reproduces
   what a mysql-backed server looks like after a restart. See
   [`docs/storage-snapshot.md`](docs/storage-snapshot.md).
+- Per-client file publish limits: Lugdunum's `softLimit` / `hardLimit`, now configurable
+  and actually enforced. Past the soft limit a client is warned once and its excess files
+  are ignored; past the hard limit it is told why and disconnected. Counted cumulatively
+  across a session, because eMule never sends more than 200 files in one packet. See
+  [`docs/file-publish-limits.md`](docs/file-publish-limits.md).
 - Easy support for multiple storage engines
 
 ## NAT Traversal Transfer Screenshot
@@ -126,6 +131,10 @@ udp:
   getSources: true           # Enable UDP source queries
   getFiles: true             # Enable UDP file queries
   serverKey: 305419896       # Server-wide secret; per-client UDP obfuscation keys are derived from it + the client IP (see docs/server-udp-crypt-ping.md)
+
+files:                       # Per-client publish caps (see docs/file-publish-limits.md)
+  softLimit: 10000           # Past this the excess is ignored and the client is warned once; 0 = unlimited
+  hardLimit: 20000           # Past this the client is told why and disconnected; 0 = unlimited
 
 natTraversal:
   enabled: true              # Enable NAT traversal service

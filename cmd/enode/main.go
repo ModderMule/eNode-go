@@ -254,6 +254,8 @@ func run(ctx context.Context, configPath string) error {
 			ProbeIPv6:         dualStack && cfg.IPv6.ProbeReachabilityOrDefault(),
 			ServerIPv6:        serverIPv6,
 			NatRendezvousPort: natRendezvousPort,
+			SoftFileLimit:     cfg.Files.SoftLimitOrDefault(),
+			HardFileLimit:     cfg.Files.HardLimitOrDefault(),
 		},
 		ed2k.UDPRuntimeConfig{
 			Name:        cfg.Name,
@@ -268,6 +270,11 @@ func run(ctx context.Context, configPath string) error {
 			TCPPortObf:     cfg.TCP.PortObfuscated,
 			UDPServerKey:   cfg.UDP.ServerKey,
 			MaxConnections: uint32(cfg.TCP.MaxConnections),
+			// Read from the same accessors as the TCP half above. Advertising a cap we
+			// do not apply is the state this feature exists to end, so the two must
+			// come from one source or not be separate fields at all.
+			SoftFiles: uint32(cfg.Files.SoftLimitOrDefault()),
+			HardFiles: uint32(cfg.Files.HardLimitOrDefault()),
 		},
 		engine,
 	)

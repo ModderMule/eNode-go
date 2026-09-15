@@ -31,6 +31,10 @@
 - 内存引擎快照：可将内存中的索引按周期及关闭时持久化为 gob 文件，并在启动时重新载入，
   重启后无需再依赖客户端重新上报来重建索引。默认关闭；恢复后的状态与 mysql 引擎重启后
   完全一致。详见 [`docs/storage-snapshot.md`](docs/storage-snapshot.md)。
+- 每个客户端的文件发布上限：Lugdunum 的 `softLimit` / `hardLimit`，现已可配置并真正生效。
+  超过软上限时向客户端发送一次警告并忽略多出的文件；超过硬上限时告知原因并断开连接。
+  计数在整个会话内累计，因为 eMule 单个数据包最多只发送 200 个文件。
+  详见 [`docs/file-publish-limits.md`](docs/file-publish-limits.md)。
 - 易于扩展多种存储引擎
 
 ## NAT Traversal 传输截图
@@ -97,6 +101,10 @@ udp:
   getSources: true           # 允许 UDP 来源查询
   getFiles: true             # 允许 UDP 文件查询
   serverKey: 305419896       # 服务端密钥种子；每个客户端的 UDP 混淆密钥由该种子 + 客户端 IP 派生（见 docs/server-udp-crypt-ping.md）
+
+files:                       # 每个客户端的发布上限（见 docs/file-publish-limits.md）
+  softLimit: 10000           # 超出部分被忽略，并向客户端发送一次警告；0 表示不限制
+  hardLimit: 20000           # 超出后告知客户端原因并断开连接；0 表示不限制
 
 natTraversal:
   enabled: true              # 是否启用 NAT 穿透服务

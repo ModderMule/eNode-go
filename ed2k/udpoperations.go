@@ -15,6 +15,12 @@ type UDPConfig struct {
 	TCPPortObf     uint16
 	UDPServerKey   uint32
 	MaxConnections uint32
+	// SoftFiles and HardFiles are the per-client publish caps this server enforces,
+	// advertised so a client sees the same numbers that are applied to it. Zero means
+	// unlimited and is what a client reads as "no limit stated". See
+	// BuildGlobServStatResPacket and docs/file-publish-limits.md.
+	SoftFiles uint32
+	HardFiles uint32
 	// ObservedIP is the address the server saw this requester on, appended to the 0x97
 	// reply as 4 trailing bytes. Nil omits the field entirely, which keeps the packet
 	// byte-identical to the pre-reflection form for any caller that does not set it.
@@ -104,6 +110,14 @@ func buildGlobFoundSources(fileHash []byte, sources []storage.Source, format Sou
 //	+36  ServerKey(4)
 //	+40  observed client IPv4(4)   — appended only when cfg.ObservedIP is set
 //
+// softfiles/hardfiles at +16/+20 are per-client *publish* caps, not capacity figures:
+// how many files one client may register here before the excess is ignored (soft) and
+// before it is disconnected (hard). They come from files.softLimit / files.hardLimit and
+// are the same numbers handleOfferFiles applies, so a client is never told one thing and
+// held to another. eMule stores them as the server.met ST_SOFTFILES / ST_HARDFILES tags
+// and clamps its per-packet offer count to the soft one; it ignores the hard one
+// entirely. See docs/file-publish-limits.md.
+//
 // The trailing observed-IP field is what Lugdunum already sends: measured against
 // eserver 17.14 the extended reply is 44 payload bytes and the last four carry the
 // address the server saw the requester on (192.168.65.1 in the container). eMule does not
@@ -123,8 +137,8 @@ func BuildGlobServStatResPacket(challenge uint32, cfg UDPConfig, clientsCount in
 		{Type: TypeUint32, Value: uint32(clientsCount + 2000)},
 		{Type: TypeUint32, Value: uint32(filesCount)},
 		{Type: TypeUint32, Value: cfg.MaxConnections},
-		{Type: TypeUint32, Value: uint32(10000)},
-		{Type: TypeUint32, Value: uint32(20000)},
+		{Type: TypeUint32, Value: cfg.SoftFiles},
+		{Type: TypeUint32, Value: cfg.HardFiles},
 		{Type: TypeUint32, Value: cfg.UDPFlags},
 		{Type: TypeUint32, Value: uint32(lowIDCount + 1000)},
 		{Type: TypeUint16, Value: cfg.UDPPortObf},

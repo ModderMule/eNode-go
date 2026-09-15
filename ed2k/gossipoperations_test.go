@@ -326,11 +326,13 @@ func TestParseGlobServStatResMatchesOurBuilder(t *testing.T) {
 		TCPPortObf:     4661,
 		UDPServerKey:   0x938a42f5,
 		MaxConnections: 200,
+		SoftFiles:      1234,
+		HardFiles:      5678,
 	}, 5, 7, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("input:  udpflags=0x7fb portUDPOBF=4675 portTCPOBF=4661 ServerKey=0x938a42f5")
+	t.Logf("input:  udpflags=0x7fb portUDPOBF=4675 portTCPOBF=4661 ServerKey=0x938a42f5 softFiles=1234 hardFiles=5678")
 	t.Logf("output: %d bytes % x", len(packet.Bytes()), packet.Bytes())
 
 	op, b := payloadAfterOpcode(t, packet)
@@ -341,8 +343,8 @@ func TestParseGlobServStatResMatchesOurBuilder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("parsed: challenge=0x%08x udpflags=0x%08x portUDPOBF=%d portTCPOBF=%d ServerKey=0x%08x extended=%v",
-		got.Challenge, got.UDPFlags, got.UDPPortObf, got.TCPPortObf, got.ServerKey, got.Extended)
+	t.Logf("parsed: challenge=0x%08x udpflags=0x%08x portUDPOBF=%d portTCPOBF=%d ServerKey=0x%08x softFiles=%d hardFiles=%d extended=%v",
+		got.Challenge, got.UDPFlags, got.UDPPortObf, got.TCPPortObf, got.ServerKey, got.SoftFiles, got.HardFiles, got.Extended)
 
 	if !got.Extended {
 		t.Fatal("our own reply carries the obfuscation ports, so Extended must be true")
@@ -358,6 +360,12 @@ func TestParseGlobServStatResMatchesOurBuilder(t *testing.T) {
 	}
 	if got.ServerKey != 0x938a42f5 {
 		t.Errorf("ServerKey = 0x%08x, want 0x938a42f5", got.ServerKey)
+	}
+	// Offsets +16 and +20, the per-client publish caps. Previously hard-coded in the
+	// builder and asserted nowhere, so nothing pinned their position in the payload —
+	// and eMule reads them positionally (srchybrid/UDPSocket.cpp:337-342).
+	if got.SoftFiles != 1234 || got.HardFiles != 5678 {
+		t.Errorf("file limits = %d/%d, want 1234/5678", got.SoftFiles, got.HardFiles)
 	}
 }
 
