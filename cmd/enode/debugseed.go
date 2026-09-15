@@ -61,7 +61,8 @@ func seedDebugFixtures(store storage.Engine, path string) error {
 
 	// Each AddFile is one file offered by one peer — a source. filesSeeded is that
 	// count; the distinct-file total is not tracked because the engine dedupes on
-	// hash and reporting the offer count is what matches "sources the server will send".
+	// (hash, size) and reporting the offer count is what matches "sources the server
+	// will send".
 	var peersSeeded, offersSeeded int
 	for i, p := range fx.Peers {
 		info, ok := clientInfoFromPeer(i, p)

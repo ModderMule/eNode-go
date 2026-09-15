@@ -18,7 +18,7 @@ type UDPConfig struct {
 	// SoftFiles and HardFiles are the per-client publish caps this server enforces,
 	// advertised so a client sees the same numbers that are applied to it. Zero means
 	// unlimited and is what a client reads as "no limit stated". See
-	// BuildGlobServStatResPacket and docs/file-publish-limits.md.
+	// BuildGlobServStatResPacket and docs/server-client-communication.md.
 	SoftFiles uint32
 	HardFiles uint32
 	// ObservedIP is the address the server saw this requester on, appended to the 0x97
@@ -116,7 +116,7 @@ func buildGlobFoundSources(fileHash []byte, sources []storage.Source, format Sou
 // are the same numbers handleOfferFiles applies, so a client is never told one thing and
 // held to another. eMule stores them as the server.met ST_SOFTFILES / ST_HARDFILES tags
 // and clamps its per-packet offer count to the soft one; it ignores the hard one
-// entirely. See docs/file-publish-limits.md.
+// entirely. See docs/server-client-communication.md.
 //
 // The trailing observed-IP field is what Lugdunum already sends: measured against
 // eserver 17.14 the extended reply is 44 payload bytes and the last four carry the

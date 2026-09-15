@@ -1,6 +1,7 @@
 package ed2k
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"sync"
@@ -160,8 +161,12 @@ func TestSearchResultTrailerOnEmptyResult(t *testing.T) {
 	}
 }
 
-// searchPagingClient builds a logged-in-enough client over a recordingConn, with a seeded
-// engine, so the paging path can be driven through the real opcode dispatcher.
+// searchPagingClient builds a logged-in client over a recordingConn, with a seeded engine,
+// so the paging path can be driven through the real opcode dispatcher.
+//
+// The login is real, not a flag flipped by hand: handleED2K refuses every opcode but
+// OP_LOGINREQUEST and OP_DISCONNECT on a session that has not logged in, so a client that
+// only looked logged in would have its searches dropped rather than paged.
 func searchPagingClient(t *testing.T, fileCount int) (*tcpClient, *recordingConn) {
 	t.Helper()
 	engine := storage.NewMemoryEngine()
@@ -180,8 +185,19 @@ func searchPagingClient(t *testing.T, fileCount int) (*tcpClient, *recordingConn
 		TCPRuntimeConfig{Address: "127.0.0.1", Port: 4661, AllowLowIDs: true},
 		UDPRuntimeConfig{}, engine,
 	)
+	// Stubbed so login takes the LowID branch without spending the dial-back timeout.
+	rt.firewallProbe = func(*tcpClient) bool { return true }
+
 	conn := &recordingConn{}
-	return newTCPClient(rt, conn, false), conn
+	client := newTCPClient(rt, conn, false)
+	client.handlePacket(loginPacket(t, bytes.Repeat([]byte{0x5b}, 16), 0, 4662))
+	if !client.isLogged() {
+		t.Fatal("setup: login failed, so every search below would be refused by the login gate")
+	}
+	conn.mu.Lock()
+	conn.written = nil // drop the login chatter; takeWritten must see search frames only
+	conn.mu.Unlock()
+	return client, conn
 }
 
 // searchFor builds an OP_SEARCHREQUEST for a substring, matching what eMule sends.

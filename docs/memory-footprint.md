@@ -31,8 +31,8 @@ cost — see §7.
 
 For what those unit costs come to at one concrete server size — and for the per-client
 `softLimit` that decides how large the index gets in the first place — see §4, and
-[`file-publish-limits.md`](file-publish-limits.md) for how that cap is configured and
-enforced.
+[`server-client-communication.md`](server-client-communication.md#per-client-publish-limits)
+for how that cap is configured and enforced.
 
 ---
 
@@ -82,16 +82,20 @@ map overhead:
 | `storage.File` value in `m.files` | 152 |
 | `Name` string data (60 chars → 64-byte size class) | 64 |
 | `File.Hash` backing array | 16 |
-| `m.files` key string data (the 16-byte hash) | 16 |
-| `m.sources` key string data | 16 |
+| `m.files` key string data (the 16-byte hash + 8-byte size) | 24 |
+| `m.sources` key string data (the 16-byte hash) | 16 |
 | `[]Source` header + 1-element backing array (`Source` = 72 B) | 96 |
 | `Source.UserHash` backing array | 16 |
 | Go map bucket/control overhead across two maps | ~180 |
-| **Total** | **~560** |
+| **Total** | **~568** |
 
-Two maps are keyed by the same 16-byte hash (`files` and `sources`), which is where a
-surprising amount of it goes: about a third of the per-file cost is map machinery and
-duplicated keys rather than payload.
+Two maps are keyed off the file hash — `files` by hash *and* size (24 bytes, see
+`storage.fileMapKey`), `sources` by the hash alone (16) — which is where a surprising
+amount of it goes: about a third of the per-file cost is map machinery and duplicated keys
+rather than payload. The measured figures above predate the 8-byte widening of the `files`
+key, so add ~1.5% to them; keying `sources` on the pair as well would have cost a further
+~55 B/file for the hash index the size-less UDP source query needs, which is why it does
+not.
 
 Audio/video metadata (`Title`, `Artist`, `Album`, `Codec`) costs the length of those
 strings plus allocator rounding when a client supplies them — order 100 B/file. *Not
@@ -190,7 +194,8 @@ gives a server over it.
   client is never told one thing and held to another. The count is cumulative across the
   session's packets, which is the only way either cap can bite given the 200-file packet
   ceiling above; it counts records rather than distinct hashes, which is the same number
-  for a conforming client. See [`file-publish-limits.md`](file-publish-limits.md).
+  for a conforming client. See
+  [`server-client-communication.md`](server-client-communication.md#per-client-publish-limits).
 
   This is what makes the middle row below a real ceiling rather than a projection. The
   third row now takes a deliberate act — raising `files.softLimit` — rather than merely a

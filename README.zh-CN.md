@@ -34,7 +34,14 @@
 - 每个客户端的文件发布上限：Lugdunum 的 `softLimit` / `hardLimit`，现已可配置并真正生效。
   超过软上限时向客户端发送一次警告并忽略多出的文件；超过硬上限时告知原因并断开连接。
   计数在整个会话内累计，因为 eMule 单个数据包最多只发送 200 个文件。
-  详见 [`docs/file-publish-limits.md`](docs/file-publish-limits.md)。
+  详见 [`docs/server-client-communication.md`](docs/server-client-communication.md#per-client-publish-limits)。
+- 请求前必须登录：除 `OP_LOGINREQUEST` 与 `OP_DISCONNECT` 外的所有 TCP 操作码，在会话尚未登录时一律拒绝，
+  因此任何内容都无法在缺少可记账、可清理的身份的情况下写入索引。
+  详见 [`docs/server-client-communication.md`](docs/server-client-communication.md#login-precondition)。
+- 文件以 `(哈希, 大小)` 共同标识，符合协议本意：三种存储引擎均以该二元组为键，
+  因此当某次上报使用了已存在的哈希却给出不同大小时，它会得到属于自己的记录，
+  而不会覆盖他人的记录。缺少有效大小的记录会被直接拒绝，因为它永远无法被提供下载。
+  详见 [`docs/server-client-communication.md`](docs/server-client-communication.md#file-identity)。
 - 易于扩展多种存储引擎
 
 ## NAT Traversal 传输截图
@@ -102,7 +109,7 @@ udp:
   getFiles: true             # 允许 UDP 文件查询
   serverKey: 305419896       # 服务端密钥种子；每个客户端的 UDP 混淆密钥由该种子 + 客户端 IP 派生（见 docs/server-udp-crypt-ping.md）
 
-files:                       # 每个客户端的发布上限（见 docs/file-publish-limits.md）
+files:                       # 每个客户端的发布上限（见 docs/server-client-communication.md）
   softLimit: 10000           # 超出部分被忽略，并向客户端发送一次警告；0 表示不限制
   hardLimit: 20000           # 超出后告知客户端原因并断开连接；0 表示不限制
 

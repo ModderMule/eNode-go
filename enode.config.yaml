@@ -65,7 +65,7 @@ udp:
 
 # How many files one client may publish to this server. Per-client publish caps, not
 # server capacity figures — the soft limit is the only lever the protocol gives a server
-# over how large its index grows. See docs/file-publish-limits.md, and
+# over how large its index grows. See docs/server-client-communication.md#per-client-publish-limits, and
 # docs/memory-footprint.md §4 for what a given cap costs in RAM.
 #
 # Counted cumulatively across every OP_OFFERFILES of one TCP session, which is the only

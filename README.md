@@ -63,7 +63,16 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   and actually enforced. Past the soft limit a client is warned once and its excess files
   are ignored; past the hard limit it is told why and disconnected. Counted cumulatively
   across a session, because eMule never sends more than 200 files in one packet. See
-  [`docs/file-publish-limits.md`](docs/file-publish-limits.md).
+  [`docs/server-client-communication.md`](docs/server-client-communication.md#per-client-publish-limits).
+- Login required before any request: every TCP opcode but `OP_LOGINREQUEST` and
+  `OP_DISCONNECT` is refused on a session that has not logged in, so nothing can reach
+  the index without an identity the server can account for and clean up. See
+  [`docs/server-client-communication.md`](docs/server-client-communication.md#login-precondition).
+- Files identified by `(hash, size)`, as the protocol intends: all three storage engines
+  key on the pair, so an offer carrying a known hash at a different size gets its own
+  record instead of overwriting someone else's. A record with no usable size is refused
+  outright — it could never be served. See
+  [`docs/server-client-communication.md`](docs/server-client-communication.md#file-identity).
 - Easy support for multiple storage engines
 
 ## NAT Traversal Transfer Screenshot
@@ -132,7 +141,7 @@ udp:
   getFiles: true             # Enable UDP file queries
   serverKey: 305419896       # Server-wide secret; per-client UDP obfuscation keys are derived from it + the client IP (see docs/server-udp-crypt-ping.md)
 
-files:                       # Per-client publish caps (see docs/file-publish-limits.md)
+files:                       # Per-client publish caps (see docs/server-client-communication.md)
   softLimit: 10000           # Past this the excess is ignored and the client is warned once; 0 = unlimited
   hardLimit: 20000           # Past this the client is told why and disconnected; 0 = unlimited
 

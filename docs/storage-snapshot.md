@@ -117,8 +117,11 @@ long as it took.
 So the write is chunked:
 
 1. One pass under `RLock` captures the file keys into a single flat `[]byte` of
-   16-byte records (a `[]string` would cost more in slice headers than in keys), the
-   client records, and the counts.
+   24-byte records — the 16-byte hash followed by the big-endian size, which is the
+   `files` map key (a `[]string` would cost more in slice headers than in keys) — the
+   client records, and the counts. The stride is fixed, so a key of any other width is
+   skipped; skipping *every* key would leave an empty buffer, which the writer cannot
+   tell apart from an engine holding nothing and so would write no file at all.
 2. Each batch of 10,000 keys then takes `RLock` on its own, copies those entries out
    — deep-copying the `[]byte` fields, since `AddFile` mutates source records in
    place — releases the lock, and encodes.

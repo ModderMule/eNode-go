@@ -72,8 +72,9 @@ const (
 	// entries are copied in batches, releasing the lock between each.
 	snapshotBatchSize = 10000
 
-	// snapshotHashLen is the ed2k hash width, and the stride of the flat key buffer.
-	snapshotHashLen = 16
+	// snapshotHashLen is the ed2k hash width. The flat key buffer strides by
+	// fileMapKeyLen instead — a files map key is hash+size, not a bare hash.
+	snapshotHashLen = hashLen
 )
 
 // SnapshotHeader is the first value in the stream.
@@ -226,11 +227,14 @@ func (m *MemoryEngine) WriteSnapshot(path string, compress bool) (SnapshotStats,
 	for _, sources := range m.sources {
 		header.Sources += uint64(len(sources))
 	}
-	keys := make([]byte, 0, len(m.files)*snapshotHashLen)
+	keys := make([]byte, 0, len(m.files)*fileMapKeyLen)
 	for k := range m.files {
-		if len(k) != snapshotHashLen {
-			// Defensive: every key is a 16-byte hash string via hashKey. A short one
-			// could not be matched to its sources on load.
+		if len(k) != fileMapKeyLen {
+			// Defensive: every key is a fileMapKey, hash+size. A short one could not
+			// be matched to its sources on load. Note this is not a cheap guard to get
+			// wrong — skipping every key empties the buffer, and an empty buffer is
+			// indistinguishable below from "the engine holds nothing", which returns
+			// success having written no file at all.
 			continue
 		}
 		keys = append(keys, k...)
@@ -344,7 +348,7 @@ func (m *MemoryEngine) LoadSnapshot(path string) (SnapshotStats, error) {
 			if len(file.Hash) != snapshotHashLen {
 				continue
 			}
-			files[hashKey(file.Hash)] = file
+			files[fileMapKey(file.Hash, file.Size)] = file
 		}
 		// Counted for the log line, then dropped: restoring them would advertise
 		// peers that are not connected. See the parity note above.
@@ -384,13 +388,19 @@ var gzipMagic = [2]byte{0x1f, 0x8b}
 // reading them.
 func (m *MemoryEngine) batchAt(keys []byte, from, to int) SnapshotBatch {
 	batch := SnapshotBatch{
-		Files:   make([]File, 0, (to-from)/snapshotHashLen),
-		Sources: make([]SnapshotSources, 0, (to-from)/snapshotHashLen),
+		Files:   make([]File, 0, (to-from)/fileMapKeyLen),
+		Sources: make([]SnapshotSources, 0, (to-from)/fileMapKeyLen),
 	}
+	// A source bucket is keyed on the hash alone, so the two sizes of one hash share
+	// it and would otherwise be written — and counted — twice. Emitting each hash at
+	// most once per batch removes that in every realistic case; a hash whose sizes
+	// straddle a batch boundary can still duplicate, which is harmless because the
+	// loader counts source groups for one log line and then discards them.
+	seen := make(map[string]struct{}, (to-from)/fileMapKeyLen)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	for off := from; off < to; off += snapshotHashLen {
-		key := string(keys[off : off+snapshotHashLen])
+	for off := from; off < to; off += fileMapKeyLen {
+		key := string(keys[off : off+fileMapKeyLen])
 		file, ok := m.files[key]
 		if !ok {
 			// Deleted between the key sweep and now. Skipping it is what makes the
@@ -399,7 +409,12 @@ func (m *MemoryEngine) batchAt(keys []byte, from, to int) SnapshotBatch {
 			continue
 		}
 		batch.Files = append(batch.Files, cloneFile(file))
-		if sources := m.sources[key]; len(sources) > 0 {
+		hk := key[:snapshotHashLen]
+		if _, dup := seen[hk]; dup {
+			continue
+		}
+		seen[hk] = struct{}{}
+		if sources := m.sources[hk]; len(sources) > 0 {
 			cloned := make([]Source, 0, len(sources))
 			for _, s := range sources {
 				cloned = append(cloned, cloneSource(s))
@@ -440,7 +455,7 @@ func writeSnapshotStream(
 		return stats, fmt.Errorf("encode snapshot header: %w", err)
 	}
 
-	stride := snapshotBatchSize * snapshotHashLen
+	stride := snapshotBatchSize * fileMapKeyLen
 	for from := 0; from < len(keys); from += stride {
 		to := min(from+stride, len(keys))
 		batch := next(keys, from, to)

@@ -106,7 +106,7 @@ type TCPConfig struct {
 // list)". eserver's defaults are 1000 and 4000; ours stay at the values eNode-go has
 // always advertised, so enabling enforcement does not also change what clients are
 // told. Both are enforced per TCP session in handleOfferFiles and advertised at
-// OP_GLOBSERVSTATRES offsets +16/+20. See docs/file-publish-limits.md.
+// OP_GLOBSERVSTATRES offsets +16/+20. See docs/server-client-communication.md.
 //
 // Pointers, not plain ints, for the same reason the *bool toggles are pointers: zero
 // is a meaningful value here (it means unlimited), so an absent key has to be

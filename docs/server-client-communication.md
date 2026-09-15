@@ -21,7 +21,7 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_HELLO` | `0x01` | Server -> Client (handshake check client path) | Basic hello packet; same numeric code as login in different context. |
 | `OP_HELLOANSWER` | `0x4c` | Peer -> Server/client helper | Response to `OP_HELLO` with node info/tags. |
 | `OP_GETSERVERLIST` | `0x14` | Client -> Server | Request known server list. |
-| `OP_OFFERFILES` | `0x15` | Client -> Server | Submit shared file/source list. |
+| `OP_OFFERFILES` | `0x15` | Client -> Server | Submit shared file/source list. A record is indexed under `(hash, size)` and one with no usable size is refused — see [File identity](#file-identity). Capped per client by `files.softLimit` / `files.hardLimit` — see [Per-client publish limits](#per-client-publish-limits). |
 | `OP_GETSOURCES` | `0x19` | Client -> Server | Request sources for a file. |
 | `OP_GETSOURCES_OBFU` | `0x23` | Client -> Server | Obfuscated source request variant. |
 | `OP_SEARCHREQUEST` | `0x16` | Client -> Server | Search query request. |
@@ -41,6 +41,233 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_GETSOURCES_IPV6` | `0x24` | Client -> Server | IPv6 tag-block source query (opt-in); payload as `OP_GETSOURCES2`. |
 | `OP_FOUNDSOURCES_IPV6` | `0x25` | Server -> Client | IPv6 tag-block source response (per source: `id+port+tagCount+tags`). |
 | `OP_CALLBACKREQUESTED_IPV6` | `0x26` | Server -> v6-capable client | IPv6 form of `OP_CALLBACKREQUESTED`; sent when the requester has no usable IPv4 but a reachable public IPv6. |
+
+### File identity
+
+**A file is identified by `(hash, size)`, not by the hash alone.** All three storage
+engines key on the pair, and an offer carrying a hash that is already indexed at a
+different size creates a second record rather than overwriting the first.
+
+This is the protocol's own answer, not a local convention. eserver 17.3 (2005-02-15,
+`lugdunum-eserver/docs/kiten-20071012.txt:189-190`):
+
+> Make sure the size of a published file matches the known file size. A lot of buggy or
+> malicious clients try to mislead the network.
+> Change the ed2k protocol to let clients tell us the size of the files they are
+> downloading, not only the hash.
+
+and 17.14 at `:142` — *"Changes in size conflicts (when same hash but different sizes are
+given)"*. That 17.3 protocol change is why TCP `OP_GETSOURCES` carries the size
+unconditionally (`srchybrid/DownloadQueue.cpp:1350-1357` — a 20-byte payload, or 28 when a
+zero `uint32` marks a 64-bit size following) and why `SRV_UDPFLG_EXT_GETSOURCES2` picks the
+sized `OP_GLOBGETSOURCES2 (0x94)` over the sizeless `OP_GLOBGETSOURCES (0x9a)`. Both client
+trees agree on what "the same file" means: `CFileIdentifierBase::CompareStrict` compares
+MD4 **and** size **and** AICH (`srchybrid/FileIdentifier.cpp:84-93`), and eMule moved its own
+Kad index off a hash-only key for exactly this reason in 0.49a (`changelog_full.txt:2164`,
+*"Same hashes (files) which have different filesizes are now properly stored separatly
+instead overwriting eachother"*).
+
+Nothing in either client tree claims a hash uniquely determines a size. The clients do key
+their *local* known-file maps by MD4 alone, but a local map is not an index of a hostile
+network — which is the distinction eserver 17.3 drew.
+
+**Where each engine keys it.** MySQL: `UNIQUE KEY hash_size (hash,size)` with a separate
+non-unique `KEY hash` (`misc/enode.sql:72-73`). MongoDB: a unique compound index on
+`{hash, size}`, with sources identified by `(file_hash, file_size, client_hash)`. The
+memory engine: `storage.fileMapKey`, a 24-byte key of the hash followed by the size
+big-endian.
+
+**One memory-engine divergence is accepted here.** Its source lists stay keyed on the hash
+alone, because `OP_GLOBGETSOURCES (0x9a)` carries bare hashes with no size and has to stay
+an O(1) lookup — the same reason MySQL keeps `KEY hash` alongside the unique pair. So when
+one hash carries two sizes, the memory engine returns the union of both sizes' sources
+where MySQL and MongoDB return only the matching size's, and `CleanupStale` writes the
+union count into both records. This is harmless: a client cannot be stopped from offering a
+file it does not have at any size, so the per-size bucket buys no protection. What it does
+buy — a record that cannot be corrupted by someone else's offer — is what matters, and that
+holds on all three engines.
+
+**A zero-size offer is refused.** If `FT_FILESIZE` is absent, or present but not an
+integer, the parsed size is `0` and the record is dropped before it reaches storage, with
+one `offer files zero size` warning per packet rather than per record. Such a file could
+never be served — a client only asks for sources by `(hash, size)`, and eMule discards a
+zero-size search result outright (`srchybrid/SearchList.cpp:355`) — so it would sit in the
+index for good, searchable and unservable. Dropped records are charged against neither
+publish limit.
+
+### Login precondition
+
+Every TCP opcode except `OP_LOGINREQUEST (0x01)` and `OP_DISCONNECT (0x18)` requires a
+completed login. A session that has not logged in is sent one `OP_SERVERMESSAGE` —
+
+```
+ERROR : You must log in before sending requests to this server.
+```
+
+— and dropped, with `reason=not-logged-in` in the session-closed log line. Opcodes that
+are not handled at all (see the table below) are refused the same way before login rather
+than being logged and ignored, because a client that has not logged in has no business
+sending them either.
+
+The rule is deny-by-default: `handleED2K` exempts the two opcodes above and gates the rest,
+so an opcode added to the dispatcher is gated unless someone deliberately exempts it.
+
+**Why.** `handShake` is the only place a session's identity is established. Before it runs
+the server has nothing: `{ID: 0, Port: 0, Hash: nil, StoreID: 0}`. `OP_OFFERFILES` is the
+opcode that made this matter, because it is the only one that *writes* to the index, and
+what it wrote under that identity could never be taken back:
+
+- **memory engine** (the default) — sources dedupe on `(ID, Port)`, so every pre-login
+  offer from every socket collapsed into one `{0, 0}` row per hash — served to real
+  clients, which can do nothing with an address of `0:0`, and occupying slots in the
+  255-entry wire cap. Nothing reclaimed them: the teardown path calls `Storage.Disconnect`
+  only for a session that was logged in, and the memory engine's `CleanupStale` cannot
+  expire a source at all, because a source carries no timestamp. They lived for the
+  lifetime of the process.
+- **MongoDB** — the same, keyed on a nil `client_hash`, plus `source_id: 0, source_port: 0`
+  written into the file document.
+- **MySQL** — the mild case. The source row fails the `sources_ibfk_2` foreign key on
+  `id_client = 0` and is dropped with one error line per offered record, leaving an orphan
+  `files` row that `CleanupStale` reaps.
+
+A fourth consequence has since been closed at the storage layer instead of here: the memory
+engine used to key a file on its hash alone and overwrite the whole record, so *any* offer
+— anonymous or not — could rewrite the `Size` of an already-indexed hash and blackhole
+every later source lookup for it. Files are keyed on `(hash, size)` now; see
+[File identity](#file-identity).
+
+**No conforming client is affected.** Both reference trees send their first request only
+once the login round trip has completed: `srchybrid/ServerConnect.cpp:227-228` calls
+`SendListToServer()` from the `CS_CONNECTED` branch, and
+`eMuleQt/src/core/files/SharedFileList.cpp:652-653` returns early unless
+`ServerConnect::isConnected()`. `OP_GETSERVERLIST` is sent from that same post-login branch
+in both. A client that pipelines its login and its first request into one TCP segment is
+also fine: dispatch is sequential per connection and the login is processed to completion
+before the next opcode is read.
+
+The one thing this does refuse is a third-party tool that connects and asks for the peer
+list *without* logging in. No surveyed client does that, but it is the one behaviour here
+that something external could have depended on.
+
+### Per-client publish limits
+
+How many files a single client may publish, and what happens when it tries to publish more.
+Both are configured under `files:` in `enode.config.yaml`, enforced per TCP session, and
+advertised on the wire so a client sees the numbers it is actually held to. For what a
+given cap costs in RAM at scale see [`memory-footprint.md`](memory-footprint.md) §4.
+
+They are **per-client publish caps, not server capacity figures** — worth stating because
+in `OP_GLOBSERVSTATRES` they sit next to `maxusers` and read like capacity. Both come from
+Lugdunum's eserver, whose documentation is vendored at
+`lugdunum-eserver/docs/kiten-20071012.txt`:
+
+> **`softLimit`** (`:462`) — *"If a client tries to publish more than softLimit files, the
+> server sends him a WARNING message and ignores files in excess. Default value : 1000"*
+
+> **`hardLimit`** (`:349`) — *"If a client tries to publish more than hardLimit files, the
+> server disconnects him (before receiving the whole list). That is to save bandwidth,
+> because some lazy people share all their files. Default value : 4000"*
+
+The hard limit is therefore not simply a larger soft limit:
+
+| | soft limit | hard limit |
+|---|---|---|
+| **What it is** | a quota on the index | an abuse response |
+| **What it protects** | server RAM — how large the index grows | server bandwidth — receiving a huge list at all |
+| **Effect** | excess records ignored; the client stays connected | the session is closed |
+| **Client is told** | one `WARNING` message per session | one `ERROR` message, then the close |
+| **eserver default** | 1000 | 4000 |
+| **eNode-go default** | 10000 | 20000 |
+
+eserver's accounting reflects the split: it publishes both in its stats line
+(`eserver-17.14-strings.txt:20339`) but counts hard-limit drops with the *refusals*,
+alongside blacklisting and ipfilter (`:20958`).
+
+**The count is cumulative across every offer of one session**, which is the only way either
+cap can fire. eMule caps a single packet at 200 files regardless of the server's limit
+(`srchybrid/SharedFileList.cpp:832-834`; a server's soft limit can only lower that) and
+republishes the remainder every 60 s until its whole share is registered (`:1229-1236`).
+Lugdunum's "before receiving the whole list" describes the old single-huge-frame clients;
+against a modern client the same rule has to be applied across packets.
+
+The counter counts *records received*, not distinct hashes — a deliberate divergence from
+eserver, which limits rows in its store. It is exact for the clients that matter: both
+eMule trees send each shared file exactly once per session, gated on a published flag that
+is cleared only on connect and disconnect (`SharedFileList.cpp:817,848`,
+`ServerConnect.cpp:227-228,292`). A per-session hash set was rejected on cost — ~320 KiB per
+session at a hard limit of 20,000 is more than the index it would protect.
+
+**Configuration:**
+
+```yaml
+files:
+  softLimit: 10000   # warn once, ignore the excess; 0 = unlimited
+  hardLimit: 20000   # message, then disconnect;      0 = unlimited
+```
+
+`0` means unlimited on either key, the convention `tcp.maxConnections` already uses. An
+absent key takes the default above; the fields are `*int` precisely so an explicit `0` can
+be told from an omitted key. `hardLimit` below `softLimit` is rejected at load — the two are
+checked hard-first per record, so the session would be closed before the soft warning could
+ever be sent. `hardLimit == softLimit` is allowed and collapses to "drop at N".
+
+**On the wire:** both are published at `OP_GLOBSERVSTATRES (0x97)` payload offsets **+16**
+and **+20**, read positionally by eMule (`srchybrid/UDPSocket.cpp:337-342,403-404`) and
+persisted in `server.met` as `ST_SOFTFILES 0x88` / `ST_HARDFILES 0x89`. Only `softFiles` is
+ever used behaviourally — it clamps the per-packet offer count. `hardFiles` is stored,
+persisted and displayed in both trees and never compared against anything: it is the
+server's business alone. The advertised values and the enforced values come from the same
+two config keys.
+
+**What a client sees.** Over the soft limit, once per session:
+
+```
+WARNING : This server accepts 10000 shares per client. Some of your shares are ignored.
+```
+
+eserver's own text, verbatim (`eserver-17.14-strings.txt:20786`). Over the hard limit, one
+message then the close:
+
+```
+ERROR : This server accepts at most 20000 shares per client. Closing the connection.
+```
+
+That one is our divergence: eserver drops silently, having a `MsgSOFTLIMIT` keyword with no
+`MsgHARDLIMIT` counterpart. A client cannot tell a silent drop from any other mid-session
+close, so the user would have no way to learn why they keep being disconnected.
+
+**Behaviour worth knowing:**
+
+- **Which files survive the soft trim** is "whichever arrived first", and that is right
+  rather than accidental: eMule sorts its offer by upload priority before truncating to the
+  packet cap (`SharedFileList.cpp:814-828`), so what survives is the client's own
+  highest-priority share. Anything skipped is gone for that session — the client has
+  already marked it published and will not re-offer it.
+- **The counter never decreases**, including when `CleanupStale` drops a file the session
+  published. Both limits are defined against what a client *tries to publish*.
+- **A reconnect resets the counter.** Left alone deliberately: on the memory engine
+  `Disconnect` deletes that client's sources outright, so both sides restart from zero
+  together; on MySQL and MongoDB `Connect` is keyed on the user hash and `AddFile` upserts,
+  so a plain republish revives the identical rows. The only real bypass is a client that
+  shuffles which files it publishes first on each cycle, which costs it a full login per
+  `hardLimit` files.
+- **A large sharer will be dropped on a cycle.** At the defaults a client sharing 50,000
+  files reaches 20,000 records about 100 minutes in, is dropped, reconnects, and is dropped
+  again. Faithful to eserver (the same at 4,000/200 ≈ 20 minutes), but a behaviour change
+  for an existing deployment where nothing was enforced. Raise `hardLimit`, or set it to
+  `0`, to keep the old behaviour.
+
+**Where the code is:**
+
+| What | Where |
+|---|---|
+| Config keys, defaults, validation | `config/config.go` — `FilesConfig`, `setDefaults` |
+| Enforcement | `ed2k/server_runtime.go` — `handleOfferFiles`, and the `offeredFiles` / `softLimitWarned` / `hardLimitHit` fields on `tcpClient` |
+| Login gate | `ed2k/server_runtime.go` — `requireLogin`, and the exemption switch at the head of `handleED2K` |
+| Message texts | `ed2k/server_runtime.go` — `msgSoftFileLimit`, `msgHardFileLimit`, `msgNotLoggedIn` |
+| Advertising | `ed2k/udpoperations.go` — `BuildGlobServStatResPacket`, `UDPConfig.SoftFiles/HardFiles` |
+| Wiring | `cmd/enode/main.go` — both runtime configs, from one accessor each |
+| Tests | `ed2k/offer_limits_test.go`, `ed2k/offer_prelogin_test.go`, `config/file_limits_test.go` |
 
 ### Search paging
 
@@ -72,6 +299,10 @@ logged, not answered. None of them breaks a session:
 
 `OP_DISCONNECT (0x18)` and `OP_QUERY_MORE_RESULT (0x21)` used to be listed here. Both are
 now handled — see the TCP table above and the search-paging note below.
+
+Being unhandled is not the same as being free to send: an unhandled opcode is logged and
+ignored only for a session that has logged in. Before login it is refused like any other
+gated opcode — see [Login precondition](#login-precondition).
 
 ## UDP OP Codes
 
@@ -254,9 +485,15 @@ though the keepalives proved it reachable.
   - `ed2k/udpoperations.go`
   - `ed2k/packet.go`
   - `ed2k/nattraversal.go`
-- There is no server-to-server gossip: the `OP_SERVERLIST` we return is the static
-  `servers:` list from config, and the UDP `SERVER_LIST_REQ/RES` (`0xa0`/`0xa1`)
-  exchange other servers use to trade peers is not implemented.
+- `WARNING ` and `ERROR ` are reserved leading words in `OP_SERVERMESSAGE`. Both clients
+  match on them and divert such a line to the warning or error log instead of the
+  server-info pane (`srchybrid/ServerSocket.cpp:188-201`,
+  `eMuleQt/src/core/server/ServerConnect.cpp:1208-1210`), so the prefix on the publish-limit
+  and login-gate messages is routing, not decoration. Do not use either word to open an
+  ordinary informational message.
+- Server-to-server gossip *is* implemented — the UDP `SERVER_LIST_REQ/RES` (`0xa0`/`0xa1`)
+  exchange and the peers it learns. See [`server-gossip.md`](server-gossip.md); an earlier
+  version of this note said the opposite.
 - For how this surface compares to other server implementations — in particular
   which extensions are ours alone and which LowID↔LowID design belongs to whom —
   see [`ed2k-server-rust-comparison.local.md`](ed2k-server-rust-comparison.local.md).

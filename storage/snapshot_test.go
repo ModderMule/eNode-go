@@ -11,6 +11,19 @@ import (
 
 // seedSnapshotEngine fills an engine with n files, each offered by its own client,
 // so a round-trip has clients, files and sources to carry.
+// snapshotSeedBaseSize is the size seedSnapshotEngine gives file i, as
+// snapshotSeedBaseSize+i. Named because the files map is keyed on (hash, size), so a
+// test that wants one entry back out has to reproduce both halves.
+const snapshotSeedBaseSize = 700_000_000
+
+// snapshotSeedKey is the files map key of the i-th file seedSnapshotEngine wrote.
+func snapshotSeedKey(i int) string {
+	hash := make([]byte, 16)
+	hash[0] = byte(i)
+	hash[1] = byte(i >> 8)
+	return fileMapKey(hash, uint64(snapshotSeedBaseSize+i))
+}
+
 func seedSnapshotEngine(t *testing.T, n int) *MemoryEngine {
 	t.Helper()
 	engine := NewMemoryEngine()
@@ -35,7 +48,7 @@ func seedSnapshotEngine(t *testing.T, n int) *MemoryEngine {
 		engine.AddFile(File{
 			Hash:      hash,
 			Name:      "Great.Release.S01E01.1080p.WEB-DL.x264-GROUP.mkv",
-			Size:      uint64(700_000_000 + i),
+			Size:      uint64(snapshotSeedBaseSize + i),
 			Type:      "Video",
 			Sources:   1,
 			Completed: 1,
@@ -89,12 +102,11 @@ func TestSnapshotRoundTrip(t *testing.T) {
 			}
 
 			// Field-by-field on one entry, so a silently dropped column fails here.
-			hash := make([]byte, 16)
-			want, ok := src.files[hashKey(hash)]
+			want, ok := src.files[snapshotSeedKey(0)]
 			if !ok {
 				t.Fatal("fixture file missing from the source engine")
 			}
-			got, ok := dst.files[hashKey(hash)]
+			got, ok := dst.files[snapshotSeedKey(0)]
 			if !ok {
 				t.Fatal("file absent after load")
 			}
@@ -129,7 +141,7 @@ func TestSnapshotLoadMatchesDatabaseRestart(t *testing.T) {
 	hash := make([]byte, 16)
 	sources := dst.GetSourcesByHash(hash)
 	found := dst.FindByNameContains("Great.Release")
-	restored := dst.files[hashKey(hash)]
+	restored := dst.files[snapshotSeedKey(0)]
 
 	t.Logf("input:  a snapshot with %d files, %d sources, %d clients",
 		stats.Files, stats.Sources, stats.Clients)
@@ -442,5 +454,55 @@ func TestStartSnapshotSkipsNonSnapshotEngine(t *testing.T) {
 	t.Logf("output: snapshot written=%t", err == nil)
 	if err == nil {
 		t.Fatal("no snapshot may be written for an engine that persists natively")
+	}
+}
+
+// TestSnapshotRoundTripKeepsTwoSizesOfOneHash covers the trap in the files map key
+// change: WriteSnapshot packs the keys into one flat []byte and walks it at a fixed
+// stride, so a key whose width it does not expect is skipped — and if every key is
+// skipped the buffer is empty, which the writer cannot tell apart from an engine that
+// holds nothing, so it returns success having written no file at all. That path exists
+// deliberately, to stop a freshly started server truncating the snapshot it is about to
+// restore from, which is exactly what makes getting the stride wrong silent.
+func TestSnapshotRoundTripKeepsTwoSizesOfOneHash(t *testing.T) {
+	src := NewMemoryEngine()
+	hash := []byte("0123456789abcdef")
+	client := ClientInfo{ID: 7, Port: 4662, Hash: []byte("cccccccccccccccc")}
+	if _, err := src.Connect(client); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	src.AddFile(File{Hash: hash, Name: "real.mkv", Size: 100, Type: "Video"}, client)
+	src.AddFile(File{Hash: hash, Name: "fake.mkv", Size: 200, Type: "Video"}, client)
+
+	path := filepath.Join(t.TempDir(), "storage.gob")
+	written, err := src.WriteSnapshot(path, false)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	dst := NewMemoryEngine()
+	read, err := dst.LoadSnapshot(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	t.Logf("input:  one hash=%x at sizes 100 and 200, one client", hash)
+	t.Logf("output: wrote files=%d sources=%d, loaded files=%d, FilesCount=%d",
+		written.Files, written.Sources, read.Files, dst.FilesCount())
+
+	if written.Files != 2 {
+		t.Fatalf("both records must reach the file: wrote %d, want 2", written.Files)
+	}
+	// One shared source bucket per hash, written once — not once per size.
+	if written.Sources != 1 {
+		t.Fatalf("the shared source bucket must be written once, got %d want 1", written.Sources)
+	}
+	if dst.FilesCount() != 2 {
+		t.Fatalf("both records must survive the round trip, FilesCount=%d want 2", dst.FilesCount())
+	}
+	if _, ok := dst.files[fileMapKey(hash, 100)]; !ok {
+		t.Fatal("the size-100 record is missing after load")
+	}
+	if _, ok := dst.files[fileMapKey(hash, 200)]; !ok {
+		t.Fatal("the size-200 record is missing after load")
 	}
 }

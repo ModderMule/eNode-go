@@ -56,6 +56,14 @@ func newOfferLimitClient(t *testing.T, engine storage.Engine, softLimit, hardLim
 // so successive calls publish distinct files rather than re-offering the same ones.
 func offerFiles(t *testing.T, client *tcpClient, first, count int) {
 	t.Helper()
+	dispatchIncomingTCPPacket(t, client, offerItems(first, count))
+}
+
+// offerItems builds the item list offerFiles sends. Split out so a test can place the
+// frame inside a segment next to another packet, which is the only way to exercise
+// processPacketData's Excess recursion — and that recursion is what the login gate's
+// latch exists for.
+func offerItems(first, count int) []PacketItem {
 	offer := []PacketItem{
 		{Type: TypeUint8, Value: OpOfferFiles},
 		{Type: TypeUint32, Value: uint32(count)},
@@ -71,7 +79,7 @@ func offerFiles(t *testing.T, client *tcpClient, first, count int) {
 			Sources:    1,
 		})
 	}
-	dispatchIncomingTCPPacket(t, client, offer)
+	return offer
 }
 
 func offerHash(i int) []byte {

@@ -59,7 +59,7 @@ type TCPRuntimeConfig struct {
 	// Past the soft limit the excess is ignored and the client is warned once; past
 	// the hard limit it is told why and disconnected. Zero means unlimited. Counted
 	// per session in handleOfferFiles, and advertised through UDPRuntimeConfig so a
-	// client is held to the numbers it was given. See docs/file-publish-limits.md.
+	// client is held to the numbers it was given. See docs/server-client-communication.md.
 	SoftFileLimit int
 	HardFileLimit int
 }
@@ -525,6 +525,12 @@ type tcpClient struct {
 	softLimitWarned bool
 	hardLimitHit    bool
 
+	// loginGateTripped makes requireLogin inert once it has dropped the session, for
+	// exactly the reason hardLimitHit exists above: closeWithReason closes the socket
+	// but does not stop dispatch of bytes that already arrived. Same-goroutine only,
+	// like the counters above, so it needs no lock.
+	loginGateTripped bool
+
 	closeReason string
 }
 
@@ -766,6 +772,19 @@ func (c *tcpClient) handlePacket(packet *Packet) {
 
 func (c *tcpClient) handleED2K(opcode uint8, data *Buffer) {
 	data.Pos(0)
+	// Deny by default: everything that is not the opcode creating a session or the one
+	// ending it needs an identity, and there is none before handShake. Written as an
+	// exemption list rather than a list of gated opcodes so that an opcode added to the
+	// switch below is gated unless someone deliberately exempts it — including the ones
+	// that fall through to the default branch, since a pre-login client has no business
+	// sending those either. See requireLogin.
+	switch opcode {
+	case OpLoginRequest, OpDisconnect:
+	default:
+		if !c.requireLogin(opcode) {
+			return
+		}
+	}
 	switch opcode {
 	case OpLoginRequest:
 		c.handleLoginRequest(data)
@@ -1018,6 +1037,80 @@ func (c *tcpClient) closeWithReason(reason string) {
 	_ = c.conn.Close()
 }
 
+// msgNotLoggedIn is sent before the drop, so the user learns why the session ended
+// rather than seeing an unexplained close — the same reasoning as msgHardFileLimit.
+//
+// eserver has no counterpart string, but not because it refuses silently: its refusal
+// vocabulary is large (eserver-17.14-strings.txt:20779-20810) and includes two
+// protocol-violation lines whose register this copies (":20791-20792"). It has no
+// "not logged in" line because a conforming client cannot produce the situation.
+//
+// "ERROR" is load-bearing, for the same reason as the file-limit messages: both client
+// trees divert a message beginning with it to the error log rather than the server-info
+// pane. ASCII only, deliberately — this session has had no OP_IDCHANGE, so the client
+// has not been told SRV_TCPFLG_UNICODE and reads the text as ANSI.
+const msgNotLoggedIn = "ERROR : You must log in before sending requests to this server."
+
+// requireLogin reports whether a session may be served an opcode that needs an identity.
+// When it may not, it explains, drops the session and returns false — the same shape as
+// udpOpcodeEnabled, which likewise logs its own refusal.
+//
+// Everything but OP_LOGINREQUEST and OP_DISCONNECT goes through here, because before
+// handShake runs there is no identity to serve anything against: handShake is the only
+// place c.logged and c.info.StoreID are ever set, so snapshotInfo returns
+// {ID: 0, Port: 0, Hash: nil, StoreID: 0}.
+//
+// OP_OFFERFILES is what made this urgent. Publishing under that identity is not merely
+// useless, it is unreclaimable: sources dedupe on (ID, Port), so every pre-login offer
+// from every socket collapses into one {0, 0} row per hash; run()'s teardown calls
+// Storage.Disconnect only for a session that was logged in; and MemoryEngine.CleanupStale
+// cannot expire a source at all, because Source carries no timestamp
+// (storage/storage.go:193-216). Those rows are then served to real clients, which can do
+// nothing with an address of 0:0, and they occupy slots in the 255-entry wire cap.
+// MongoDB is the same story keyed on a nil client_hash, and also writes source_id: 0,
+// source_port: 0 into the files document (storage/engine_mongodb.go:310-319). MySQL is
+// the mild case: the source INSERT fails on the sources_ibfk_2 foreign key and returns
+// before the counter refresh, leaving one error line per offered record and an orphan
+// files row that CleanupStale reaps.
+//
+// A fourth consequence has since been closed at the storage layer rather than here: the
+// memory engine used to key a file on its hash alone and overwrite the whole record, so
+// any offer — anonymous or not — could rewrite the Size of a hash already in the index
+// and blackhole every later source lookup for it. Files are keyed on (hash, size) now;
+// see storage.fileMapKey.
+//
+// No conforming client is refused. Both reference trees send their first request only
+// once login has completed: srchybrid/ServerConnect.cpp:227-228 calls SendListToServer
+// from the CS_CONNECTED branch, and eMuleQt/src/core/files/SharedFileList.cpp:652-653
+// returns early unless ServerConnect::isConnected(), whose flag is set at the single site
+// ServerConnect.cpp:425, in the ServerConnState::Connected branch. Both send
+// OP_GETSERVERLIST from that same post-login branch. A client that pipelines its login
+// and its first request into one segment is fine too: dispatch is sequential on this
+// connection's goroutine, and processPacketData recurses into packet.Excess only after
+// handlePacket has returned, so the login is complete before the next opcode is read.
+//
+// The session is dropped rather than the packet ignored because nothing a pre-login
+// socket can legitimately do needs any of these opcodes, and ignoring would leave it free
+// to keep sending full frames — each one parsed in full, and zlib-inflated first if it
+// arrived as PR_ZLIB — for the whole of DisconnectTimeout.
+func (c *tcpClient) requireLogin(opcode uint8) bool {
+	if c.isLogged() {
+		return true
+	}
+	// closeWithReason only closes the socket; every packet already buffered behind the
+	// offending one still reaches this function. Without the latch a segment packed with
+	// 10-byte empty offers would produce a warning, an OP_SERVERMESSAGE and a redundant
+	// Close for each. Same latch, same reason, as hardLimitHit.
+	if c.loginGateTripped {
+		return false
+	}
+	c.loginGateTripped = true
+	logging.Warnf("tcp request before login remote=%s opcode=0x%x: closing", c.remoteHost, opcode)
+	c.sendServerMessage(msgNotLoggedIn)
+	c.closeWithReason("not-logged-in")
+	return false
+}
+
 func (c *tcpClient) startPeriodicServerStatus() {
 	if c.statusStop != nil {
 		return
@@ -1083,21 +1176,24 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	if c.hardLimitHit {
 		return
 	}
-	raw := append([]byte(nil), data.Bytes()...)
+	// data.Bytes() is the whole payload regardless of the read pointer (buffer.go:90-92),
+	// and GetFileList below only advances that pointer: every write to b.data lives in a
+	// Put* method, none of which it can reach, and each value it returns is copied out —
+	// the hash through an explicit append, strings through GetString. So the payload is
+	// still intact on the error path below. This used to snapshot the frame into a copy
+	// first, duplicating the whole of every offer packet to serve one length and a
+	// 96-byte hex preview.
+	payloadLen := len(data.Bytes())
 	records, err := data.GetFileList()
 	if err != nil {
-		previewLen := 96
-		if len(raw) < previewLen {
-			previewLen = len(raw)
-		}
-		previewHex := hex.EncodeToString(raw[:previewLen])
+		previewHex := hex.EncodeToString(data.Bytes()[:min(payloadLen, 96)])
 		logging.Warnf("offer files parse failed remote=%s payloadLen=%d previewHex=%s err=%v",
-			c.remoteHost, len(raw), previewHex, err)
+			c.remoteHost, payloadLen, previewHex, err)
 		return
 	}
 	const maxOfferFilesLog = 50
 	logging.Debugf("offer files remote=%s count=%d payloadLen=%d offeredSoFar=%d",
-		c.remoteHost, len(records), len(raw), c.offeredFiles)
+		c.remoteHost, len(records), payloadLen, c.offeredFiles)
 	if len(records) > maxOfferFilesLog {
 		logging.Debugf("offer files remote=%s truncated=%d", c.remoteHost, len(records)-maxOfferFilesLog)
 	}
@@ -1105,7 +1201,21 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	// and taking it per file would lock once per offered file.
 	info := c.snapshotInfo()
 	softLimit, hardLimit := c.server.TCP.SoftFileLimit, c.server.TCP.HardFileLimit
+	var zeroSize int
 	for i, record := range records {
+		if record.Size == 0 {
+			// No size tag at all, or one that did not decode as an integer
+			// (buffer.go:637-644). Such a record is unusable and permanent: a client
+			// only ever asks for sources by (hash, size), and eMule discards a
+			// zero-size search result outright (srchybrid/SearchList.cpp:355), so it
+			// would sit in the index for good — searchable, never servable. eserver
+			// has policed published sizes since 17.3 (kiten-20071012.txt:189-190).
+			//
+			// Dropped before the counter so it is charged against neither publish
+			// limit: a client is not penalised for a record the server refuses.
+			zeroSize++
+			continue
+		}
 		c.offeredFiles++
 		if hardLimit > 0 && c.offeredFiles > hardLimit {
 			c.hardLimitHit = true
@@ -1136,6 +1246,12 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 			logging.Debugf("offer file remote=%s idx=%d hash=%x name=%q size=%d type=%q sourceID=%d sourcePort=%d",
 				c.remoteHost, i, record.Hash, file.Name, file.Size, file.Type, info.ID, info.Port)
 		}
+	}
+	// One line for the packet, never one per record: a client at the hard limit can
+	// put 20,000 records in a single offer.
+	if zeroSize > 0 {
+		logging.Warnf("offer files zero size remote=%s id=%d dropped=%d of=%d",
+			c.remoteHost, info.ID, zeroSize, len(records))
 	}
 }
 
@@ -2453,9 +2569,11 @@ func (c *tcpClient) ipv6Reflection() (peerV6 []byte, status uint8) {
 		}
 	}
 	// The verdict only exists once login has settled it, and only when v6 source
-	// publication is on — that is the code path that computes it. Pre-login (an
-	// OP_GETSERVERLIST before OP_LOGINREQUEST also sends an ident) there is nothing
-	// to report, and a zero bitfield omits the tag.
+	// publication is on — that is the code path that computes it. The isLogged check is
+	// now belt and braces: the route it was written for, an OP_GETSERVERLIST arriving
+	// before OP_LOGINREQUEST, is refused by the login gate in handleED2K, so the only
+	// remaining caller is handShake, which sets c.logged before it sends the ident. Kept
+	// because sendServerIdent must never emit a verdict the login path has not computed.
 	if !c.server.publishV6Sources() || !c.isLogged() {
 		return peerV6, 0
 	}

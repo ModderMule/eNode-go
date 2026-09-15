@@ -2,9 +2,18 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"sync"
 	"time"
+)
+
+const (
+	// hashLen is the ed2k hash width, and the width of a sources map key.
+	hashLen = 16
+	// fileMapKeyLen is the width of a files map key: hashLen plus an 8-byte size.
+	// Fixed, because WriteSnapshot walks a flat key buffer at this stride.
+	fileMapKeyLen = hashLen + 8
 )
 
 // MaxWireSources is the most sources any engine may return for one file. The
@@ -92,9 +101,11 @@ type MemoryEngine struct {
 	// at the point it checks, the ed2k ID is still the untrusted value supplied
 	// by the client, so keying on ID would let a duplicate login through.
 	clientsByHash map[string]uint32
-	files         map[string]File
-	sources       map[string][]Source
-	servers       []Server
+	// files is keyed by fileMapKey (hash+size); sources by hashKey (hash alone). The two
+	// key spaces differ deliberately — see fileMapKey.
+	files   map[string]File
+	sources map[string][]Source
+	servers []Server
 }
 
 func NewMemoryEngine() *MemoryEngine {
@@ -106,6 +117,8 @@ func NewMemoryEngine() *MemoryEngine {
 	}
 }
 
+// hashKey keys the two maps whose identity really is a bare hash: clientsByHash, on
+// the user hash, and sources, on the file hash. Files use fileMapKey instead.
 func hashKey(hash []byte) string {
 	return string(hash)
 }
@@ -200,10 +213,13 @@ func (m *MemoryEngine) CleanupStale(maxAge time.Duration, opts CleanupOptions) (
 	defer m.mu.Unlock()
 
 	for key, file := range m.files {
-		sources := m.sources[key]
+		hk := key[:hashLen]
+		sources := m.sources[hk]
 		if len(sources) == 0 && !opts.KeepZeroSourceFiles {
 			delete(m.files, key)
-			delete(m.sources, key)
+			// Safe across sizes: the bucket is already empty, so this cannot strip
+			// another size's sources. A sibling record is reaped on its own iteration.
+			delete(m.sources, hk)
 			result.Files++
 			continue
 		}
@@ -222,8 +238,10 @@ func (m *MemoryEngine) AddFile(file File, clientInfo ClientInfo) {
 	file = NormalizeFile(file)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.files[fileMapKey(file.Hash, file.Size)] = file
+	// Sources stay keyed on the hash alone; see fileMapKey for why the two key spaces
+	// differ and what it costs.
 	k := hashKey(file.Hash)
-	m.files[k] = file
 	src := Source{
 		ID:            clientInfo.ID,
 		Port:          clientInfo.Port,
@@ -251,12 +269,12 @@ func (m *MemoryEngine) AddFile(file File, clientInfo ClientInfo) {
 func (m *MemoryEngine) GetSources(fileHash []byte, fileSize uint64) []Source {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	k := hashKey(fileHash)
-	f, ok := m.files[k]
-	if !ok || f.Size != fileSize {
+	// Existence of the composite key *is* the size check: an offer at some other size
+	// now lands in its own record instead of rewriting this one's Size.
+	if _, ok := m.files[fileMapKey(fileHash, fileSize)]; !ok {
 		return nil
 	}
-	return capSources(m.sources[k])
+	return capSources(m.sources[hashKey(fileHash)])
 }
 
 func (m *MemoryEngine) GetSourcesByHash(fileHash []byte) []Source {
@@ -322,4 +340,34 @@ func capSources(sources []Source) []Source {
 		sources = sources[:MaxWireSources]
 	}
 	return append([]Source(nil), sources...)
+}
+
+// fileMapKey identifies a file the way the protocol does — by hash *and* size together.
+//
+// eserver has policed size conflicts since 17.3 ("Make sure the size of a published file
+// matches the known file size. A lot of buggy or malicious clients try to mislead the
+// network", lugdunum-eserver/docs/kiten-20071012.txt:189-190), eMule's own identity type
+// compares MD4 and size and AICH (srchybrid/FileIdentifier.cpp:84-93), and eMule changed
+// its Kad index to store same-hash/different-size files separately in 0.49a. Both DB
+// engines here already encode it — UNIQUE(hash,size) in misc/enode.sql:72 and the
+// {hash,size} index in engine_mongodb.go:89-92.
+//
+// Keying files on the hash alone let any offer overwrite another file's whole record,
+// including its Size, after which GetSources rejected every lookup for the real size and
+// nothing ever reconciled it.
+//
+// Fixed width, and big-endian so a key orders by hash then size: WriteSnapshot packs
+// these into one flat []byte and walks it at a constant stride. The hash is normalized
+// to exactly hashLen bytes, which every production path already guarantees — GetFileList
+// fails the packet otherwise (ed2k/buffer.go:606-609), as does decodeHash for fixtures.
+//
+// sources stays keyed by hashKey, not by this: the legacy UDP OP_GLOBGETSOURCES (0x9a)
+// carries bare hashes with no size and must stay an O(1) lookup. The cost is that two
+// sizes of one hash share a source list, so GetSources returns a superset where the DB
+// engines return only the matching size's — see docs/server-client-communication.md.
+func fileMapKey(hash []byte, size uint64) string {
+	var buf [fileMapKeyLen]byte
+	copy(buf[:hashLen], hash)
+	binary.BigEndian.PutUint64(buf[hashLen:], size)
+	return string(buf[:])
 }

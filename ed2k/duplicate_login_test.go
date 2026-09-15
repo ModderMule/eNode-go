@@ -20,13 +20,7 @@ func newLoginTestRuntime(engine storage.Engine) *ServerRuntime {
 
 func loginPacket(t *testing.T, hash []byte, id uint32, port uint16) *Packet {
 	t.Helper()
-	wire, err := MakePacket(PrED2K, []PacketItem{
-		{Type: TypeUint8, Value: OpLoginRequest},
-		{Type: TypeHash, Value: hash},
-		{Type: TypeUint32, Value: id},
-		{Type: TypeUint16, Value: port},
-		{Type: TypeTags, Value: []Tag{}},
-	})
+	wire, err := MakePacket(PrED2K, loginItems(hash, id, port))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,6 +29,18 @@ func loginPacket(t *testing.T, hash []byte, id uint32, port uint16) *Packet {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// loginItems is the item list loginPacket frames. Split out so a test can concatenate a
+// login frame with another packet into one segment and feed the pair to handleBytes.
+func loginItems(hash []byte, id uint32, port uint16) []PacketItem {
+	return []PacketItem{
+		{Type: TypeUint8, Value: OpLoginRequest},
+		{Type: TypeHash, Value: hash},
+		{Type: TypeUint32, Value: id},
+		{Type: TypeUint16, Value: port},
+		{Type: TypeTags, Value: []Tag{}},
+	}
 }
 
 // The security case: the user hash is public — broadcast in OP_HELLO and handed
