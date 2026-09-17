@@ -187,7 +187,7 @@ storage:
     pass: password           # MySQL password
     database: enode          # MySQL database
     connections: 8           # MySQL connection pool cap
-    deadlockDelay: 100       # Deadlock retry delay (ms)
+    deadlockDelay: 100       # Base deadlock retry delay (ms), doubled per retry with jitter, 6 retries
     schemaFile: misc/enode.sql # DDL applied on first connect when tables are missing
     dialect: mariadb         # Full-text search: mariadb (portable) | mysql (ngram substring)
   mongodb:

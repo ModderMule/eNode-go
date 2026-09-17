@@ -155,7 +155,7 @@ storage:
     pass: password           # MySQL 密码
     database: enode          # MySQL 数据库
     connections: 8           # MySQL 连接池上限
-    deadlockDelay: 100       # 死锁重试等待（毫秒）
+    deadlockDelay: 100       # 死锁重试基础等待（毫秒），每次重试翻倍并加随机抖动，共重试 6 次
     schemaFile: misc/enode.sql # 首次连接且表缺失时执行的 DDL
     dialect: mariadb         # 全文检索：mariadb（可移植）| mysql（ngram 子串）
   mongodb:

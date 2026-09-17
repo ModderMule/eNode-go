@@ -36,6 +36,15 @@ const MaxSearchResults = 1000
 // the set is delivered through OP_QUERY_MORE_RESULT.
 const MaxSearchPage = 255
 
+// offerBatchSize is how many offered files the DB engines write per multi-row
+// statement. A conforming eMule offers at most 200 files per OP_OFFERFILES
+// (srchybrid/SharedFileList.cpp:832-834), so a real packet is one chunk; the cap
+// exists for a client that crams up to the hard limit into one frame. At 500 the
+// sources INSERT carries 6,500 placeholders, far below MySQL's 65,535 should the
+// driver fall back to a prepared statement, and ~1.4 MB of worst-case row data,
+// below every server's default max_allowed_packet.
+const offerBatchSize = 500
+
 type ClientInfo struct {
 	ID    uint32
 	IPv4  uint32
@@ -68,6 +77,14 @@ type Source struct {
 	// IPv6 sentinel or tag-block form for a v6-reachable source.
 	IPv6          []byte
 	IPv6Reachable bool
+}
+
+// counterSource is the offering client whose address a counter refresh stamps
+// onto files.source_id / files.source_port. A cleanup sweep passes nil: it has no
+// offering client, and writing zeros would wipe the last known source address.
+type counterSource struct {
+	ID   uint32
+	Port uint16
 }
 
 type File struct {
@@ -232,38 +249,20 @@ func (m *MemoryEngine) CleanupStale(maxAge time.Duration, opts CleanupOptions) (
 }
 
 func (m *MemoryEngine) AddFile(file File, clientInfo ClientInfo) {
-	// Normalized here too, so all three engines agree on what a given offer
-	// stores. The memory engine has no schema to violate, but a search result
-	// that differs by engine is its own bug.
-	file = NormalizeFile(file)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.files[fileMapKey(file.Hash, file.Size)] = file
-	// Sources stay keyed on the hash alone; see fileMapKey for why the two key spaces
-	// differ and what it costs.
-	k := hashKey(file.Hash)
-	src := Source{
-		ID:            clientInfo.ID,
-		Port:          clientInfo.Port,
-		UserHash:      append([]byte(nil), clientInfo.Hash...),
-		CryptOptions:  clientInfo.CryptOptions,
-		IPv6:          append([]byte(nil), clientInfo.IPv6...),
-		IPv6Reachable: clientInfo.IPv6Reachable,
+	m.addFileLocked(file, clientInfo)
+}
+
+// AddFiles stores one client's whole offer under a single lock acquisition. The
+// memory engine has no round-trips to save, so it is AddFile in order — which is
+// the contract the DB engines' batched writes are held to.
+func (m *MemoryEngine) AddFiles(files []File, clientInfo ClientInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, file := range files {
+		m.addFileLocked(file, clientInfo)
 	}
-	existing := m.sources[k]
-	for i, s := range existing {
-		if s.ID == src.ID && s.Port == src.Port {
-			// Refresh hash, crypt options and IPv6 in case the client reconnected
-			// with changed settings or a new address.
-			existing[i].UserHash = append([]byte(nil), src.UserHash...)
-			existing[i].CryptOptions = src.CryptOptions
-			existing[i].IPv6 = append([]byte(nil), src.IPv6...)
-			existing[i].IPv6Reachable = src.IPv6Reachable
-			m.sources[k] = existing
-			return
-		}
-	}
-	m.sources[k] = append(existing, src)
 }
 
 func (m *MemoryEngine) GetSources(fileHash []byte, fileSize uint64) []Source {
@@ -370,4 +369,38 @@ func fileMapKey(hash []byte, size uint64) string {
 	copy(buf[:hashLen], hash)
 	binary.BigEndian.PutUint64(buf[hashLen:], size)
 	return string(buf[:])
+}
+
+// addFileLocked is AddFile's body; the caller holds m.mu for writing.
+func (m *MemoryEngine) addFileLocked(file File, clientInfo ClientInfo) {
+	// Normalized here too, so all three engines agree on what a given offer
+	// stores. The memory engine has no schema to violate, but a search result
+	// that differs by engine is its own bug.
+	file = NormalizeFile(file)
+	m.files[fileMapKey(file.Hash, file.Size)] = file
+	// Sources stay keyed on the hash alone; see fileMapKey for why the two key spaces
+	// differ and what it costs.
+	k := hashKey(file.Hash)
+	src := Source{
+		ID:            clientInfo.ID,
+		Port:          clientInfo.Port,
+		UserHash:      append([]byte(nil), clientInfo.Hash...),
+		CryptOptions:  clientInfo.CryptOptions,
+		IPv6:          append([]byte(nil), clientInfo.IPv6...),
+		IPv6Reachable: clientInfo.IPv6Reachable,
+	}
+	existing := m.sources[k]
+	for i, s := range existing {
+		if s.ID == src.ID && s.Port == src.Port {
+			// Refresh hash, crypt options and IPv6 in case the client reconnected
+			// with changed settings or a new address.
+			existing[i].UserHash = append([]byte(nil), src.UserHash...)
+			existing[i].CryptOptions = src.CryptOptions
+			existing[i].IPv6 = append([]byte(nil), src.IPv6...)
+			existing[i].IPv6Reachable = src.IPv6Reachable
+			m.sources[k] = existing
+			return
+		}
+	}
+	m.sources[k] = append(existing, src)
 }

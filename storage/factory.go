@@ -20,6 +20,12 @@ type Engine interface {
 	Disconnect(ClientInfo)
 	FilesCount() int
 	AddFile(File, ClientInfo)
+	// AddFiles stores every file one client offered in one packet. The result must
+	// equal calling AddFile for each file in order — a later duplicate of the same
+	// (hash, size) wins — but a DB engine writes the batch in a fixed number of
+	// round-trips instead of several per file, which is the difference between an
+	// OP_OFFERFILES costing milliseconds and costing a minute over a WAN.
+	AddFiles([]File, ClientInfo)
 	GetSources([]byte, uint64) []Source
 	GetSourcesByHash([]byte) []Source
 	FindByNameContains(string) []File

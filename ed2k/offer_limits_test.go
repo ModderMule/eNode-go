@@ -3,6 +3,7 @@ package ed2k
 import (
 	"bytes"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -343,4 +344,73 @@ func TestStatResAdvertisesConfiguredFileLimits(t *testing.T) {
 	if got.SoftFiles != 4321 || got.HardFiles != 8765 {
 		t.Errorf("advertised %d/%d, want 4321/8765", got.SoftFiles, got.HardFiles)
 	}
+}
+
+// batchCountingEngine records how the offer path reaches storage.
+type batchCountingEngine struct {
+	*storage.MemoryEngine
+	mu         sync.Mutex
+	addFile    int
+	batchSizes []int
+}
+
+func (e *batchCountingEngine) AddFile(file storage.File, info storage.ClientInfo) {
+	e.mu.Lock()
+	e.addFile++
+	e.mu.Unlock()
+	e.MemoryEngine.AddFile(file, info)
+}
+
+func (e *batchCountingEngine) AddFiles(files []storage.File, info storage.ClientInfo) {
+	e.mu.Lock()
+	e.batchSizes = append(e.batchSizes, len(files))
+	e.mu.Unlock()
+	e.MemoryEngine.AddFiles(files, info)
+}
+
+// TestOfferFilesStoresOnePacketInOneBatch pins the change that makes a remote database
+// usable: one OP_OFFERFILES is one storage call, not one per record. Per record, a
+// 200-file packet was 200 sets of round-trips on the session's read loop.
+//
+// The hard-limit case matters as much as the plain one. The records up to the cap have
+// to reach storage before the drop — they did when each was written as it was read — so
+// the batch is flushed, and holds exactly those, before the session closes.
+func TestOfferFilesStoresOnePacketInOneBatch(t *testing.T) {
+	t.Run("unlimited", func(t *testing.T) {
+		engine := &batchCountingEngine{MemoryEngine: storage.NewMemoryEngine()}
+		client, conn := newOfferLimitClient(t, engine, 0, 0)
+		t.Logf("input: softLimit=0 hardLimit=0, packets of 200 then 3 files")
+
+		offerFiles(t, client, 0, 200)
+		offerFiles(t, client, 200, 3)
+
+		t.Logf("output: batchSizes=%v addFile=%d stored=%d closed=%d",
+			engine.batchSizes, engine.addFile, engine.FilesCount(), conn.closed)
+		if engine.addFile != 0 {
+			t.Errorf("offer path called AddFile %d times; each packet must go through AddFiles", engine.addFile)
+		}
+		if fmt.Sprint(engine.batchSizes) != "[200 3]" {
+			t.Errorf("batch sizes %v, want [200 3] — one AddFiles per packet", engine.batchSizes)
+		}
+		if engine.FilesCount() != 203 {
+			t.Errorf("stored %d files, want 203", engine.FilesCount())
+		}
+	})
+
+	t.Run("hard limit flushes before the drop", func(t *testing.T) {
+		engine := &batchCountingEngine{MemoryEngine: storage.NewMemoryEngine()}
+		client, conn := newOfferLimitClient(t, engine, 0, 3)
+		t.Logf("input: softLimit=0 hardLimit=3, one packet of 5 files")
+
+		offerFiles(t, client, 0, 5)
+
+		t.Logf("output: batchSizes=%v addFile=%d stored=%d closed=%d reason=%q",
+			engine.batchSizes, engine.addFile, engine.FilesCount(), conn.closed, client.getCloseReason())
+		if fmt.Sprint(engine.batchSizes) != "[3]" {
+			t.Errorf("batch sizes %v, want [3] — the accepted records, flushed once before the close", engine.batchSizes)
+		}
+		if engine.FilesCount() != 3 || conn.closed == 0 {
+			t.Errorf("stored=%d closed=%d, want 3 stored and the session closed", engine.FilesCount(), conn.closed)
+		}
+	})
 }

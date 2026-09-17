@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -73,47 +73,17 @@ func (m *MongoDBEngine) Init() error {
 		logging.Errorf("mongodb reset sources online flag failed: %v", err)
 	}
 
-	_, _ = db.Collection("clients").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "hash", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	})
-	// Backs both the online count and the stale-row sweep. Composite for the same
-	// reason as the MySQL side: `online` leads so the count uses it, and
-	// time_login covers the sweep's second predicate.
-	_, _ = db.Collection("clients").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "online", Value: 1}, {Key: "time_login", Value: 1}},
-	})
-	_, _ = db.Collection("sources").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "online", Value: 1}, {Key: "time_offer", Value: 1}},
-	})
-	_, _ = db.Collection("files").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "hash", Value: 1}, {Key: "size", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	})
-	// Source identity is (file, client hash). Assumes an empty database: there is
-	// no drop of the previous client_ed2k index and no backfill of client_hash,
-	// so an existing deployment would need its sources collection cleared.
-	_, _ = db.Collection("sources").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "file_hash", Value: 1}, {Key: "file_size", Value: 1}, {Key: "client_hash", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	})
-	_, _ = db.Collection("sources").Indexes().CreateMany(ctx, []mongo.IndexModel{
-		{Keys: bson.D{{Key: "file_hash", Value: 1}, {Key: "file_size", Value: 1}}},
-		{Keys: bson.D{{Key: "name", Value: "text"}}},
-		// Backs the regex fallback in mongoNameRegexFilter, which runs whenever a
-		// text term cannot be hoisted into the $text stage.
-		{Keys: bson.D{{Key: "name", Value: 1}}},
-		{Keys: bson.D{{Key: "type", Value: 1}}},
-		{Keys: bson.D{{Key: "ext", Value: 1}}},
-		{Keys: bson.D{{Key: "codec", Value: 1}}},
-		{Keys: bson.D{{Key: "bitrate", Value: 1}}},
-		{Keys: bson.D{{Key: "length", Value: 1}}},
-		{Keys: bson.D{{Key: "file_size", Value: 1}}},
-	})
-	_, _ = db.Collection("files").Indexes().CreateMany(ctx, []mongo.IndexModel{
-		{Keys: bson.D{{Key: "sources", Value: 1}}},
-		{Keys: bson.D{{Key: "completed", Value: 1}}},
-	})
+	// Its own deadline: up to six round-trips, which must not eat into what the
+	// online-flag resets above have left of ctx.
+	indexCtx, indexCancel := m.opContext()
+	created, err := m.ensureIndexes(indexCtx)
+	indexCancel()
+	if len(created) > 0 {
+		logging.Infof("mongodb: created indexes %s", strings.Join(created, ", "))
+	}
+	if err != nil {
+		logging.Errorf("mongodb ensure indexes failed: %v", err)
+	}
 	return nil
 }
 
@@ -228,95 +198,46 @@ func (m *MongoDBEngine) FilesCount() int {
 }
 
 func (m *MongoDBEngine) AddFile(file File, clientInfo ClientInfo) {
+	m.AddFiles([]File{file}, clientInfo)
+}
+
+// AddFiles writes one client's offer as four round-trips per offerBatchSize chunk —
+// a files bulk upsert, a sources bulk upsert, one aggregate and one counter bulk
+// update — however many files the chunk holds. It used to be those four per file,
+// once per record of every OP_OFFERFILES.
+//
+// Failure isolation is the same as when each file was its own set of calls. The
+// bulks are unordered, so a document the server rejects fails alone and the rest
+// are written; as before, a file whose upsert failed gets no source, and a source
+// that failed does not move the counters. A failure that takes out a whole
+// operation instead — a timeout, or a value the driver cannot encode, such as a
+// size past int64 — retries that chunk file by file, as the MySQL engine does.
+func (m *MongoDBEngine) AddFiles(files []File, clientInfo ClientInfo) {
 	if err := m.ensureDB(); err != nil {
 		return
 	}
 	// Normalized even though MongoDB is schemaless: otherwise the two engines
 	// store different type/ext values for the same offer, and a search that hits
 	// on MySQL misses on MongoDB.
-	file = NormalizeFile(file)
-	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
-	defer cancel()
-
-	if _, err := m.db.Collection("files").UpdateOne(
-		ctx,
-		bson.M{"hash": file.Hash, "size": file.Size},
-		bson.M{"$set": bson.M{"hash": file.Hash, "size": file.Size, "time_offer": time.Now()}},
-		options.UpdateOne().SetUpsert(true),
-	); err != nil {
-		logging.Errorf("mongodb upsert file hash=%x size=%d failed: %v", file.Hash, file.Size, err)
-		return
+	batch := prepareOfferBatch(files)
+	for start := 0; start < len(batch); start += offerBatchSize {
+		chunk := batch[start:min(start+offerBatchSize, len(batch))]
+		err := m.addFilesChunk(chunk, clientInfo)
+		if err == nil {
+			continue
+		}
+		if len(chunk) > 1 {
+			logging.Warnf("mongodb add files batch of %d client=%x failed, retrying one by one: %v",
+				len(chunk), clientInfo.Hash, err)
+			for _, file := range chunk {
+				if err := m.addFilesChunk([]File{file}, clientInfo); err != nil {
+					logMongoAddFileError(file, clientInfo, err)
+				}
+			}
+			continue
+		}
+		logMongoAddFileError(chunk[0], clientInfo, err)
 	}
-
-	typ := file.Type
-	if typ == "" {
-		typ = GetFileType(file.Name)
-	}
-	// A source is identified by (file, client hash). client_ed2k is kept as the
-	// client's *current* address — GetSources needs it — but it must not be part
-	// of the identity: LowIDs are per-session and HighIDs follow the IP, so
-	// keying on it created a fresh source document on every reconnect. The old
-	// ones then matched nothing in Disconnect and stayed online forever, while
-	// the $group below counted every stale duplicate. MySQL keys on
-	// (id_file, id_client), where id_client resolves through UNIQUE(hash).
-	src := bson.M{
-		"file_hash":   file.Hash,
-		"file_size":   file.Size,
-		"client_hash": clientInfo.Hash,
-		"client_ed2k": clientInfo.ID,
-		"name":        file.Name,
-		"ext":         NormalizeExt(file.Name),
-		"type":        typ,
-		"title":       file.Title,
-		"artist":      file.Artist,
-		"album":       file.Album,
-		"length":      file.Runtime,
-		"bitrate":     file.Bitrate,
-		"codec":       file.Codec,
-		"online":      true,
-		"complete":    file.Completed > 0,
-		"time_offer":  time.Now(),
-	}
-	if _, err := m.db.Collection("sources").UpdateOne(
-		ctx,
-		bson.M{"file_hash": file.Hash, "file_size": file.Size, "client_hash": clientInfo.Hash},
-		bson.M{"$set": src},
-		options.UpdateOne().SetUpsert(true),
-	); err != nil {
-		logging.Errorf("mongodb upsert source hash=%x client=%x failed: %v", file.Hash, clientInfo.Hash, err)
-		return
-	}
-
-	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: bson.M{"file_hash": file.Hash, "file_size": file.Size}}},
-		{{Key: "$group", Value: bson.M{
-			"_id":       bson.M{"file_hash": "$file_hash", "file_size": "$file_size"},
-			"sources":   bson.M{"$sum": 1},
-			"completed": bson.M{"$sum": bson.M{"$cond": []any{"$complete", 1, 0}}},
-		}}},
-	}
-	cur, err := m.db.Collection("sources").Aggregate(ctx, pipeline)
-	if err != nil {
-		return
-	}
-	defer cur.Close(ctx)
-	var agg []struct {
-		Sources   int32 `bson:"sources"`
-		Completed int32 `bson:"completed"`
-	}
-	if err := cur.All(ctx, &agg); err != nil || len(agg) == 0 {
-		return
-	}
-	_, _ = m.db.Collection("files").UpdateOne(
-		ctx,
-		bson.M{"hash": file.Hash, "size": file.Size},
-		bson.M{"$set": bson.M{
-			"sources":     agg[0].Sources,
-			"completed":   agg[0].Completed,
-			"source_id":   clientInfo.ID,
-			"source_port": clientInfo.Port,
-		}},
-	)
 }
 
 func (m *MongoDBEngine) GetSources(fileHash []byte, fileSize uint64) []Source {
@@ -347,62 +268,25 @@ func (m *MongoDBEngine) FindByNameContains(term string) []File {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
 	defer cancel()
-	cur, err := m.db.Collection("sources").Find(
-		ctx,
-		bson.M{"$text": bson.M{"$search": term}},
-		options.Find().
-			SetLimit(255).
-			SetProjection(bson.M{"score": bson.M{"$meta": "textScore"}}).
-			SetSort(bson.D{{Key: "score", Value: bson.M{"$meta": "textScore"}}}),
-	)
+	// One aggregate. This was a find of up to 255 sources followed by a files
+	// FindOne per distinct file — up to 256 round-trips for one call.
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{"$text": bson.M{"$search": term}}}},
+		{{Key: "$addFields", Value: bson.M{"_textScore": bson.M{"$meta": "textScore"}}}},
+		{{Key: "$sort", Value: bson.D{{Key: "_textScore", Value: -1}}}},
+		{{Key: "$limit", Value: int64(255)}},
+		{{Key: "$group", Value: mongoSearchGroup(true, false)}},
+		{{Key: "$sort", Value: bson.D{{Key: "score", Value: -1}}}},
+	}
+	pipeline = append(pipeline, mongoFileCounterStages()...)
+	cur, err := m.db.Collection("sources").Aggregate(ctx, pipeline,
+		options.Aggregate().SetBatchSize(255+1))
 	if err != nil {
 		logging.Errorf("mongodb find by name %q failed: %v", term, err)
 		return nil
 	}
 	defer cur.Close(ctx)
-	var src []struct {
-		FileHash []byte `bson:"file_hash"`
-		FileSize uint64 `bson:"file_size"`
-		Name     string `bson:"name"`
-		Type     string `bson:"type"`
-		Title    string `bson:"title"`
-		Artist   string `bson:"artist"`
-		Album    string `bson:"album"`
-		Runtime  uint32 `bson:"length"`
-		Bitrate  uint32 `bson:"bitrate"`
-		Codec    string `bson:"codec"`
-	}
-	if err := cur.All(ctx, &src); err != nil {
-		logging.Errorf("mongodb decode sources failed: %v", err)
-		return nil
-	}
-	seen := map[string]bool{}
-	var out []File
-	for _, s := range src {
-		key := string(s.FileHash) + ":" + strconv.FormatUint(s.FileSize, 10)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		var fdoc struct {
-			Hash       []byte `bson:"hash"`
-			Size       uint64 `bson:"size"`
-			Sources    uint32 `bson:"sources"`
-			Completed  uint32 `bson:"completed"`
-			SourceID   uint32 `bson:"source_id"`
-			SourcePort uint16 `bson:"source_port"`
-		}
-		if err := m.db.Collection("files").FindOne(ctx, bson.M{"hash": s.FileHash, "size": s.FileSize}).Decode(&fdoc); err != nil {
-			continue
-		}
-		out = append(out, File{
-			Hash: fdoc.Hash, Name: s.Name, Size: fdoc.Size, Type: s.Type,
-			Sources: fdoc.Sources, Completed: fdoc.Completed, Title: s.Title, Artist: s.Artist,
-			Album: s.Album, Runtime: s.Runtime, Bitrate: s.Bitrate, Codec: s.Codec,
-			SourceID: fdoc.SourceID, SourcePort: fdoc.SourcePort,
-		})
-	}
-	return out
+	return decodeMongoSearchFiles(ctx, cur)
 }
 
 func (m *MongoDBEngine) FindBySearch(expr *SearchExpr) []File {
@@ -412,149 +296,25 @@ func (m *MongoDBEngine) FindBySearch(expr *SearchExpr) []File {
 	if expr == nil {
 		return nil
 	}
+	pipeline, ok := mongoSearchPipeline(expr)
+	if !ok {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
 	defer cancel()
 
-	// A $text match must be the very first pipeline stage, and $text is illegal
-	// inside $or/$nor. So we hoist a single text leaf to stage 0 only when it sits
-	// on the AND spine; anything else falls back to regex matching, which composes
-	// anywhere. See hoistTextLeaf.
-	textSearch, rest, hoisted := hoistTextLeaf(expr)
-
-	filterExpr := expr
-	if hoisted {
-		filterExpr = rest // may be nil when the whole query was just that text leaf
-	}
-
-	var fullMatch bson.M
-	if filterExpr != nil {
-		// needsFile is intentionally discarded: the join below is unconditional, so
-		// whether this particular filter references file.* no longer decides it.
-		fullMatch, _ = mongoFilter(filterExpr)
-		if fullMatch == nil {
-			logging.Errorf("mongodb search: unsupported search expression, dropping query")
-			return nil
-		}
-	}
-	if !hoisted && fullMatch == nil {
-		logging.Errorf("mongodb search: search expression produced no filter, dropping query")
-		return nil
-	}
-
-	pipeline := mongo.Pipeline{}
-	if hoisted {
-		// $meta:"textScore" is captured immediately after the $text stage, before
-		// any $lookup, so the score survives into $group.
-		pipeline = append(pipeline,
-			bson.D{{Key: "$match", Value: bson.M{"$text": bson.M{"$search": textSearch}}}},
-			bson.D{{Key: "$addFields", Value: bson.M{"_textScore": bson.M{"$meta": "textScore"}}}},
-		)
-	}
-	if sourceMatch := mongoSourceConjunctFilter(filterExpr); sourceMatch != nil {
-		pipeline = append(pipeline, bson.D{{Key: "$match", Value: sourceMatch}})
-	}
-	// Always join the files document. The denormalized counters live there
-	// (files.sources/completed/source_id/source_port), and every result row carries
-	// them, so the group below reads $file.* unconditionally. Gating this on
-	// "does the filter need file.*" left a plain text search with no $file at all,
-	// which is why every such result reported Sources:0 / Completed:0. $unwind
-	// without preserveNullAndEmptyArrays drops a source with no matching file —
-	// which cannot happen (AddFile upserts the file before the source) and matches
-	// the MySQL engine's INNER JOIN files.
-	pipeline = append(pipeline,
-		bson.D{{
-			Key: "$lookup", Value: bson.M{
-				"from": "files",
-				"let":  bson.M{"h": "$file_hash", "s": "$file_size"},
-				"pipeline": mongo.Pipeline{
-					bson.D{{Key: "$match", Value: bson.M{
-						"$expr": bson.M{
-							"$and": []bson.M{
-								{"$eq": []any{"$hash", "$$h"}},
-								{"$eq": []any{"$size", "$$s"}},
-							},
-						},
-					}}},
-				},
-				"as": "file",
-			},
-		}},
-		bson.D{{Key: "$unwind", Value: "$file"}},
-	)
-	if fullMatch != nil {
-		pipeline = append(pipeline, bson.D{{Key: "$match", Value: fullMatch}})
-	}
-
-	group := bson.M{
-		"_id":         bson.M{"hash": "$file_hash", "size": "$file_size"},
-		"hash":        bson.M{"$first": "$file_hash"},
-		"size":        bson.M{"$first": "$file_size"},
-		"name":        bson.M{"$first": "$name"},
-		"type":        bson.M{"$first": "$type"},
-		"title":       bson.M{"$first": "$title"},
-		"artist":      bson.M{"$first": "$artist"},
-		"album":       bson.M{"$first": "$album"},
-		"runtime":     bson.M{"$first": "$length"},
-		"bitrate":     bson.M{"$first": "$bitrate"},
-		"codec":       bson.M{"$first": "$codec"},
-		"sources":     bson.M{"$first": "$file.sources"},
-		"completed":   bson.M{"$first": "$file.completed"},
-		"source_id":   bson.M{"$first": "$file.source_id"},
-		"source_port": bson.M{"$first": "$file.source_port"},
-	}
-	// Only carry a relevance score when a $text stage actually produced one;
-	// referencing $meta without it fails the whole aggregation.
-	if hoisted {
-		group["score"] = bson.M{"$first": "$_textScore"}
-	}
-	pipeline = append(pipeline, bson.D{{Key: "$group", Value: group}})
-
-	if hoisted {
-		pipeline = append(pipeline, bson.D{{Key: "$sort", Value: bson.M{"score": -1}}})
-	} else {
-		pipeline = append(pipeline, bson.D{{Key: "$sort", Value: bson.M{"sources": -1}}})
-	}
-	pipeline = append(pipeline,
-		bson.D{{Key: "$limit", Value: MaxSearchResults}},
-	)
-
-	cur, err := m.db.Collection("sources").Aggregate(ctx, pipeline, options.Aggregate().SetAllowDiskUse(true))
+	// The batch holds every result the pipeline can return, so the reply ends the
+	// cursor. The server's default first batch is 101 documents, which cost every
+	// search with more hits than that a getMore; one more than the limit because a
+	// batch the results fill exactly leaves the cursor open (see refreshFileCounters).
+	cur, err := m.db.Collection("sources").Aggregate(ctx, pipeline,
+		options.Aggregate().SetAllowDiskUse(true).SetBatchSize(MaxSearchResults+1))
 	if err != nil {
 		logging.Errorf("mongodb search aggregate failed: %v", err)
 		return nil
 	}
 	defer cur.Close(ctx)
-
-	var out []File
-	for cur.Next(ctx) {
-		var doc struct {
-			Hash       []byte  `bson:"hash"`
-			Size       uint64  `bson:"size"`
-			Name       string  `bson:"name"`
-			Type       string  `bson:"type"`
-			Title      string  `bson:"title"`
-			Artist     string  `bson:"artist"`
-			Album      string  `bson:"album"`
-			Runtime    uint32  `bson:"runtime"`
-			Bitrate    uint32  `bson:"bitrate"`
-			Codec      string  `bson:"codec"`
-			Sources    uint32  `bson:"sources"`
-			Completed  uint32  `bson:"completed"`
-			SourceID   uint32  `bson:"source_id"`
-			SourcePort uint16  `bson:"source_port"`
-			Score      float64 `bson:"score"`
-		}
-		if err := cur.Decode(&doc); err != nil {
-			continue
-		}
-		out = append(out, File{
-			Hash: doc.Hash, Name: doc.Name, Size: doc.Size, Type: doc.Type,
-			Sources: doc.Sources, Completed: doc.Completed, Title: doc.Title, Artist: doc.Artist,
-			Album: doc.Album, Runtime: doc.Runtime, Bitrate: doc.Bitrate, Codec: doc.Codec,
-			SourceID: doc.SourceID, SourcePort: doc.SourcePort,
-		})
-	}
-	return out
+	return decodeMongoSearchFiles(ctx, cur)
 }
 
 // mongoSourceConjunctFilter builds an optional pre-$lookup filter on the sources
@@ -728,8 +488,10 @@ func (m *MongoDBEngine) CleanupStale(maxAge time.Duration, opts CleanupOptions) 
 	if maxAge <= 0 {
 		return result, fmt.Errorf("cleanup: maxAge must be positive, got %s", maxAge)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
-	defer cancel()
+	batch := opts.BatchSize
+	if batch <= 0 {
+		batch = DefaultCleanupBatchSize
+	}
 
 	cutoff := time.Now().Add(-maxAge)
 	// online = false only: a long-lived session is not stale no matter how long
@@ -737,45 +499,107 @@ func (m *MongoDBEngine) CleanupStale(maxAge time.Duration, opts CleanupOptions) 
 	staleClients := bson.M{"online": false, "time_login": bson.M{"$lt": cutoff}}
 	staleSources := bson.M{"online": false, "time_offer": bson.M{"$lt": cutoff}}
 
+	// Every operation below takes its own deadline from opContext. The sweep used to
+	// share one m.cfg.Timeout across all of them, per-file recount loop included,
+	// which made the real limit total round-trips × RTT: about 330 against a
+	// database 30 ms away. A busy server's hourly sweep needs more than that, so it
+	// aborted after the deletes and before the recount — every hour — leaving
+	// files.sources overstating reality, the exact drift the recount exists to stop.
+
 	// The hashes of clients about to go, so their sources can be removed too.
 	// Mongo has no foreign keys, so there is no cascade to rely on.
+	ctx, cancel := m.opContext()
 	hashes, err := m.staleClientHashes(ctx, staleClients)
+	cancel()
 	if err != nil {
 		return result, err
 	}
 
-	affected, err := m.affectedFileKeys(ctx, staleSources, hashes)
-	if err != nil {
-		return result, err
+	// Everything keyed by those hashes goes in chunks of batch. A $in of every stale
+	// hash in one command stops working on the first sweep of a large database:
+	// MongoDB rejects a command document past 16 MB, about half a million hashes,
+	// and a sweep that fails the same way every hour never gets anywhere.
+	chunks := chunkAny(hashes, batch)
+	var affected []fileKey
+	seen := map[offerKey]struct{}{}
+	// At least one lookup even with no stale client: stale sources of live clients
+	// affect files too, and are matched by the first one.
+	for i := 0; i == 0 || i < len(chunks); i++ {
+		var chunk []any
+		var sources bson.M
+		if i < len(chunks) {
+			chunk = chunks[i]
+		}
+		if i == 0 {
+			sources = staleSources
+		}
+		ctx, cancel = m.opContext()
+		keys, err := m.affectedFileKeys(ctx, sources, chunk)
+		cancel()
+		if err != nil {
+			return result, err
+		}
+		for _, key := range keys {
+			k := offerKey{hash: string(key.hash), size: key.size}
+			if _, dup := seen[k]; !dup {
+				seen[k] = struct{}{}
+				affected = append(affected, key)
+			}
+		}
 	}
 
-	if len(hashes) > 0 {
-		res, err := m.db.Collection("sources").DeleteMany(ctx, bson.M{"client_hash": bson.M{"$in": hashes}})
+	for _, chunk := range chunks {
+		// online: false, like staleClients below: a client that reconnected since its
+		// hash was read has marked its sources online again, and they stay.
+		ctx, cancel = m.opContext()
+		res, err := m.db.Collection("sources").DeleteMany(ctx, bson.M{"client_hash": bson.M{"$in": chunk}, "online": false})
+		cancel()
 		if err != nil {
 			return result, err
 		}
 		result.Sources += int(res.DeletedCount)
+
+		// By hash as well as by staleClients: a client that went stale after its hash
+		// was read would otherwise be deleted with its sources left behind.
+		clients := bson.M{"hash": bson.M{"$in": chunk}}
+		for k, v := range staleClients {
+			clients[k] = v
+		}
+		ctx, cancel = m.opContext()
+		res, err = m.db.Collection("clients").DeleteMany(ctx, clients)
+		cancel()
+		if err != nil {
+			return result, err
+		}
+		result.Clients += int(res.DeletedCount)
 	}
+	ctx, cancel = m.opContext()
 	res, err := m.db.Collection("sources").DeleteMany(ctx, staleSources)
+	cancel()
 	if err != nil {
 		return result, err
 	}
 	result.Sources += int(res.DeletedCount)
 
-	res, err = m.db.Collection("clients").DeleteMany(ctx, staleClients)
-	if err != nil {
-		return result, err
-	}
-	result.Clients = int(res.DeletedCount)
-
-	for _, key := range affected {
-		if err := m.recountFileSources(ctx, key.hash, key.size); err != nil {
-			logging.Errorf("mongodb cleanup recount hash=%x size=%d failed: %v", key.hash, key.size, err)
+	// Two round-trips per batch rather than per file, bounded by the same batch
+	// size the MySQL engine uses for its DELETEs.
+	for start := 0; start < len(affected); start += batch {
+		chunk := affected[start:min(start+batch, len(affected))]
+		if err := m.refreshFileCounters(chunk, nil); err != nil {
+			logging.Errorf("mongodb cleanup recount files=%d failed: %v", len(chunk), err)
 		}
 	}
 
 	if !opts.KeepZeroSourceFiles {
-		res, err = m.db.Collection("files").DeleteMany(ctx, bson.M{"sources": 0})
+		// time_offer < cutoff, not just sources = 0: a file an offer is writing right
+		// now also has sources = 0, between the offer's files upsert and its counter
+		// refresh, and deleting it then left the offer's source without a file —
+		// invisible to every search, which joins sources to files. The offer stamps
+		// time_offer before it writes any source, so a file past the cutoff has no
+		// offer in flight.
+		ctx, cancel = m.opContext()
+		res, err = m.db.Collection("files").DeleteMany(ctx, bson.M{"sources": 0, "time_offer": bson.M{"$lt": cutoff}})
+		cancel()
 		if err != nil {
 			return result, err
 		}
@@ -921,20 +745,11 @@ func removeTextLeaf(expr *SearchExpr) (string, *SearchExpr, bool) {
 // and return that client's hash and port. Joining on the user hash cannot
 // mis-bind, and mirrors the MySQL engine's INNER JOIN on clients.id.
 func (m *MongoDBEngine) lookupSources(ctx context.Context, match bson.M) []Source {
-	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: match}},
-		{{Key: "$sort", Value: bson.D{{Key: "online", Value: -1}, {Key: "time_offer", Value: -1}}}},
-		{{Key: "$limit", Value: int64(MaxWireSources)}},
-		{{Key: "$lookup", Value: bson.M{
-			"from":         "clients",
-			"localField":   "client_hash",
-			"foreignField": "hash",
-			"as":           "client",
-		}}},
-		{{Key: "$unwind", Value: "$client"}},
-		{{Key: "$match", Value: bson.M{"client.online": true}}},
-	}
-	cur, err := m.db.Collection("sources").Aggregate(ctx, pipeline)
+	// The batch holds every document the pipeline can return, so the reply ends the
+	// cursor: with the server's default first batch of 101, every file with more
+	// online sources than that cost a getMore.
+	cur, err := m.db.Collection("sources").Aggregate(ctx, sourceLookupPipeline(match),
+		options.Aggregate().SetBatchSize(MaxWireSources+1))
 	if err != nil {
 		logging.Errorf("mongodb source lookup failed (match=%v): %v", match, err)
 		return nil
@@ -969,6 +784,12 @@ func (m *MongoDBEngine) lookupSources(ctx context.Context, match bson.M) []Sourc
 	return out
 }
 
+// mongoWholeResultBatch asks for a read's whole result in the first reply, for reads
+// whose size is not known in advance. The server still ends a batch at 16 MiB (some
+// 270,000 file keys), and only then does the driver need a getMore; with the default
+// first batch of 101 documents, any sweep touching more files than that needed one.
+const mongoWholeResultBatch = math.MaxInt32
+
 // fileKey identifies a file document by its (hash, size) pair, matching the
 // unique index.
 type fileKey struct {
@@ -981,7 +802,7 @@ type fileKey struct {
 // explicitly — there is no cascade as there is on MySQL.
 func (m *MongoDBEngine) staleClientHashes(ctx context.Context, filter bson.M) ([]any, error) {
 	cur, err := m.db.Collection("clients").Find(ctx, filter,
-		options.Find().SetProjection(bson.M{"hash": 1}))
+		options.Find().SetProjection(bson.M{"hash": 1}).SetBatchSize(mongoWholeResultBatch))
 	if err != nil {
 		return nil, err
 	}
@@ -1001,18 +822,25 @@ func (m *MongoDBEngine) staleClientHashes(ctx context.Context, filter bson.M) ([
 }
 
 // affectedFileKeys lists the files that will lose at least one source, whether
-// because the source itself aged out or because its client did.
+// because the source itself aged out (staleSources, when not nil) or because its
+// client did (staleHashes).
 func (m *MongoDBEngine) affectedFileKeys(ctx context.Context, staleSources bson.M, staleHashes []any) ([]fileKey, error) {
-	clauses := []bson.M{staleSources}
+	var clauses []bson.M
+	if staleSources != nil {
+		clauses = append(clauses, staleSources)
+	}
 	if len(staleHashes) > 0 {
 		clauses = append(clauses, bson.M{"client_hash": bson.M{"$in": staleHashes}})
+	}
+	if len(clauses) == 0 {
+		return nil, nil
 	}
 	cur, err := m.db.Collection("sources").Aggregate(ctx, mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{"$or": clauses}}},
 		{{Key: "$group", Value: bson.M{
 			"_id": bson.M{"file_hash": "$file_hash", "file_size": "$file_size"},
 		}}},
-	})
+	}, options.Aggregate().SetBatchSize(mongoWholeResultBatch))
 	if err != nil {
 		return nil, err
 	}
@@ -1034,39 +862,530 @@ func (m *MongoDBEngine) affectedFileKeys(ctx context.Context, staleSources bson.
 	return keys, nil
 }
 
-// recountFileSources refreshes the denormalized counters for one file after a
-// sweep, leaving source_id and source_port alone: a cleanup has no offering
-// client, and writing zeros there would wipe the last known source address.
-func (m *MongoDBEngine) recountFileSources(ctx context.Context, fileHash []byte, fileSize uint64) error {
+// addFilesChunk writes at most offerBatchSize files prepared by prepareOfferBatch.
+// Documents the server rejected individually are logged here; an error is returned
+// only when an operation failed as a whole, which is what AddFiles retries.
+func (m *MongoDBEngine) addFilesChunk(files []File, clientInfo ClientInfo) error {
+	now := time.Now()
+
+	fileModels := make([]mongo.WriteModel, len(files))
+	for i, file := range files {
+		fileModels[i] = mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"hash": file.Hash, "size": file.Size}).
+			SetUpdate(bson.M{"$set": bson.M{"hash": file.Hash, "size": file.Size, "time_offer": now}}).
+			SetUpsert(true)
+	}
+	ctx, cancel := m.opContext()
+	failedFiles, err := bulkFailures(m.db.Collection("files").BulkWrite(ctx, fileModels, options.BulkWrite().SetOrdered(false)))
+	cancel()
+	if err != nil {
+		return fmt.Errorf("upsert files: %w", err)
+	}
+
+	// A source is identified by (file, client hash). client_ed2k is kept as the
+	// client's *current* address — GetSources needs it — but it must not be part
+	// of the identity: LowIDs are per-session and HighIDs follow the IP, so
+	// keying on it created a fresh source document on every reconnect. The old
+	// ones then matched nothing in Disconnect and stayed online forever, while
+	// the counter refresh counted every stale duplicate. MySQL keys on
+	// (id_file, id_client), where id_client resolves through UNIQUE(hash).
+	stored := make([]File, 0, len(files))
+	sourceModels := make([]mongo.WriteModel, 0, len(files))
+	for i, file := range files {
+		if _, failed := failedFiles[i]; failed {
+			continue
+		}
+		src := bson.M{
+			"file_hash":   file.Hash,
+			"file_size":   file.Size,
+			"client_hash": clientInfo.Hash,
+			"client_ed2k": clientInfo.ID,
+			"name":        file.Name,
+			"ext":         NormalizeExt(file.Name),
+			"type":        file.Type,
+			"title":       file.Title,
+			"artist":      file.Artist,
+			"album":       file.Album,
+			"length":      file.Runtime,
+			"bitrate":     file.Bitrate,
+			"codec":       file.Codec,
+			"online":      true,
+			"complete":    file.Completed > 0,
+			"time_offer":  now,
+		}
+		sourceModels = append(sourceModels, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"file_hash": file.Hash, "file_size": file.Size, "client_hash": clientInfo.Hash}).
+			SetUpdate(bson.M{"$set": src}).
+			SetUpsert(true))
+		stored = append(stored, file)
+	}
+	if len(sourceModels) == 0 {
+		return nil
+	}
+	ctx, cancel = m.opContext()
+	failedSources, err := bulkFailures(m.db.Collection("sources").BulkWrite(ctx, sourceModels, options.BulkWrite().SetOrdered(false)))
+	cancel()
+	if err != nil {
+		return fmt.Errorf("upsert sources: %w", err)
+	}
+
+	keys := make([]fileKey, 0, len(stored))
+	for i, file := range stored {
+		if _, failed := failedSources[i]; !failed {
+			keys = append(keys, fileKey{hash: file.Hash, size: file.Size})
+		}
+	}
+	if err := m.refreshFileCounters(keys, &counterSource{ID: clientInfo.ID, Port: clientInfo.Port}); err != nil {
+		return fmt.Errorf("refresh counters: %w", err)
+	}
+	return nil
+}
+
+// refreshFileCounters recomputes files.sources / files.completed for a set of files in
+// two round-trips: one aggregate over their sources, one unordered bulk update.
+//
+// src stamps the offering client's address onto every file, which is what an offer
+// wants. A cleanup sweep passes nil and source_id/source_port are left alone: the
+// sweep has no offering client, and writing zeros would wipe the last known source
+// address. A file with no source left is written as zero, not skipped — that is
+// exactly the case where a stale count would otherwise persist forever.
+func (m *MongoDBEngine) refreshFileCounters(keys []fileKey, src *counterSource) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	hashes := make([]any, len(keys))
+	for i, key := range keys {
+		hashes[i] = key.hash
+	}
+
+	// Matched on file_hash alone, which leads the {file_hash, file_size} index; the
+	// same hash at a size outside keys is grouped too and ignored below.
+	ctx, cancel := m.opContext()
+	defer cancel()
+	// The batch size is set so every group arrives with the aggregate's reply. The
+	// server's default first batch is 101 documents, which would cost a 200-file offer
+	// a getMore. One more than len(keys), not len(keys): a batch the results fill
+	// exactly leaves the cursor open, and the driver then spends a getMore learning
+	// it is empty — measured on every offer, one file included. Callers bound
+	// len(keys), and a group is well under 100 bytes, so this stays far inside the
+	// 16 MB reply limit.
 	cur, err := m.db.Collection("sources").Aggregate(ctx, mongo.Pipeline{
-		{{Key: "$match", Value: bson.M{"file_hash": fileHash, "file_size": fileSize}}},
+		{{Key: "$match", Value: bson.M{"file_hash": bson.M{"$in": hashes}}}},
 		{{Key: "$group", Value: bson.M{
-			"_id":       nil,
+			"_id":       bson.M{"file_hash": "$file_hash", "file_size": "$file_size"},
 			"sources":   bson.M{"$sum": 1},
 			"completed": bson.M{"$sum": bson.M{"$cond": []any{"$complete", 1, 0}}},
 		}}},
-	})
+	}, options.Aggregate().SetBatchSize(int32(len(keys)+1)))
 	if err != nil {
-		return err
+		return fmt.Errorf("aggregate counters: %w", err)
 	}
-	defer cur.Close(ctx)
-
-	var agg []struct {
+	var groups []struct {
+		ID struct {
+			FileHash []byte `bson:"file_hash"`
+			FileSize uint64 `bson:"file_size"`
+		} `bson:"_id"`
 		Sources   int32 `bson:"sources"`
 		Completed int32 `bson:"completed"`
 	}
-	if err := cur.All(ctx, &agg); err != nil {
-		return err
+	err = cur.All(ctx, &groups)
+	_ = cur.Close(ctx)
+	if err != nil {
+		return fmt.Errorf("decode counters: %w", err)
 	}
-	// No rows left means zero sources, not "leave it alone" — that is exactly the
-	// case where a stale count would otherwise persist forever.
-	var sources, completed int32
-	if len(agg) > 0 {
-		sources, completed = agg[0].Sources, agg[0].Completed
+	type counters struct{ sources, completed int32 }
+	byKey := make(map[offerKey]counters, len(groups))
+	for _, g := range groups {
+		byKey[offerKey{hash: string(g.ID.FileHash), size: g.ID.FileSize}] = counters{g.Sources, g.Completed}
 	}
-	_, err = m.db.Collection("files").UpdateOne(ctx,
-		bson.M{"hash": fileHash, "size": fileSize},
-		bson.M{"$set": bson.M{"sources": sources, "completed": completed}},
+
+	models := make([]mongo.WriteModel, len(keys))
+	for i, key := range keys {
+		c := byKey[offerKey{hash: string(key.hash), size: key.size}]
+		set := bson.M{"sources": c.sources, "completed": c.completed}
+		if src != nil {
+			set["source_id"] = src.ID
+			set["source_port"] = src.Port
+		}
+		models[i] = mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"hash": key.hash, "size": key.size}).
+			SetUpdate(bson.M{"$set": set})
+	}
+	writeCtx, writeCancel := m.opContext()
+	defer writeCancel()
+	if _, err := m.db.Collection("files").BulkWrite(writeCtx, models, options.BulkWrite().SetOrdered(false)); err != nil {
+		return fmt.Errorf("write counters: %w", err)
+	}
+	return nil
+}
+
+// mongoIndex is one index ensureIndexes maintains.
+type mongoIndex struct {
+	collection string
+	// name is spelled out rather than left to the driver, and must equal what the
+	// driver generates from keys (each field_value, joined by "_"). Deployments from
+	// before names were explicit carry the generated name; the same keys under any
+	// other name would be a conflict, not a match.
+	name   string
+	keys   bson.D
+	unique bool
+}
+
+// mongoIndexes is every index the engine relies on.
+var mongoIndexes = []mongoIndex{
+	{collection: "clients", name: "hash_1", keys: bson.D{{Key: "hash", Value: 1}}, unique: true},
+	// Backs both the online count and the stale-row sweep. Composite for the same
+	// reason as the MySQL side: `online` leads so the count uses it, and
+	// time_login covers the sweep's second predicate.
+	{collection: "clients", name: "online_1_time_login_1", keys: bson.D{{Key: "online", Value: 1}, {Key: "time_login", Value: 1}}},
+	{collection: "sources", name: "online_1_time_offer_1", keys: bson.D{{Key: "online", Value: 1}, {Key: "time_offer", Value: 1}}},
+	{collection: "files", name: "hash_1_size_1", keys: bson.D{{Key: "hash", Value: 1}, {Key: "size", Value: 1}}, unique: true},
+	// Source identity is (file, client hash). Assumes an empty database: there is
+	// no drop of the previous client_ed2k index and no backfill of client_hash,
+	// so an existing deployment would need its sources collection cleared.
+	{collection: "sources", name: "file_hash_1_file_size_1_client_hash_1", keys: bson.D{{Key: "file_hash", Value: 1}, {Key: "file_size", Value: 1}, {Key: "client_hash", Value: 1}}, unique: true},
+	// GetSources: {file_hash, file_size, online: true} newest offer first, answered
+	// by an index scan that stops after MaxWireSources keys. Without it a popular
+	// file's every source was read and sorted in memory on each request. It replaces
+	// file_hash_1_file_size_1, which is its prefix; ensureIndexes never drops
+	// anything, so a database created before keeps that one until an operator
+	// removes it.
+	{collection: "sources", name: "file_hash_1_file_size_1_online_1_time_offer_-1", keys: bson.D{{Key: "file_hash", Value: 1}, {Key: "file_size", Value: 1}, {Key: "online", Value: 1}, {Key: "time_offer", Value: -1}}},
+	{collection: "sources", name: "name_text", keys: bson.D{{Key: "name", Value: "text"}}},
+	// Backs the regex fallback in mongoNameRegexFilter, which runs whenever a
+	// text term cannot be hoisted into the $text stage.
+	{collection: "sources", name: "name_1", keys: bson.D{{Key: "name", Value: 1}}},
+	{collection: "sources", name: "type_1", keys: bson.D{{Key: "type", Value: 1}}},
+	{collection: "sources", name: "ext_1", keys: bson.D{{Key: "ext", Value: 1}}},
+	{collection: "sources", name: "codec_1", keys: bson.D{{Key: "codec", Value: 1}}},
+	{collection: "sources", name: "bitrate_1", keys: bson.D{{Key: "bitrate", Value: 1}}},
+	{collection: "sources", name: "length_1", keys: bson.D{{Key: "length", Value: 1}}},
+	{collection: "sources", name: "file_size_1", keys: bson.D{{Key: "file_size", Value: 1}}},
+	// Disconnect and the stale-row sweep select sources by client hash alone. The
+	// unique index above has client_hash last, so it cannot serve that, and without
+	// this every disconnect and every sweep scanned the whole collection — which on a
+	// large one can outlast a single operation's deadline by itself.
+	{collection: "sources", name: "client_hash_1", keys: bson.D{{Key: "client_hash", Value: 1}}},
+	{collection: "files", name: "sources_1", keys: bson.D{{Key: "sources", Value: 1}}},
+	{collection: "files", name: "completed_1", keys: bson.D{{Key: "completed", Value: 1}}},
+}
+
+// ensureIndexes creates whichever of mongoIndexes are missing and returns their names.
+//
+// Init used to send every createIndexes on every start. MongoDB treats an identical
+// existing index as a no-op, so nothing was rebuilt, but each call was a round-trip
+// and `_, _ =` hid any conflict, which then repeated silently on every boot. Now each
+// collection's index list is read once and only the absent ones are written: nothing
+// in steady state, exactly the new ones after an upgrade adds one, and an index an
+// operator dropped comes back on the next start.
+//
+// Matched by name, not by keys: listIndexes reports a text index's keys as
+// {_fts: "text", _ftsx: 1}, never as the {name: "text"} it was created from.
+func (m *MongoDBEngine) ensureIndexes(ctx context.Context) ([]string, error) {
+	var order []string
+	byCollection := map[string][]mongoIndex{}
+	for _, idx := range mongoIndexes {
+		if _, ok := byCollection[idx.collection]; !ok {
+			order = append(order, idx.collection)
+		}
+		byCollection[idx.collection] = append(byCollection[idx.collection], idx)
+	}
+
+	var created []string
+	var errs []error
+	for _, collection := range order {
+		view := m.db.Collection(collection).Indexes()
+		// A collection that does not exist yet lists as empty, not as an error.
+		specs, err := view.ListSpecifications(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("list %s indexes: %w", collection, err))
+			continue
+		}
+		existing := make(map[string]struct{}, len(specs))
+		for _, spec := range specs {
+			existing[spec.Name] = struct{}{}
+		}
+		var missing []mongo.IndexModel
+		var names []string
+		for _, idx := range byCollection[collection] {
+			if _, ok := existing[idx.name]; ok {
+				continue
+			}
+			opts := options.Index().SetName(idx.name)
+			if idx.unique {
+				opts.SetUnique(true)
+			}
+			missing = append(missing, mongo.IndexModel{Keys: idx.keys, Options: opts})
+			names = append(names, idx.name)
+		}
+		if len(missing) == 0 {
+			continue
+		}
+		if _, err := view.CreateMany(ctx, missing); err != nil {
+			errs = append(errs, fmt.Errorf("create %s indexes %s: %w", collection, strings.Join(names, ","), err))
+			continue
+		}
+		for _, name := range names {
+			created = append(created, collection+"."+name)
+		}
+	}
+	return created, errors.Join(errs...)
+}
+
+// opContext bounds one database operation by the configured timeout. Per operation,
+// never across a sequence: a deadline shared by several round-trips is really a
+// budget on how far away the database is.
+func (m *MongoDBEngine) opContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), m.cfg.Timeout)
+}
+
+// bulkFailures splits the result of an unordered BulkWrite.
+//
+// A BulkWriteException that names write errors means every other model was applied:
+// the failed indices are logged and returned, and the error is not. Anything else —
+// a timeout, a dropped connection, a document the driver could not encode, a write
+// concern failure — gives no way to tell what was written, so it is returned whole
+// for the caller to retry.
+func bulkFailures(_ *mongo.BulkWriteResult, err error) (map[int]struct{}, error) {
+	failed := map[int]struct{}{}
+	if err == nil {
+		return failed, nil
+	}
+	var bwe mongo.BulkWriteException
+	if !errors.As(err, &bwe) || len(bwe.WriteErrors) == 0 || bwe.WriteConcernError != nil {
+		return nil, err
+	}
+	for _, we := range bwe.WriteErrors {
+		failed[we.Index] = struct{}{}
+		logging.Errorf("mongodb bulk write rejected model %d: code=%d %s", we.Index, we.Code, we.Message)
+	}
+	return failed, nil
+}
+
+// logMongoAddFileError reports one file that could not be stored even on its own.
+func logMongoAddFileError(file File, clientInfo ClientInfo, err error) {
+	logging.Errorf("mongodb add file hash=%x size=%d client=%x name=%q type=%q failed: %v",
+		file.Hash, file.Size, clientInfo.Hash, file.Name, file.Type, err)
+}
+
+// sourceLookupPipeline selects the newest MaxWireSources sources matching match and
+// joins each to its client.
+//
+// Sorted by time_offer alone. Both callers match online: true, so the online sort
+// key that used to lead ordered nothing, and without it
+// file_hash_1_file_size_1_online_1_time_offer_-1 returns the documents already in
+// order: MaxWireSources index keys read instead of every source of a popular file.
+func sourceLookupPipeline(match bson.M) mongo.Pipeline {
+	return mongo.Pipeline{
+		{{Key: "$match", Value: match}},
+		{{Key: "$sort", Value: bson.D{{Key: "time_offer", Value: -1}}}},
+		{{Key: "$limit", Value: int64(MaxWireSources)}},
+		{{Key: "$lookup", Value: bson.M{
+			"from":         "clients",
+			"localField":   "client_hash",
+			"foreignField": "hash",
+			"as":           "client",
+		}}},
+		{{Key: "$unwind", Value: "$client"}},
+		{{Key: "$match", Value: bson.M{"client.online": true}}},
+	}
+}
+
+// mongoSearchPipeline builds FindBySearch's aggregation over sources: one document
+// per matching file, with the counters of its files document, at most
+// MaxSearchResults of them, best first. It returns false, after logging why, for an
+// expression that yields no usable filter.
+//
+// A $text match must be the very first pipeline stage, and $text is illegal
+// inside $or/$nor. So we hoist a single text leaf to stage 0 only when it sits
+// on the AND spine; anything else falls back to regex matching, which composes
+// anywhere. See hoistTextLeaf.
+//
+// Every result carries files.sources/completed/source_id/source_port, so files is
+// always joined — leaving it out for a plain text search is what once made every
+// such result report Sources:0. Where it is joined depends on the filter:
+//   - A sources or completed term reads the files document, so every candidate
+//     source is joined before the filter.
+//   - Any other filter needs only sources, so it is applied and the sources grouped
+//     per file first. A text search then sorts by score and joins only the page it
+//     returns; any other search sorts by source count, so it joins each distinct
+//     file once.
+//
+// Joining per source was measured at ~330 ms for a search matching 10,000 sources
+// of 200 files. $unwind without preserveNullAndEmptyArrays drops a file with no
+// files document, which cannot happen (AddFile upserts the file before the source)
+// and matches the MySQL engine's INNER JOIN files.
+func mongoSearchPipeline(expr *SearchExpr) (mongo.Pipeline, bool) {
+	textSearch, rest, hoisted := hoistTextLeaf(expr)
+
+	filterExpr := expr
+	if hoisted {
+		filterExpr = rest // may be nil when the whole query was just that text leaf
+	}
+
+	var fullMatch bson.M
+	needsFile := false
+	if filterExpr != nil {
+		fullMatch, needsFile = mongoFilter(filterExpr)
+		if fullMatch == nil {
+			logging.Errorf("mongodb search: unsupported search expression, dropping query")
+			return nil, false
+		}
+	}
+	if !hoisted && fullMatch == nil {
+		logging.Errorf("mongodb search: search expression produced no filter, dropping query")
+		return nil, false
+	}
+
+	pipeline := mongo.Pipeline{}
+	if hoisted {
+		// $meta:"textScore" is captured immediately after the $text stage, before
+		// any $lookup, so the score survives into $group.
+		pipeline = append(pipeline,
+			bson.D{{Key: "$match", Value: bson.M{"$text": bson.M{"$search": textSearch}}}},
+			bson.D{{Key: "$addFields", Value: bson.M{"_textScore": bson.M{"$meta": "textScore"}}}},
+		)
+	}
+	if sourceMatch := mongoSourceConjunctFilter(filterExpr); sourceMatch != nil {
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: sourceMatch}})
+	}
+
+	byScore := bson.D{{Key: "$sort", Value: bson.D{{Key: "score", Value: -1}}}}
+	bySources := bson.D{{Key: "$sort", Value: bson.D{{Key: "sources", Value: -1}}}}
+	limit := bson.D{{Key: "$limit", Value: int64(MaxSearchResults)}}
+	order := bySources
+	if hoisted {
+		order = byScore
+	}
+
+	if needsFile {
+		pipeline = append(pipeline, mongoFileJoin("$file_hash", "$file_size")...)
+		pipeline = append(pipeline,
+			bson.D{{Key: "$match", Value: fullMatch}},
+			bson.D{{Key: "$group", Value: mongoSearchGroup(hoisted, true)}},
+			order, limit,
+		)
+		return pipeline, true
+	}
+	if fullMatch != nil {
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: fullMatch}})
+	}
+	pipeline = append(pipeline, bson.D{{Key: "$group", Value: mongoSearchGroup(hoisted, false)}})
+	if hoisted {
+		pipeline = append(pipeline, byScore, limit)
+		return append(pipeline, mongoFileCounterStages()...), true
+	}
+	pipeline = append(pipeline, mongoFileCounterStages()...)
+	return append(pipeline, bySources, limit), true
+}
+
+// mongoSearchGroup folds the sources of one file into one search result: the first
+// source's metadata, the best text score of them when score is set, and the files
+// counters when counters is set, which needs the file joined in as "file" before.
+func mongoSearchGroup(score, counters bool) bson.M {
+	group := bson.M{
+		"_id":     bson.M{"hash": "$file_hash", "size": "$file_size"},
+		"hash":    bson.M{"$first": "$file_hash"},
+		"size":    bson.M{"$first": "$file_size"},
+		"name":    bson.M{"$first": "$name"},
+		"type":    bson.M{"$first": "$type"},
+		"title":   bson.M{"$first": "$title"},
+		"artist":  bson.M{"$first": "$artist"},
+		"album":   bson.M{"$first": "$album"},
+		"runtime": bson.M{"$first": "$length"},
+		"bitrate": bson.M{"$first": "$bitrate"},
+		"codec":   bson.M{"$first": "$codec"},
+	}
+	// Only carry a relevance score when a $text stage actually produced one;
+	// referencing $meta without it fails the whole aggregation.
+	if score {
+		group["score"] = bson.M{"$max": "$_textScore"}
+	}
+	if counters {
+		group["sources"] = bson.M{"$first": "$file.sources"}
+		group["completed"] = bson.M{"$first": "$file.completed"}
+		group["source_id"] = bson.M{"$first": "$file.source_id"}
+		group["source_port"] = bson.M{"$first": "$file.source_port"}
+	}
+	return group
+}
+
+// mongoFileCounterStages joins each grouped search result to its files document and
+// copies the counters onto the result.
+func mongoFileCounterStages() []bson.D {
+	return append(mongoFileJoin("$hash", "$size"),
+		bson.D{{Key: "$addFields", Value: bson.M{
+			"sources":     "$file.sources",
+			"completed":   "$file.completed",
+			"source_id":   "$file.source_id",
+			"source_port": "$file.source_port",
+		}}},
+		bson.D{{Key: "$project", Value: bson.M{"file": 0}}},
 	)
-	return err
+}
+
+// mongoFileJoin joins the files document whose hash and size equal the given
+// field paths, as "file".
+func mongoFileJoin(hashField, sizeField string) []bson.D {
+	return []bson.D{
+		{{Key: "$lookup", Value: bson.M{
+			"from": "files",
+			"let":  bson.M{"h": hashField, "s": sizeField},
+			"pipeline": mongo.Pipeline{
+				{{Key: "$match", Value: bson.M{
+					"$expr": bson.M{
+						"$and": []bson.M{
+							{"$eq": []any{"$hash", "$$h"}},
+							{"$eq": []any{"$size", "$$s"}},
+						},
+					},
+				}}},
+			},
+			"as": "file",
+		}}},
+		{{Key: "$unwind", Value: "$file"}},
+	}
+}
+
+// decodeMongoSearchFiles reads the results of a search pipeline.
+func decodeMongoSearchFiles(ctx context.Context, cur *mongo.Cursor) []File {
+	var out []File
+	for cur.Next(ctx) {
+		var doc struct {
+			Hash       []byte  `bson:"hash"`
+			Size       uint64  `bson:"size"`
+			Name       string  `bson:"name"`
+			Type       string  `bson:"type"`
+			Title      string  `bson:"title"`
+			Artist     string  `bson:"artist"`
+			Album      string  `bson:"album"`
+			Runtime    uint32  `bson:"runtime"`
+			Bitrate    uint32  `bson:"bitrate"`
+			Codec      string  `bson:"codec"`
+			Sources    uint32  `bson:"sources"`
+			Completed  uint32  `bson:"completed"`
+			SourceID   uint32  `bson:"source_id"`
+			SourcePort uint16  `bson:"source_port"`
+			Score      float64 `bson:"score"`
+		}
+		if err := cur.Decode(&doc); err != nil {
+			continue
+		}
+		out = append(out, File{
+			Hash: doc.Hash, Name: doc.Name, Size: doc.Size, Type: doc.Type,
+			Sources: doc.Sources, Completed: doc.Completed, Title: doc.Title, Artist: doc.Artist,
+			Album: doc.Album, Runtime: doc.Runtime, Bitrate: doc.Bitrate, Codec: doc.Codec,
+			SourceID: doc.SourceID, SourcePort: doc.SourcePort,
+		})
+	}
+	return out
+}
+
+// chunkAny splits items into consecutive slices of at most size elements.
+func chunkAny(items []any, size int) [][]any {
+	var chunks [][]any
+	for start := 0; start < len(items); start += size {
+		chunks = append(chunks, items[start:min(start+size, len(items))])
+	}
+	return chunks
 }

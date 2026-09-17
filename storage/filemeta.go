@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"bytes"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -135,4 +137,49 @@ func truncateRunes(s string, max int) string {
 		return s
 	}
 	return string(r[:max])
+}
+
+// offerKey identifies one offered file inside a batch. A struct rather than
+// fileMapKey: that packs the hash into a fixed 16-byte buffer, and a batch key
+// must never let two different hashes collide, whatever their length.
+type offerKey struct {
+	hash string
+	size uint64
+}
+
+// prepareOfferBatch turns one client's offer into what the DB engines write in a
+// single multi-row statement.
+//
+// Each file is normalized exactly as AddFile always did, including the filename
+// fallback for an empty type. Duplicates of one (hash, size) are collapsed to the
+// last occurrence, which is what a sequence of per-file upserts produced. Leaving
+// them in is not safe: MongoDB runs an unordered bulk's upserts concurrently, so
+// two upserts of one new key race each other into a duplicate-key error.
+//
+// The result is sorted by (hash, size). Two clients offering overlapping files
+// then take the files/sources index locks in the same order, which is what keeps
+// concurrent batches from deadlocking each other the way unordered rows would.
+func prepareOfferBatch(files []File) []File {
+	index := make(map[offerKey]int, len(files))
+	out := make([]File, 0, len(files))
+	for _, file := range files {
+		file = NormalizeFile(file)
+		if file.Type == "" {
+			file.Type = GetFileType(file.Name)
+		}
+		key := offerKey{hash: string(file.Hash), size: file.Size}
+		if i, ok := index[key]; ok {
+			out[i] = file
+			continue
+		}
+		index[key] = len(out)
+		out = append(out, file)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if c := bytes.Compare(out[i].Hash, out[j].Hash); c != 0 {
+			return c < 0
+		}
+		return out[i].Size < out[j].Size
+	})
+	return out
 }

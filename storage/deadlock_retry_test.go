@@ -141,3 +141,28 @@ func TestNewMySQLEngineDeadlockDefaults(t *testing.T) {
 		t.Fatal("explicit values were overwritten by the defaults")
 	}
 }
+
+// Two statements that deadlocked must not retry in lockstep, and a file many offers
+// contend for must see the pauses grow: each delay doubles per attempt, stays within
+// the upper half of that value, and never passes maxDeadlockDelay.
+func TestLockRetryDelayBacksOffWithJitter(t *testing.T) {
+	engine := &MySQLEngine{cfg: MySQLConfig{DeadlockDelay: 100 * time.Millisecond}}
+	for attempt := 0; attempt < 8; attempt++ {
+		ceiling := min(100*time.Millisecond<<attempt, maxDeadlockDelay)
+		lo, hi := time.Duration(1<<62), time.Duration(0)
+		distinct := map[time.Duration]bool{}
+		for i := 0; i < 200; i++ {
+			d := engine.lockRetryDelay(attempt)
+			lo, hi = min(lo, d), max(hi, d)
+			distinct[d] = true
+		}
+		t.Logf("input: DeadlockDelay=100ms attempt=%d -> output: delays in [%s, %s], %d distinct of 200, want within [%s, %s]",
+			attempt, lo, hi, len(distinct), ceiling/2, ceiling)
+		if lo < ceiling/2 || hi > ceiling {
+			t.Fatalf("attempt %d: delay range [%s, %s] outside [%s, %s]", attempt, lo, hi, ceiling/2, ceiling)
+		}
+		if len(distinct) < 100 {
+			t.Fatalf("attempt %d: only %d distinct delays of 200 — the retries are not randomized", attempt, len(distinct))
+		}
+	}
+}

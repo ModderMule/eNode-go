@@ -1202,6 +1202,11 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	info := c.snapshotInfo()
 	softLimit, hardLimit := c.server.TCP.SoftFileLimit, c.server.TCP.HardFileLimit
 	var zeroSize int
+	// The whole packet is written in one AddFiles call. Storing record by record cost
+	// a fixed set of round-trips per file, so a database outside the host turned one
+	// 200-file offer into most of a minute of blocked read loop and held pool
+	// connections every other session was waiting on.
+	batch := make([]storage.File, 0, len(records))
 	for i, record := range records {
 		if record.Size == 0 {
 			// No size tag at all, or one that did not decode as an integer
@@ -1218,6 +1223,11 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 		}
 		c.offeredFiles++
 		if hardLimit > 0 && c.offeredFiles > hardLimit {
+			// Flushed before the drop: the records up to the cap were accepted, and
+			// were stored when this loop wrote each one as it went.
+			if len(batch) > 0 {
+				c.server.Storage.AddFiles(batch, info)
+			}
 			c.hardLimitHit = true
 			logging.Warnf("offer files hard limit remote=%s id=%d offered=%d hardLimit=%d: closing",
 				c.remoteHost, info.ID, c.offeredFiles, hardLimit)
@@ -1238,14 +1248,18 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 			continue
 		}
 		file := fileFromRecord(record, info)
-		c.server.Storage.AddFile(file, info)
-		// Logged from inside the storage loop rather than a second pass, so the line
-		// means "stored" — a second pass would also log what the soft limit just
-		// dropped, and would be skipped entirely by the hard-limit return above.
+		batch = append(batch, file)
+		// Logged as the record joins the batch rather than in a second pass, so the
+		// line means "accepted for storage" — a second pass would also log what the
+		// soft limit just dropped, and would be skipped entirely by the hard-limit
+		// return above.
 		if i < maxOfferFilesLog {
 			logging.Debugf("offer file remote=%s idx=%d hash=%x name=%q size=%d type=%q sourceID=%d sourcePort=%d",
 				c.remoteHost, i, record.Hash, file.Name, file.Size, file.Type, info.ID, info.Port)
 		}
+	}
+	if len(batch) > 0 {
+		c.server.Storage.AddFiles(batch, info)
 	}
 	// One line for the packet, never one per record: a client at the hard limit can
 	// put 20,000 records in a single offer.

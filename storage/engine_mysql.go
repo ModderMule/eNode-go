@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -28,7 +31,8 @@ type MySQLConfig struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
-	// DeadlockDelay is the pause between retries of a deadlocked statement.
+	// DeadlockDelay is the base pause between retries of a deadlocked statement,
+	// doubled on each further attempt and randomized; see lockRetryDelay.
 	// AddFile touches files and sources in an order two concurrent offers of the
 	// same popular file can invert, which InnoDB resolves by killing one of them.
 	DeadlockDelay time.Duration
@@ -98,8 +102,13 @@ func NewMySQLEngine(cfg MySQLConfig) (*MySQLEngine, error) {
 const defaultSchemaFile = "misc/enode.sql"
 
 const (
-	defaultDeadlockDelay   = 100 * time.Millisecond
-	defaultDeadlockRetries = 3
+	defaultDeadlockDelay = 100 * time.Millisecond
+	// Six, not three: measured under tests/dblatency's load test, concurrent offers
+	// of popular files deadlock about once per offer, and three retries left some
+	// 200-file chunks to fail over to file-by-file writes. See lockRetryDelay.
+	defaultDeadlockRetries = 6
+	// maxDeadlockDelay caps the doubling in lockRetryDelay.
+	maxDeadlockDelay = 2 * time.Second
 
 	// MySQL error numbers. These are NOT interchangeable:
 	//
@@ -118,8 +127,22 @@ const (
 	mysqlErrLockWaitTimeout = 1205
 )
 
+// dsn builds the driver connection string.
+//
+// interpolateParams makes the driver substitute placeholders client-side and send
+// one COM_QUERY. Without it every parameterised statement is COM_STMT_PREPARE,
+// wait for the reply, COM_STMT_EXECUTE, wait again, then COM_STMT_CLOSE — the
+// statement is thrown away, so nothing amortises the extra round-trip. Invisible
+// on loopback; it doubled every hot-path latency against a remote database
+// (docs/remote-database.local.md).
+//
+// It is safe with this charset: the driver refuses interpolation under the
+// multibyte collations where escaping is unsound (big5, sjis, gbk, cp932) at
+// ParseDSN, and utf8mb4_unicode_ci is not one of them. A query that would exceed
+// max_allowed_packet once interpolated falls back to a prepared statement inside
+// the driver.
 func (m *MySQLEngine) dsn() string {
-	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&charset=utf8mb4,utf8&collation=utf8mb4_unicode_ci",
+	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&charset=utf8mb4,utf8&collation=utf8mb4_unicode_ci&interpolateParams=true",
 		m.cfg.User, m.cfg.Pass, m.cfg.Host, m.cfg.Port, m.cfg.Database)
 }
 
@@ -213,10 +236,20 @@ func (m *MySQLEngine) Disconnect(info ClientInfo) {
 	if err := m.ensureDB(); err != nil {
 		return
 	}
-	if _, err := m.db.Exec(`UPDATE clients SET online = 0 WHERE id = ?`, info.StoreID); err != nil {
+	// Both through execRetry: marking a client's sources offline locks the same
+	// sources rows a concurrent counter refresh reads, and under load InnoDB picks
+	// this statement as the deadlock victim. Without a retry the sources stayed
+	// online — advertised by GetSources for a client that had already gone.
+	if err := m.execRetry("disconnect client", func() error {
+		_, err := m.db.Exec(`UPDATE clients SET online = 0 WHERE id = ?`, info.StoreID)
+		return err
+	}); err != nil {
 		logging.Errorf("mysql disconnect client storeID=%d failed: %v", info.StoreID, err)
 	}
-	if _, err := m.db.Exec(`UPDATE sources SET online = 0 WHERE id_client = ?`, info.StoreID); err != nil {
+	if err := m.execRetry("disconnect sources", func() error {
+		_, err := m.db.Exec(`UPDATE sources SET online = 0 WHERE id_client = ?`, info.StoreID)
+		return err
+	}); err != nil {
 		logging.Errorf("mysql disconnect sources storeID=%d failed: %v", info.StoreID, err)
 	}
 }
@@ -233,60 +266,43 @@ func (m *MySQLEngine) FilesCount() int {
 }
 
 func (m *MySQLEngine) AddFile(file File, clientInfo ClientInfo) {
+	m.AddFiles([]File{file}, clientInfo)
+}
+
+// AddFiles writes one client's offer as four statements per offerBatchSize chunk,
+// however many files the chunk holds. It used to be four statements per file,
+// issued once per record of every OP_OFFERFILES — 1,600 round-trips for one
+// 200-file packet before interpolateParams, which is 48 s against a database 30 ms
+// away.
+//
+// A chunk that fails is retried file by file. Batching must not change failure
+// isolation: when every file was its own statements, one record the server
+// rejected could not take the other 199 down with it. NormalizeFile is what is
+// meant to keep a rejection from happening at all; this is what bounds it if one
+// still does. Every statement is idempotent, so re-running rows the failed chunk
+// already wrote is harmless.
+func (m *MySQLEngine) AddFiles(files []File, clientInfo ClientInfo) {
 	if err := m.ensureDB(); err != nil {
 		return
 	}
-	file = NormalizeFile(file)
-	err := m.execRetry("add file", func() error {
-		_, err := m.db.Exec(
-			`INSERT INTO files(hash,size,time_offer) VALUES(?,?,NOW())
-			 ON DUPLICATE KEY UPDATE time_offer=NOW()`,
-			file.Hash, file.Size,
-		)
-		return err
-	})
-	if err != nil {
-		logging.Errorf("mysql add file hash=%x size=%d failed: %v", file.Hash, file.Size, err)
-		return
-	}
-
-	var fileID uint64
-	if err := m.execRetry("lookup file id", func() error {
-		return m.db.QueryRow(`SELECT id FROM files WHERE hash = ? AND size = ? LIMIT 1`, file.Hash, file.Size).Scan(&fileID)
-	}); err != nil {
-		logging.Errorf("mysql lookup file id hash=%x size=%d failed: %v", file.Hash, file.Size, err)
-		return
-	}
-
-	typ := file.Type
-	if typ == "" {
-		typ = GetFileType(file.Name)
-	}
-	// Every value below originates in a client tag. NormalizeFile above has
-	// already clamped them to the column widths and mapped type into the ENUM;
-	// without that, an over-length name/codec or a type such as
-	// "EmuleCollection" aborts this INSERT under STRICT_TRANS_TABLES and the
-	// file is published but never becomes searchable.
-	if err := m.execRetry("add source", func() error {
-		_, err := m.db.Exec(
-			`INSERT INTO sources(id_file,id_client,name,ext,type,title,artist,album,length,bitrate,codec,online,complete,time_offer)
-			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
-			 ON DUPLICATE KEY UPDATE
-			 name=VALUES(name), ext=VALUES(ext), type=VALUES(type), title=VALUES(title),
-			 artist=VALUES(artist), album=VALUES(album), length=VALUES(length), bitrate=VALUES(bitrate),
-			 codec=VALUES(codec), online=1, complete=VALUES(complete), time_offer=NOW()`,
-			fileID, clientInfo.StoreID, file.Name, NormalizeExt(file.Name), typ, file.Title, file.Artist, file.Album,
-			file.Runtime, file.Bitrate, file.Codec, 1, boolToTinyInt(file.Completed > 0),
-		)
-		return err
-	}); err != nil {
-		logging.Errorf("mysql add source fileID=%d clientID=%d name=%q type=%q failed: %v",
-			fileID, clientInfo.StoreID, file.Name, typ, err)
-		return
-	}
-
-	if err := m.refreshFileCounters(fileID, clientInfo.ID, clientInfo.Port); err != nil {
-		logging.Errorf("mysql refresh counters fileID=%d failed: %v", fileID, err)
+	batch := prepareOfferBatch(files)
+	for start := 0; start < len(batch); start += offerBatchSize {
+		chunk := batch[start:min(start+offerBatchSize, len(batch))]
+		err := m.addFilesChunk(chunk, clientInfo)
+		if err == nil {
+			continue
+		}
+		if len(chunk) > 1 {
+			logging.Warnf("mysql add files batch of %d clientID=%d failed, retrying one by one: %v",
+				len(chunk), clientInfo.StoreID, err)
+			for _, file := range chunk {
+				if err := m.addFilesChunk([]File{file}, clientInfo); err != nil {
+					logMySQLAddFileError(file, clientInfo, err)
+				}
+			}
+			continue
+		}
+		logMySQLAddFileError(chunk[0], clientInfo, err)
 	}
 }
 
@@ -518,14 +534,25 @@ func (m *MySQLEngine) CleanupStale(maxAge time.Duration, opts CleanupOptions) (C
 	}
 	result.Sources = deleted
 
-	for _, fileID := range affected {
-		if err := m.recountFileSources(fileID); err != nil {
-			logging.Errorf("mysql cleanup refresh counters fileID=%d failed: %v", fileID, err)
+	// One statement per batch rather than per file: a day's sweep on a busy server
+	// touches six figures of files, which was that many UPDATEs, each a round-trip
+	// holding a pool connection. Bounded by the same batch size as the DELETEs, so
+	// no single statement locks more files rows than a DELETE is allowed to.
+	for start := 0; start < len(affected); start += batch {
+		chunk := affected[start:min(start+batch, len(affected))]
+		if err := m.refreshFileCounters(chunk, nil); err != nil {
+			logging.Errorf("mysql cleanup refresh counters files=%d failed: %v", len(chunk), err)
 		}
 	}
 
 	if !opts.KeepZeroSourceFiles {
-		deleted, err = m.deleteInBatches(`DELETE FROM files WHERE sources = 0 LIMIT ?`, nil, batch)
+		// time_offer < cutoff, not just sources = 0: a file an offer is writing right
+		// now also has sources = 0, between the offer's files upsert and its counter
+		// refresh. Deleting it then either failed the offer's sources INSERT on the
+		// foreign key or, a moment later, cascaded away the source it had just
+		// stored. The offer stamps time_offer before it inserts any source, so a
+		// file past the cutoff has no offer in flight.
+		deleted, err = m.deleteZeroSourceFiles(cutoff, batch)
 		if err != nil {
 			return result, err
 		}
@@ -564,18 +591,12 @@ func (m *MySQLEngine) staleAffectedFileIDs(cutoff time.Time) ([]uint64, error) {
 // AddFile's counter refresh aggregates — straight into the deadlock path that
 // execRetry exists to handle. Passing nil for cutoff runs a statement whose only
 // placeholder is the limit.
-func (m *MySQLEngine) deleteInBatches(query string, cutoff any, batch int) (int, error) {
+func (m *MySQLEngine) deleteInBatches(query string, cutoff time.Time, batch int) (int, error) {
 	total := 0
 	for {
 		var affected int64
 		err := m.execRetry("cleanup delete", func() error {
-			var res sql.Result
-			var err error
-			if cutoff == nil {
-				res, err = m.db.Exec(query, batch)
-			} else {
-				res, err = m.db.Exec(query, cutoff, batch)
-			}
+			res, err := m.db.Exec(query, cutoff, batch)
 			if err != nil {
 				return err
 			}
@@ -592,50 +613,105 @@ func (m *MySQLEngine) deleteInBatches(query string, cutoff any, batch int) (int,
 	}
 }
 
-// recountFileSources refreshes only the aggregate counters, leaving source_id
-// and source_port alone.
+// deleteZeroSourceFiles removes files that have no source left and no offer since
+// cutoff, batch rows at a time, and returns how many it removed.
 //
-// refreshFileCounters cannot be reused here: it also writes the offering
-// client's id and port, and a cleanup sweep has no such client — passing zeros
-// would wipe the last known source address off every file it touched.
-func (m *MySQLEngine) recountFileSources(fileID uint64) error {
-	return m.execRetry("recount sources", func() error {
-		_, err := m.db.Exec(
-			`UPDATE files f
-			 LEFT JOIN (
-			   SELECT id_file, SUM(complete) AS completed, COUNT(*) AS sources
-			   FROM sources WHERE id_file = ? GROUP BY id_file
-			 ) s ON s.id_file = f.id
-			 SET f.completed = COALESCE(s.completed,0),
-			     f.sources = COALESCE(s.sources,0)
-			 WHERE f.id = ?`,
-			fileID, fileID,
-		)
-		return err
-	})
+// Candidates are read with a plain SELECT, then deleted by primary key with the
+// condition repeated. files has no index on sources, so the single
+// `DELETE ... WHERE sources = 0 LIMIT ?` it replaces scanned the whole table, and
+// under REPEATABLE READ a DELETE locks every row it reads, matching or not: every
+// offer then waited for the sweep, and under load deadlocked with it. The SELECT is
+// a consistent read and takes no locks; the DELETE locks only the rows it removes,
+// in primary-key order like the counter refresh.
+func (m *MySQLEngine) deleteZeroSourceFiles(cutoff time.Time, batch int) (int, error) {
+	total := 0
+	for {
+		ids, err := m.zeroSourceFileIDs(cutoff, batch)
+		if err != nil || len(ids) == 0 {
+			return total, err
+		}
+		args := append(ids, cutoff)
+		var affected int64
+		err = m.execRetry("cleanup delete", func() error {
+			res, err := m.db.Exec(`DELETE FROM files WHERE id IN (`+sqlPlaceholders(len(ids))+`)
+				 AND sources = 0 AND time_offer < ?`, args...)
+			if err != nil {
+				return err
+			}
+			affected, err = res.RowsAffected()
+			return err
+		})
+		if err != nil {
+			return total, err
+		}
+		total += int(affected)
+		if len(ids) < batch {
+			return total, nil
+		}
+	}
 }
 
-// refreshFileCounters recomputes the denormalized counters for one file.
+func (m *MySQLEngine) zeroSourceFileIDs(cutoff time.Time, batch int) ([]any, error) {
+	rows, err := m.db.Query(`SELECT id FROM files WHERE sources = 0 AND time_offer < ? LIMIT ?`, cutoff, batch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []any
+	for rows.Next() {
+		var id uint64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// refreshFileCounters recomputes the denormalized sources/completed counters for a
+// set of files in one statement.
 //
-// The aggregate is scoped with `WHERE id_file = ?`. It used to run
+// The aggregate is scoped with `WHERE id_file IN (…)`. It used to run
 // `SELECT ... FROM sources GROUP BY id_file` across the whole table on every
 // offered file, holding locks over rows belonging to unrelated files while
 // taking an exclusive lock on the parent files row — which is what made
 // concurrent offers of one popular file deadlock in the first place.
-func (m *MySQLEngine) refreshFileCounters(fileID uint64, sourceID uint32, sourcePort uint16) error {
+//
+// src stamps the offering client's address onto every file, which is what an offer
+// wants. A cleanup sweep passes nil and source_id/source_port are left alone: the
+// sweep has no offering client, and writing zeros would wipe the last known source
+// address off every file it touched.
+//
+// Callers bound len(ids) — offerBatchSize for an offer, the sweep's batch size for
+// cleanup — so the files rows one statement locks stay bounded. The ids are sorted
+// so two statements over overlapping files lock them in the same order.
+func (m *MySQLEngine) refreshFileCounters(ids []uint64, src *counterSource) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	sorted := slices.Clone(ids)
+	slices.Sort(sorted)
+	idArgs := make([]any, len(sorted))
+	for i, id := range sorted {
+		idArgs[i] = id
+	}
+	set := `f.completed = COALESCE(s.completed,0), f.sources = COALESCE(s.sources,0)`
+	args := make([]any, 0, 2*len(idArgs)+2)
+	args = append(args, idArgs...)
+	if src != nil {
+		set += `, f.source_id = ?, f.source_port = ?`
+		args = append(args, src.ID, src.Port)
+	}
+	args = append(args, idArgs...)
+	query := `UPDATE files f
+		 LEFT JOIN (
+		   SELECT id_file, SUM(complete) AS completed, COUNT(*) AS sources
+		   FROM sources WHERE id_file IN (` + sqlPlaceholders(len(idArgs)) + `) GROUP BY id_file
+		 ) s ON s.id_file = f.id
+		 SET ` + set + `
+		 WHERE f.id IN (` + sqlPlaceholders(len(idArgs)) + `)`
 	return m.execRetry("refresh counters", func() error {
-		_, err := m.db.Exec(
-			`UPDATE files f
-			 LEFT JOIN (
-			   SELECT id_file, SUM(complete) AS completed, COUNT(*) AS sources
-			   FROM sources WHERE id_file = ? GROUP BY id_file
-			 ) s ON s.id_file = f.id
-			 SET f.completed = COALESCE(s.completed,0),
-			     f.sources = COALESCE(s.sources,0),
-			     f.source_id = ?, f.source_port = ?
-			 WHERE f.id = ?`,
-			fileID, sourceID, sourcePort, fileID,
-		)
+		_, err := m.db.Exec(query, args...)
 		return err
 	})
 }
@@ -660,10 +736,29 @@ func (m *MySQLEngine) execRetry(what string, fn func() error) error {
 		if attempt < m.cfg.DeadlockRetries {
 			logging.Warnf("mysql %s hit lock contention, retrying (attempt %d/%d): %v",
 				what, attempt+1, m.cfg.DeadlockRetries, err)
-			time.Sleep(m.cfg.DeadlockDelay)
+			time.Sleep(m.lockRetryDelay(attempt))
 		}
 	}
 	return fmt.Errorf("%s failed after %d retries: %w", what, m.cfg.DeadlockRetries, err)
+}
+
+// lockRetryDelay is the pause before retry attempt+1: DeadlockDelay doubled per
+// earlier attempt, capped at maxDeadlockDelay, then drawn uniformly from its upper
+// half.
+//
+// A fixed pause is what made the retries fail. The two statements of a deadlock
+// retry together after exactly the same delay, meet on the same rows again, and
+// deadlock again — under load that used up all retries of an offer's sources
+// INSERT, and the whole 200-file chunk fell back to file-by-file writes. The
+// randomness separates the pair; the doubling backs off when many writers contend
+// for one popular file.
+func (m *MySQLEngine) lockRetryDelay(attempt int) time.Duration {
+	d := m.cfg.DeadlockDelay
+	for i := 0; i < attempt && d < maxDeadlockDelay; i++ {
+		d *= 2
+	}
+	d = min(d, maxDeadlockDelay)
+	return d/2 + rand.N(d/2+1)
 }
 
 // isRetryableLockError reports whether MySQL rejected the statement for lock
@@ -766,4 +861,125 @@ func groupRepFunc(dialect string) func(col string) string {
 		return func(col string) string { return "ANY_VALUE(" + col + ")" }
 	}
 	return func(col string) string { return col }
+}
+
+// addFilesChunk writes at most offerBatchSize files prepared by prepareOfferBatch:
+// upsert the files, resolve their ids, upsert the sources, refresh the counters.
+// Four round-trips regardless of len(files).
+func (m *MySQLEngine) addFilesChunk(files []File, clientInfo ClientInfo) error {
+	fileArgs := make([]any, 0, 2*len(files))
+	hashArgs := make([]any, 0, len(files))
+	for _, f := range files {
+		fileArgs = append(fileArgs, f.Hash, f.Size)
+		hashArgs = append(hashArgs, f.Hash)
+	}
+	if err := m.execRetry("add files", func() error {
+		_, err := m.db.Exec(
+			`INSERT INTO files(hash,size,time_offer) VALUES `+sqlRows("(?,?,NOW())", len(files))+`
+			 ON DUPLICATE KEY UPDATE time_offer=NOW()`,
+			fileArgs...,
+		)
+		return err
+	}); err != nil {
+		return err
+	}
+
+	// On hash alone rather than a row-constructor `(hash,size) IN ((?,?),…)`: a plain
+	// IN is served by KEY hash on every MySQL and MariaDB version this engine
+	// supports, which the row-constructor form is not. The same hash at another size
+	// comes back too and simply matches no key below.
+	ids := make(map[offerKey]uint64, len(files))
+	if err := m.execRetry("lookup file ids", func() error {
+		rows, err := m.db.Query(`SELECT id, hash, size FROM files WHERE hash IN (`+sqlPlaceholders(len(hashArgs))+`)`, hashArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				id   uint64
+				hash []byte
+				size uint64
+			)
+			if err := rows.Scan(&id, &hash, &size); err != nil {
+				return err
+			}
+			ids[offerKey{hash: string(hash), size: size}] = id
+		}
+		return rows.Err()
+	}); err != nil {
+		return err
+	}
+
+	type fileRow struct {
+		id   uint64
+		file File
+	}
+	resolved := make([]fileRow, 0, len(files))
+	for _, f := range files {
+		id, ok := ids[offerKey{hash: string(f.Hash), size: f.Size}]
+		if !ok {
+			return fmt.Errorf("lookup file ids: hash=%x size=%d missing right after its upsert", f.Hash, f.Size)
+		}
+		resolved = append(resolved, fileRow{id: id, file: f})
+	}
+	// Ordered by id, so concurrent batches insert into sources' UNIQUE(id_file, id_client)
+	// in the same order as each other.
+	slices.SortFunc(resolved, func(a, b fileRow) int {
+		switch {
+		case a.id < b.id:
+			return -1
+		case a.id > b.id:
+			return 1
+		}
+		return 0
+	})
+
+	// Every value below originates in a client tag. prepareOfferBatch has already
+	// clamped them to the column widths and mapped type into the ENUM; without
+	// that, an over-length name/codec or a type such as "EmuleCollection" aborts
+	// this INSERT under STRICT_TRANS_TABLES and the file is published but never
+	// becomes searchable.
+	sourceArgs := make([]any, 0, 13*len(resolved))
+	fileIDs := make([]uint64, 0, len(resolved))
+	for _, r := range resolved {
+		f := r.file
+		sourceArgs = append(sourceArgs,
+			r.id, clientInfo.StoreID, f.Name, NormalizeExt(f.Name), f.Type, f.Title, f.Artist, f.Album,
+			f.Runtime, f.Bitrate, f.Codec, 1, boolToTinyInt(f.Completed > 0),
+		)
+		fileIDs = append(fileIDs, r.id)
+	}
+	if err := m.execRetry("add sources", func() error {
+		_, err := m.db.Exec(
+			`INSERT INTO sources(id_file,id_client,name,ext,type,title,artist,album,length,bitrate,codec,online,complete,time_offer)
+			 VALUES `+sqlRows("(?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())", len(resolved))+`
+			 ON DUPLICATE KEY UPDATE
+			 name=VALUES(name), ext=VALUES(ext), type=VALUES(type), title=VALUES(title),
+			 artist=VALUES(artist), album=VALUES(album), length=VALUES(length), bitrate=VALUES(bitrate),
+			 codec=VALUES(codec), online=1, complete=VALUES(complete), time_offer=NOW()`,
+			sourceArgs...,
+		)
+		return err
+	}); err != nil {
+		return err
+	}
+
+	return m.refreshFileCounters(fileIDs, &counterSource{ID: clientInfo.ID, Port: clientInfo.Port})
+}
+
+// logMySQLAddFileError reports one file that could not be stored even on its own.
+func logMySQLAddFileError(file File, clientInfo ClientInfo, err error) {
+	logging.Errorf("mysql add file hash=%x size=%d clientID=%d name=%q type=%q failed: %v",
+		file.Hash, file.Size, clientInfo.StoreID, file.Name, file.Type, err)
+}
+
+// sqlPlaceholders returns n comma-separated placeholders for an IN list.
+func sqlPlaceholders(n int) string {
+	return sqlRows("?", n)
+}
+
+// sqlRows repeats one VALUES tuple n times, comma-separated.
+func sqlRows(row string, n int) string {
+	return strings.TrimSuffix(strings.Repeat(row+",", n), ",")
 }

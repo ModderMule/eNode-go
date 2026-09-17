@@ -138,3 +138,55 @@ func TestGetFileTypeOnlyProducesEnumMembers(t *testing.T) {
 		}
 	}
 }
+
+// prepareOfferBatch is what both DB engines write, so it owns three guarantees at once:
+// normalization identical to the per-file path, last-wins on a duplicate key, and an
+// order fixed by (hash, size) regardless of the order the client sent.
+func TestPrepareOfferBatchNormalizesDedupesAndSorts(t *testing.T) {
+	hA := []byte("aaaaaaaaaaaaaaaa")
+	hB := []byte("bbbbbbbbbbbbbbbb")
+	in := []File{
+		{Hash: hB, Size: 10, Name: "clip.avi"},
+		{Hash: hA, Size: 20, Name: "first.mp3"},
+		// Clamping cuts the extension off, so the type has to come from the alias.
+		{Hash: hA, Size: 10, Name: strings.Repeat("n", 300) + ".iso", Type: "Iso"},
+		{Hash: hA, Size: 20, Name: "second.mp3", Type: "EmuleCollection"},
+	}
+	for i, f := range in {
+		t.Logf("input[%d]: hash=%c size=%d name=%d runes type=%q", i, f.Hash[0], f.Size, len([]rune(f.Name)), f.Type)
+	}
+
+	out := prepareOfferBatch(in)
+	for i, f := range out {
+		t.Logf("output[%d]: hash=%c size=%d name=%.20q (%d runes) type=%q", i, f.Hash[0], f.Size, f.Name, len([]rune(f.Name)), f.Type)
+	}
+
+	want := []struct {
+		hash byte
+		size uint64
+		name string
+		typ  string
+	}{
+		{'a', 10, "", "Pro"},
+		{'a', 20, "second.mp3", "Audio"},
+		{'b', 10, "clip.avi", "Video"},
+	}
+	if len(out) != len(want) {
+		t.Fatalf("got %d files, want %d — the duplicate a/20 was not collapsed", len(out), len(want))
+	}
+	for i, w := range want {
+		got := out[i]
+		if got.Hash[0] != w.hash || got.Size != w.size {
+			t.Fatalf("output[%d] is %c/%d, want %c/%d — not sorted by (hash, size)", i, got.Hash[0], got.Size, w.hash, w.size)
+		}
+		if w.name != "" && got.Name != w.name {
+			t.Errorf("output[%d] name %q, want %q — the later duplicate must win", i, got.Name, w.name)
+		}
+		if got.Type != w.typ {
+			t.Errorf("output[%d] type %q, want %q", i, got.Type, w.typ)
+		}
+	}
+	if n := len([]rune(out[0].Name)); n != maxNameLen {
+		t.Errorf("name is %d runes, want it clamped to %d", n, maxNameLen)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,10 @@ func startMySQL(t *testing.T, database string) (*MySQLEngine, *sql.DB) {
 		Host: "localhost", Port: mustAtoi(port), User: "root", Pass: "root", Database: database,
 		MaxOpenConns: 4, MaxIdleConns: 2,
 		SchemaFile: tests.FixRelativeTestingPath("misc/enode.sql"),
+		// The container is MySQL, so the dialect must say so. The default, mariadb,
+		// writes the grouped search without ANY_VALUE(), which this server's
+		// ONLY_FULL_GROUP_BY rejects with ER_1055 — every search here returned nothing.
+		Dialect: DialectMySQL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -415,5 +420,329 @@ func TestMongoSourceIdentitySurvivesEd2kIDChange(t *testing.T) {
 	t.Logf("output: after disconnect, %d sources still online", stillOnline)
 	if stillOnline != 0 {
 		t.Fatalf("%d sources remained online after disconnect", stillOnline)
+	}
+}
+
+// TestMySQLAddFilesBatch runs offers through the batched write on mysql:8.0 — strict
+// mode, ONLY_FULL_GROUP_BY — and checks what the per-file path guaranteed: a later
+// duplicate wins, hostile tags still land and stay searchable, the counters count
+// every client, and the stamped source address is the latest offering client's.
+func TestMySQLAddFilesBatch(t *testing.T) {
+	requireIntegration(t)
+	engine, db := startMySQL(t, "enode")
+
+	a := ClientInfo{ID: 701, IPv4: 0x0100007f, Port: 4662, Hash: []byte("aaaaaaaaaaaaaaaa")}
+	b := ClientInfo{ID: 702, IPv4: 0x0200007f, Port: 4663, Hash: []byte("bbbbbbbbbbbbbbbb")}
+	for _, c := range []*ClientInfo{&a, &b} {
+		id, err := engine.Connect(*c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.StoreID = id
+	}
+
+	h1, h2, h3 := []byte("1111111111111111"), []byte("2222222222222222"), []byte("3333333333333333")
+	offerA := []File{
+		{Hash: h1, Size: 100, Name: "alpha first.avi"},
+		{Hash: h2, Size: 200, Name: "beta.mp3", Completed: 1},
+		{Hash: h1, Size: 100, Name: "alpha renamed.avi"},
+		{Hash: h3, Size: 4096, Name: strings.Repeat("x", 400) + ".torrent-part001",
+			Type: "EmuleCollection", Codec: strings.Repeat("c", 100), Completed: 1},
+	}
+	offerB := []File{
+		{Hash: h1, Size: 100, Name: "alpha b.avi"},
+		{Hash: h2, Size: 200, Name: "beta.mp3"},
+	}
+	t.Logf("input: client A (id=701 port=4662) offers %d records: a duplicate h1/100 and a hostile h3", len(offerA))
+	engine.AddFiles(offerA, a)
+	t.Logf("input: client B (id=702 port=4663) offers h1/100 and h2/200")
+	engine.AddFiles(offerB, b)
+
+	var nFiles, nSources int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&nFiles); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sources`).Scan(&nSources); err != nil {
+		t.Fatal(err)
+	}
+	var nameA string
+	if err := db.QueryRow(`SELECT s.name FROM sources s JOIN files f ON f.id = s.id_file
+		WHERE f.hash = ? AND f.size = ? AND s.id_client = ?`, h1, 100, a.StoreID).Scan(&nameA); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("output: files=%d sources=%d; client A's h1/100 name=%q", nFiles, nSources, nameA)
+	if nFiles != 3 || nSources != 5 {
+		t.Fatalf("files=%d sources=%d, want 3 and 5", nFiles, nSources)
+	}
+	if nameA != "alpha renamed.avi" {
+		t.Fatalf("client A's h1/100 is %q, want the later duplicate %q", nameA, "alpha renamed.avi")
+	}
+
+	cases := []struct {
+		label              string
+		hash               []byte
+		size               uint64
+		sources, completed int
+		sourceID           uint32
+		sourcePort         uint16
+	}{
+		{"h1/100 offered by both", h1, 100, 2, 0, 702, 4663},
+		{"h2/200 complete at A only", h2, 200, 2, 1, 702, 4663},
+		{"h3 hostile, A only", h3, 4096, 1, 1, 701, 4662},
+	}
+	for _, tc := range cases {
+		var sources, completed int
+		var sourceID uint32
+		var sourcePort uint16
+		if err := db.QueryRow(`SELECT sources, completed, source_id, source_port FROM files WHERE hash = ? AND size = ?`,
+			tc.hash, tc.size).Scan(&sources, &completed, &sourceID, &sourcePort); err != nil {
+			t.Fatalf("%s: %v", tc.label, err)
+		}
+		t.Logf("output: %s: sources=%d completed=%d source=%d:%d", tc.label, sources, completed, sourceID, sourcePort)
+		if sources != tc.sources || completed != tc.completed || sourceID != tc.sourceID || sourcePort != tc.sourcePort {
+			t.Errorf("%s: got sources=%d completed=%d source=%d:%d, want %d/%d %d:%d", tc.label,
+				sources, completed, sourceID, sourcePort, tc.sources, tc.completed, tc.sourceID, tc.sourcePort)
+		}
+	}
+
+	if got := len(engine.GetSources(h1, 100)); got != 2 {
+		t.Errorf("GetSources(h1/100) returned %d, want 2", got)
+	}
+	found := engine.FindBySearch(&SearchExpr{Kind: SearchText, Text: strings.Repeat("x", 20)})
+	t.Logf("output: hostile file search found %d", len(found))
+	if len(found) != 1 {
+		t.Errorf("hostile file search found %d results, want 1", len(found))
+	}
+}
+
+// A size past int64 cannot be stored in files.size (bigint signed), so strict mode
+// rejects the whole multi-row INSERT carrying it. Before batching only that record
+// was lost; the per-file retry has to keep it that way.
+func TestMySQLAddFilesBatchIsolatesARejectedRecord(t *testing.T) {
+	requireIntegration(t)
+	engine, db := startMySQL(t, "enode")
+
+	client := ClientInfo{ID: 703, IPv4: 0x0100007f, Port: 4662, Hash: []byte("dddddddddddddddd")}
+	id, err := engine.Connect(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.StoreID = id
+
+	offer := []File{
+		{Hash: []byte("1111111111111111"), Size: 100, Name: "good one.avi"},
+		{Hash: []byte("2222222222222222"), Size: 1 << 63, Name: "impossible size.avi"},
+		{Hash: []byte("3333333333333333"), Size: 300, Name: "good two.avi"},
+	}
+	t.Logf("input: 3 records, the middle one with size=%d (past int64)", uint64(1<<63))
+	engine.AddFiles(offer, client)
+
+	rows, err := db.Query(`SELECT s.name FROM sources s ORDER BY s.name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, n)
+	}
+	t.Logf("output: stored sources=%q", names)
+	if strings.Join(names, ",") != "good one.avi,good two.avi" {
+		t.Fatalf("stored %q, want both good records and not the rejected one", names)
+	}
+}
+
+// The MongoDB twin of TestMySQLAddFilesBatch.
+func TestMongoAddFilesBatch(t *testing.T) {
+	requireIntegration(t)
+	engine := startMongoEngine(t, "enode_addfiles_batch")
+
+	a := ClientInfo{ID: 701, IPv4: 0x0100007f, Port: 4662, Hash: []byte("aaaaaaaaaaaaaaaa")}
+	b := ClientInfo{ID: 702, IPv4: 0x0200007f, Port: 4663, Hash: []byte("bbbbbbbbbbbbbbbb")}
+	for _, c := range []*ClientInfo{&a, &b} {
+		if _, err := engine.Connect(*c); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	h1, h2, h3 := []byte("1111111111111111"), []byte("2222222222222222"), []byte("3333333333333333")
+	offerA := []File{
+		{Hash: h1, Size: 100, Name: "alpha first.avi"},
+		{Hash: h2, Size: 200, Name: "beta.mp3", Completed: 1},
+		{Hash: h1, Size: 100, Name: "alpha renamed.avi"},
+		{Hash: h3, Size: 4096, Name: strings.Repeat("x", 400) + ".torrent-part001",
+			Type: "EmuleCollection", Codec: strings.Repeat("c", 100), Completed: 1},
+	}
+	offerB := []File{
+		{Hash: h1, Size: 100, Name: "alpha b.avi"},
+		{Hash: h2, Size: 200, Name: "beta.mp3"},
+	}
+	t.Logf("input: client A (id=701 port=4662) offers %d records: a duplicate h1/100 and a hostile h3", len(offerA))
+	engine.AddFiles(offerA, a)
+	t.Logf("input: client B (id=702 port=4663) offers h1/100 and h2/200")
+	engine.AddFiles(offerB, b)
+
+	ctx, cancel := contextWithTimeout(engine)
+	defer cancel()
+	nFiles, _ := engine.db.Collection("files").CountDocuments(ctx, bson.M{})
+	nSources, _ := engine.db.Collection("sources").CountDocuments(ctx, bson.M{})
+	var srcDoc struct {
+		Name string `bson:"name"`
+	}
+	if err := engine.db.Collection("sources").FindOne(ctx,
+		bson.M{"file_hash": h1, "file_size": 100, "client_hash": a.Hash}).Decode(&srcDoc); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("output: files=%d sources=%d; client A's h1/100 name=%q", nFiles, nSources, srcDoc.Name)
+	if nFiles != 3 || nSources != 5 {
+		t.Fatalf("files=%d sources=%d, want 3 and 5", nFiles, nSources)
+	}
+	if srcDoc.Name != "alpha renamed.avi" {
+		t.Fatalf("client A's h1/100 is %q, want the later duplicate %q", srcDoc.Name, "alpha renamed.avi")
+	}
+
+	cases := []struct {
+		label                                    string
+		hash                                     []byte
+		size                                     uint64
+		sources, completed, sourceID, sourcePort int64
+	}{
+		{"h1/100 offered by both", h1, 100, 2, 0, 702, 4663},
+		{"h2/200 complete at A only", h2, 200, 2, 1, 702, 4663},
+		{"h3 hostile, A only", h3, 4096, 1, 1, 701, 4662},
+	}
+	for _, tc := range cases {
+		var doc struct {
+			Sources    int64 `bson:"sources"`
+			Completed  int64 `bson:"completed"`
+			SourceID   int64 `bson:"source_id"`
+			SourcePort int64 `bson:"source_port"`
+		}
+		if err := engine.db.Collection("files").FindOne(ctx, bson.M{"hash": tc.hash, "size": tc.size}).Decode(&doc); err != nil {
+			t.Fatalf("%s: %v", tc.label, err)
+		}
+		t.Logf("output: %s: sources=%d completed=%d source=%d:%d", tc.label, doc.Sources, doc.Completed, doc.SourceID, doc.SourcePort)
+		if doc.Sources != tc.sources || doc.Completed != tc.completed || doc.SourceID != tc.sourceID || doc.SourcePort != tc.sourcePort {
+			t.Errorf("%s: got sources=%d completed=%d source=%d:%d, want %d/%d %d:%d", tc.label,
+				doc.Sources, doc.Completed, doc.SourceID, doc.SourcePort, tc.sources, tc.completed, tc.sourceID, tc.sourcePort)
+		}
+	}
+	if got := len(engine.GetSources(h1, 100)); got != 2 {
+		t.Errorf("GetSources(h1/100) returned %d, want 2", got)
+	}
+}
+
+// The driver cannot encode a size past int64, which fails the whole bulk write rather
+// than one document in it. The per-file retry has to limit the loss to that record.
+func TestMongoAddFilesBatchIsolatesARejectedRecord(t *testing.T) {
+	requireIntegration(t)
+	engine := startMongoEngine(t, "enode_addfiles_isolation")
+
+	client := ClientInfo{ID: 703, IPv4: 0x0100007f, Port: 4662, Hash: []byte("dddddddddddddddd")}
+	if _, err := engine.Connect(client); err != nil {
+		t.Fatal(err)
+	}
+	offer := []File{
+		{Hash: []byte("1111111111111111"), Size: 100, Name: "good one.avi"},
+		{Hash: []byte("2222222222222222"), Size: 1 << 63, Name: "impossible size.avi"},
+		{Hash: []byte("3333333333333333"), Size: 300, Name: "good two.avi"},
+	}
+	t.Logf("input: 3 records, the middle one with size=%d (past int64)", uint64(1<<63))
+	engine.AddFiles(offer, client)
+
+	ctx, cancel := contextWithTimeout(engine)
+	defer cancel()
+	cur, err := engine.db.Collection("sources").Find(ctx, bson.M{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var docs []struct {
+		Name string `bson:"name"`
+	}
+	if err := cur.All(ctx, &docs); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, d := range docs {
+		names = append(names, d.Name)
+	}
+	sort.Strings(names)
+	t.Logf("output: stored sources=%q", names)
+	if strings.Join(names, ",") != "good one.avi,good two.avi" {
+		t.Fatalf("stored %q, want both good records and not the rejected one", names)
+	}
+}
+
+// FindBySearch joins files at one of three points depending on the query — before
+// filtering, after grouping each file, or only for the returned page of a text
+// search. Every path must report the same counters, and the non-text paths must
+// keep ordering by source count.
+func TestMongoFindBySearchCountersOnEveryPath(t *testing.T) {
+	requireIntegration(t)
+	engine := startMongoEngine(t, "enode_search_paths")
+
+	files := []File{
+		{Hash: []byte("pathfileAAAAAAAA"), Size: 100, Name: "pathword alpha.avi", Type: "Video"},
+		{Hash: []byte("pathfileBBBBBBBB"), Size: 200, Name: "pathword bravo.avi", Type: "Video"},
+		{Hash: []byte("pathfileCCCCCCCC"), Size: 300, Name: "pathword charlie.avi", Type: "Video"},
+	}
+	// File i is offered by 3-i clients; client 0 has every file complete.
+	for c := 0; c < 3; c++ {
+		client := ClientInfo{ID: uint32(880 + c), IPv4: 0x0100007f, Port: 4662, Hash: []byte(fmt.Sprintf("pathclient%06d", c))}
+		if _, err := engine.Connect(client); err != nil {
+			t.Fatal(err)
+		}
+		var offer []File
+		for i, f := range files {
+			if c < 3-i {
+				if c == 0 {
+					f.Completed = 1
+				}
+				offer = append(offer, f)
+			}
+		}
+		engine.AddFiles(offer, client)
+	}
+	t.Logf("input: %s offered by 3, %s by 2, %s by 1 client; one client has each complete",
+		files[0].Name, files[1].Name, files[2].Name)
+
+	video := &SearchExpr{Kind: SearchString, TagType: searchTypeFileType, ValueString: "Video"}
+	cases := []struct {
+		name    string
+		expr    *SearchExpr
+		want    []string // expected names; in this order when ordered is set
+		ordered bool
+	}{
+		{"text: joins only the returned page", &SearchExpr{Kind: SearchText, Text: "pathword"},
+			[]string{"pathword alpha.avi", "pathword bravo.avi", "pathword charlie.avi"}, false},
+		{"non-text: joins each file, sorted by sources", video,
+			[]string{"pathword alpha.avi", "pathword bravo.avi", "pathword charlie.avi"}, true},
+		{"sources term: joins every source first", &SearchExpr{Kind: SearchAnd, Left: video,
+			Right: &SearchExpr{Kind: SearchUInt32, TagType: searchTypeSources, ValueUint: 1}},
+			[]string{"pathword alpha.avi", "pathword bravo.avi"}, true},
+	}
+	wantSources := map[string]uint32{"pathword alpha.avi": 3, "pathword bravo.avi": 2, "pathword charlie.avi": 1}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := engine.FindBySearch(tc.expr)
+			var names []string
+			for _, f := range got {
+				names = append(names, f.Name)
+				t.Logf("output: %s sources=%d completed=%d", f.Name, f.Sources, f.Completed)
+				if f.Sources != wantSources[f.Name] || f.Completed != 1 {
+					t.Errorf("%s: sources=%d completed=%d, want %d and 1", f.Name, f.Sources, f.Completed, wantSources[f.Name])
+				}
+			}
+			if !tc.ordered {
+				sort.Strings(names)
+			}
+			if strings.Join(names, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("results %q, want %q", names, tc.want)
+			}
+		})
 	}
 }
