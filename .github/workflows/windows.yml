@@ -5,16 +5,27 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# The release step attaches assets to a draft release, which needs write access
+# to contents. The built-in GITHUB_TOKEN covers it; no PAT is involved.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
 
+    # Deliberately no shared `concurrency` group across the three release
+    # workflows: GitHub holds only ONE pending run per group, so a third
+    # arrival cancels the queued second rather than queueing behind it. The
+    # three runs therefore proceed independently and each appends its own
+    # assets to the draft release for the tag.
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -46,10 +57,45 @@ jobs:
         run: |
           $out = "dist/enode-$env:APP_VERSION-win64"
           Copy-Item enode.config.yaml,README.md,MIT-LICENSE.txt $out
-          Compress-Archive -Path "$out/*" -DestinationPath "$out.zip"
+          # -Path $out (the directory) rather than "$out/*" (its contents):
+          # that keeps a top-level enode-<version>-win64/ folder inside the zip,
+          # matching the layout of the Linux and macOS tarballs. With the glob
+          # the zip explodes into the extractor's current directory.
+          Compress-Archive -Path $out -DestinationPath "$out.zip"
+
+      # Git Bash is on the runner, so this reuses the same sha256sum the Linux
+      # job runs rather than needing a PowerShell translation. `cd dist` first
+      # so the .sha256 records a bare filename -- that is what makes
+      # `sha256sum -c` work next to the downloaded archive.
+      - name: Checksum
+        shell: bash
+        run: |
+          cd dist
+          sha256sum "enode-${APP_VERSION}-win64.zip" \
+            > "enode-${APP_VERSION}-win64.zip.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: enode-${{ env.APP_VERSION }}-win64
-          path: dist/enode-v*-win64.zip
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+      # Only on a tag: a workflow_dispatch run on a branch still produces the
+      # artifact above, but has no release to attach it to.
+      #
+      # Creates the draft on first arrival and appends to it on the other two.
+      # Only this platform's globs are listed -- `fail_on_unmatched_files` would
+      # trip on a pattern that cannot match here (e.g. *.tar.gz, which only the
+      # Linux and macOS workflows produce).
+      - name: Attach to draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.zip
+            dist/*.sha256

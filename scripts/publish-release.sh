@@ -9,6 +9,17 @@ set -euo pipefail
 # read that same constant to name their artifacts, so tag, artifact and the
 # version the binary reports all stay in lockstep.
 #
+# The tag push is also what produces the release: each of those three workflows
+# attaches its bundle and a matching .sha256 to a DRAFT GitHub Release for the
+# tag. The first run to finish creates the draft, the other two append to it --
+# there is deliberately no shared `concurrency` group, because GitHub holds only
+# ONE pending run per group and a third arrival would cancel the queued second
+# rather than queue behind it. Nothing in this script talks to the GitHub API;
+# write the notes on the draft and publish it by hand once all three are green.
+#
+# There is no combined SHA256SUMS.txt for the same reason: three independent
+# workflows cannot append to one file without racing, so each ships its own.
+#
 # GossipVersionStr -- the ST_VERSION (0x91) value we advertise to peer servers
 # and to clients -- IS bumped, but by derivation: it is a const expression built
 # from ENodeVersionStr, so the single sed below carries it. Its leading "17.14"
@@ -114,7 +125,20 @@ git push "${REMOTE}" "${NEW}"
 
 echo
 echo "Released ${NEW}."
-echo "Next: GitHub -> Actions -> run the Linux/Windows/macOS workflows to (re-)build artifacts for this tag."
+echo "The tag push starts .github/workflows/{linux,macos,windows}.yml; each"
+echo "attaches its bundle and .sha256 to a DRAFT release for ${NEW}."
+echo
+echo "Finish with: write the notes on the draft, then publish it."
+
+# --- where to watch ---------------------------------------------------------
+# The sed strips any credentials embedded in the remote URL before printing it.
+# origin may carry a token, and it must not be echoed to the terminal.
+REPO_URL="$(git remote get-url "${REMOTE}" \
+  | sed -E 's#^https://[^@/]*@#https://#; s#^git@github\.com:#https://github.com/#; s#\.git$##')"
+
+echo
+echo "Actions:  ${REPO_URL}/actions"
+echo "Releases: ${REPO_URL}/releases"
 
 # --- optional: dispatch the builds manually ---------------------------------
 # Not needed while .github/workflows/*.yml carry their `push: tags: ['v*']`
