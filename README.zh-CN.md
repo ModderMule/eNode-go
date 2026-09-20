@@ -63,8 +63,8 @@ go run ./cmd/enode -config enode.config.yaml
 完整配置说明（字段含义）：
 
 ```yaml
-name: "(TESTING!!!) eNode"   # 服务器名称，对外展示
-description: "eNode ..."     # 服务器描述，对外展示
+name: "eNode-go"             # 服务器名称，对外展示
+description: "emule-qt.org"  # 服务器描述，对外展示
 address: ""                  # 本地监听地址；空时默认 0.0.0.0
 dynIp: "auto"                # 对外通告 IP；auto 时通过 testUrls 动态探测
 testUrls:                    # dynIp=auto 时依次请求，取第一个可用 IPv4
@@ -74,7 +74,10 @@ testUrls:                    # dynIp=auto 时依次请求，取第一个可用 I
   - "https://checkip.amazonaws.com"
 
 messageLowID: "You have LowID."   # LowID 登录提示
-messageLogin: "Welcome to eNode!" # 普通登录提示
+messageLogin: |-                  # 普通登录提示；可多行
+  Welcome to eNode-go!
+  An experimental ed2k server written in Go.
+  Get eMule-Qt, the modern open-source ed2k client: https://emule-qt.org/
 
 servers: []                  # OP_SERVERLIST 中通告的其他服务器（不含本机）；默认为空
   # - ip: "192.0.2.10"        # ip 可为 IPv4 或公网 IPv6（IPv6 放在尾部 v6 区块中通告）

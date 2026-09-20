@@ -413,7 +413,7 @@ A third-party client that splits on the literal two-character sequence has no su
 tolerance, and CRLF is the only encoding both strategies read identically. Pinned by
 `ed2k/servermessage_test.go`.
 
-Two consequences worth knowing when writing the text:
+Four consequences worth knowing when writing the text:
 
 - **Blank lines vanish.** Both trees skip empty tokens, so an empty line is not a blank
   line in the client's info pane. Trailing newlines are trimmed at config load for the same
@@ -427,6 +427,16 @@ Two consequences worth knowing when writing the text:
   `SRV_TCPFLG_UNICODE` bit (`ServerSocket.cpp:159`), and that bit arrives in `OP_IDCHANGE`
   (`ServerSocket.cpp:291`) — which the handshake sends *after* both messages. On a first-ever
   connect the flag is still `0` and non-ASCII is read as ANSI.
+- **A URL must end its line.** Both trees linkify a bare URL in the server-info pane, so a
+  line ending in `https://emule-qt.org/` arrives clickable with no markup — that is how the
+  shipped `messageLogin` advertises the client. The scheme table is shared
+  (`srchybrid/OtherFunctions.cpp:89-100` and `src/gui/utils/TextLinks.h:47-52`: `ed2k://`,
+  `http://`, `https://`, `ftp://`, `www.`, `ftp.`, `mailto:`, `magnet:?`), and both run the
+  link from the scheme to the next whitespace. They diverge on what happens next: Qt chops a
+  trailing `.,;:!?)` (`TextLinks.h:118-120`), the MFC tree does not, so `…/org/.` there
+  resolves to an address with the period in it. Ending the line with the URL makes the two
+  agree. Pinned by `config.TestShippedLoginMessageIsClientSafe`, with the rules themselves
+  covered by `TestClientSafeLineRules`.
 
 ### UDP Payloads (Implemented Here)
 

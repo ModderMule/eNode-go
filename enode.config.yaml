@@ -1,5 +1,5 @@
-name: "(TESTING!!!) eNode"
-description: "eNode: experimental ed2k server written in node.js"
+name: "eNode-go"
+description: "emule-qt.org"
 address: ""
 dynIp: "auto"
 testUrls:
@@ -14,8 +14,8 @@ messageLowID: "You have LowID."
 
 # Keep it ASCII
 messageLogin: |-
-  Welcome to eNode!
-  An experimental ed2k server written in Go.
+  Welcome to eNode-go!
+  Get eMule-Qt, the modern open-source ed2k client: https://emule-qt.org/
 
 # Peer servers advertised to clients in OP_SERVERLIST (never this server itself —
 # its own identity travels in OP_SERVERIDENT). Empty is valid and the default.

@@ -94,8 +94,8 @@ go run ./cmd/enode -config enode.config.yaml
 Full config field reference:
 
 ```yaml
-name: "(TESTING!!!) eNode"   # Server name shown to clients
-description: "eNode ..."     # Server description shown to clients
+name: "eNode-go"             # Server name shown to clients
+description: "emule-qt.org"  # Server description shown to clients
 address: ""                  # Local bind address; default is 0.0.0.0
 dynIp: "auto"                # Public advertised IP; auto resolves via testUrls
 testUrls:                    # Used only when dynIp=auto, first valid IPv4 wins
@@ -105,7 +105,10 @@ testUrls:                    # Used only when dynIp=auto, first valid IPv4 wins
   - "https://checkip.amazonaws.com"
 
 messageLowID: "You have LowID."   # Message sent to LowID clients
-messageLogin: "Welcome to eNode!" # Message sent on login
+messageLogin: |-                  # Message sent on login; may span several lines
+  Welcome to eNode-go!
+  An experimental ed2k server written in Go.
+  Get eMule-Qt, the modern open-source ed2k client: https://emule-qt.org/
 
 servers: []                  # Peer servers advertised in OP_SERVERLIST; empty is the default.
   # - ip: "192.0.2.10"        # ip may be IPv4 or a public IPv6 (v6 goes in the trailing v6 block)
