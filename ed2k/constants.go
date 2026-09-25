@@ -246,6 +246,26 @@ const (
 	TagIPv6Status uint8 = 0xab
 )
 
+// TagMeta* are the FT_META_* search-result tags of the enode.meta.v1 contract, carried
+// by a row that stands for a torrent or Usenet release (docs/meta-search.md). The
+// 0x60-0x6F block is free in every surveyed eMule tree; the values are pinned against
+// github.com/ModderMule/enodemeta/tags by a test so the two cannot drift. 0x66 is
+// reserved by the contract and never emitted.
+const (
+	TagMetaKind      uint8 = 0x60
+	TagMetaVersion   uint8 = 0x61
+	TagMetaFileIndex uint8 = 0x62
+	TagMetaFilePath  uint8 = 0x63
+	TagMetaTotalSize uint8 = 0x64
+	TagMetaID        uint8 = 0x65
+	TagMetaSeeders   uint8 = 0x67
+	TagMetaPeers     uint8 = 0x68
+	TagMetaAge       uint8 = 0x69
+	TagMetaIndexer   uint8 = 0x6a
+	TagMetaFlags     uint8 = 0x6b
+	TagMetaMagnet    uint8 = 0x6c
+)
+
 // IPv6Status* are the bits of the TagIPv6Status (0xab) bitfield. Unset bits mean
 // "no", never "unknown" — the tag is omitted entirely when the server has no
 // verdict to report, so a client that sees it can trust every bit.
@@ -297,6 +317,17 @@ const (
 	// unknown bits. Advertised only when natTraversal.serverIndependent is on. See
 	// docs/ipv6-client-implementation-spec.md §9.
 	FlagNatRendezvous uint32 = 0x8000
+	// FlagMetaSearch advertises that search answers may carry torrent/Usenet rows
+	// (FT_META_* tags, docs/meta-search.md). 0x10000 is the next clean bit above
+	// FlagNatRendezvous; clients ignore unknown bits. Set on both the TCP and UDP word
+	// when a catalogue daemon is configured.
+	FlagMetaSearch uint32 = 0x10000
+	// SrvCapMetaSearch is the client's CT_SERVER_FLAGS login bit asking for meta rows;
+	// SrvCapUDPMetaSearch is the same request in OP_GLOBSEARCHREQ3's
+	// CT_SERVER_UDPSEARCH_FLAGS tag (0x0e, decoded under TagSearchTree's name).
+	// Both only matter when metaSearch.advertiseToLegacyClients is off.
+	SrvCapMetaSearch    uint32 = 0x2000
+	SrvCapUDPMetaSearch uint32 = 0x02
 )
 
 const (

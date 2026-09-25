@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,6 +59,8 @@ type Config struct {
 	Admin  AdminConfig  `yaml:"admin"`
 	Gossip GossipConfig `yaml:"gossip"`
 	Filter FilterConfig `yaml:"filter"`
+
+	MetaSearch MetaSearchConfig `yaml:"metaSearch"`
 
 	Storage StorageConfig `yaml:"storage"`
 	Debug   DebugConfig   `yaml:"debug"`
@@ -330,6 +333,98 @@ type GeoIPConfig struct {
 // on every refresh instead of the intended local-file-only mode.
 func (c GeoIPConfig) HasCredentials() bool {
 	return c.AccountID != "" && c.LicenseKey != ""
+}
+
+// MetaSearchConfig merges torrent and Usenet releases into eD2K search results. The
+// rows come from the torrent-crawler and usenet-crawler daemons over their MetaIngest
+// service (github.com/ModderMule/enodemeta): a live Search per query, bounded by a
+// deadline, plus an optional subscription to each daemon's published feed. Every
+// network is off by default, so a server that never enables one answers searches
+// exactly as before. See docs/meta-search.md.
+type MetaSearchConfig struct {
+	// AdvertiseToLegacyClients sends meta rows to every client. When false, only a
+	// client that announced SRVCAP_METASEARCH (0x2000) at login, or a UDP
+	// OP_GLOBSEARCHREQ3 carrying SRVCAP_UDP_METASEARCH (0x02), receives them. *bool,
+	// defaults on: a stock eMule shows the rows (the name prefix marks them) but can
+	// never download one.
+	AdvertiseToLegacyClients *bool `yaml:"advertiseToLegacyClients"`
+	// UDPMaxConcurrent caps live Search calls made on behalf of UDP global searches.
+	// A UDP search runs on a shared worker; past the cap it is answered from the cache
+	// and feed only, so a burst of datagrams cannot park the whole pool on a daemon.
+	UDPMaxConcurrent int `yaml:"udpMaxConcurrent"`
+
+	Torrent MetaNetworkConfig `yaml:"torrent"`
+	Usenet  MetaNetworkConfig `yaml:"usenet"`
+	Cache   MetaCacheConfig   `yaml:"cache"`
+}
+
+// AdvertiseToLegacyClientsOrDefault reports whether every client receives meta rows,
+// defaulting to true.
+func (c MetaSearchConfig) AdvertiseToLegacyClientsOrDefault() bool {
+	return boolOrDefault(c.AdvertiseToLegacyClients, true)
+}
+
+// AnyEnabled reports whether at least one network is on.
+func (c MetaSearchConfig) AnyEnabled() bool { return c.Torrent.Enabled || c.Usenet.Enabled }
+
+// MetaNetworkConfig is one catalogue daemon.
+type MetaNetworkConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// URL is the daemon's MetaIngest listener (torrent-crawler 9701, usenet-crawler 9702).
+	URL string `yaml:"url"`
+	// Token is the daemon's ingest.auth_token, sent as a bearer token. A daemon on a
+	// non-loopback address refuses to start without one. Keep it in enode.local.yaml.
+	Token string `yaml:"token"`
+	// NamePrefix is prepended to every row's filename, the only field a stock eMule
+	// shows. *string so an explicit "" (no prefix) is told from an absent key.
+	NamePrefix *string `yaml:"namePrefix"`
+	// LiveSearch forwards each search's keywords to the daemon's Search. *bool,
+	// defaults on. Off leaves only the feed (and the cache is then unused).
+	LiveSearch *bool `yaml:"liveSearch"`
+	// SearchTimeoutMs bounds the live call on a TCP search, which runs on that
+	// client's own connection goroutine. UDPSearchTimeoutMs is the shorter UDP bound.
+	SearchTimeoutMs    int `yaml:"searchTimeoutMs"`
+	UDPSearchTimeoutMs int `yaml:"udpSearchTimeoutMs"`
+	// MaxResults caps this network's rows in one TCP answer; MaxUDPResults in one UDP
+	// answer, where every row is its own datagram and the cap is an amplification bound.
+	MaxResults    int `yaml:"maxResults"`
+	MaxUDPResults int `yaml:"maxUDPResults"`
+
+	Feed MetaFeedConfig `yaml:"feed"`
+}
+
+// NamePrefixOrDefault returns the configured prefix, or def when the key is absent.
+func (c MetaNetworkConfig) NamePrefixOrDefault(def string) string {
+	if c.NamePrefix == nil {
+		return def
+	}
+	return *c.NamePrefix
+}
+
+// LiveSearchOrDefault reports whether keywords are forwarded, defaulting to true.
+func (c MetaNetworkConfig) LiveSearchOrDefault() bool { return boolOrDefault(c.LiveSearch, true) }
+
+// MetaFeedConfig subscribes to a daemon's published feed and keeps it in memory, so
+// its releases match without a round trip. The subscription restarts from a snapshot
+// on every start, so nothing is persisted.
+type MetaFeedConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// MaxRows caps the rows held for this network. A row is ~1 KB, so the default
+	// 250000 is ~250 MB.
+	MaxRows             int `yaml:"maxRows"`
+	ReconnectMinSeconds int `yaml:"reconnectMinSeconds"`
+	ReconnectMaxSeconds int `yaml:"reconnectMaxSeconds"`
+}
+
+// MetaCacheConfig caches live Search answers per network, keyed by the forwarded
+// keywords, excludes, file type and size bounds.
+type MetaCacheConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// MaxEntries is how many distinct queries are kept, least recently used evicted.
+	MaxEntries int `yaml:"maxEntries"`
+	// MaxRowsPerEntry caps what one cached query keeps.
+	MaxRowsPerEntry int `yaml:"maxRowsPerEntry"`
+	TTLSeconds      int `yaml:"ttlSeconds"`
 }
 
 // boolOrDefault returns *p, or def when p is nil. The *bool pattern lets an absent
@@ -622,6 +717,9 @@ func setDefaults(cfg *Config) error {
 		return fmt.Errorf("files.hardLimit (%d) is below files.softLimit (%d): a client would be disconnected before the soft-limit warning could be sent",
 			hardFiles, softFiles)
 	}
+	if err := setMetaSearchDefaults(&cfg.MetaSearch); err != nil {
+		return err
+	}
 	if cfg.Storage.MongoDB.Port == 0 {
 		cfg.Storage.MongoDB.Port = 27017
 	}
@@ -743,4 +841,93 @@ func normalizeMessageText(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	return strings.Trim(s, "\n")
+}
+
+// Meta-search defaults, shared by setMetaSearchDefaults and documented in
+// enode.config.yaml.
+const (
+	DefaultTorrentURL        = "http://127.0.0.1:9701"
+	DefaultUsenetURL         = "http://127.0.0.1:9702"
+	DefaultTorrentNamePrefix = "[torrent] "
+	DefaultUsenetNamePrefix  = "[usenet] "
+	// maxMetaUDPResults bounds maxUDPResults: each row is one datagram answering one
+	// unauthenticated request.
+	maxMetaUDPResults = 50
+	// maxMetaResults bounds maxResults at the server's own per-search ceiling.
+	maxMetaResults = storage.MaxSearchResults
+)
+
+// ApplyMetaSearchDefaults returns c with the defaults Load would fill in, or the
+// error Load would report. For callers that build the section without a file.
+func ApplyMetaSearchDefaults(c MetaSearchConfig) (MetaSearchConfig, error) {
+	err := setMetaSearchDefaults(&c)
+	return c, err
+}
+
+func setMetaSearchDefaults(c *MetaSearchConfig) error {
+	if c.UDPMaxConcurrent <= 0 {
+		c.UDPMaxConcurrent = 16
+	}
+	if err := setMetaNetworkDefaults("metaSearch.torrent", &c.Torrent, DefaultTorrentURL); err != nil {
+		return err
+	}
+	if err := setMetaNetworkDefaults("metaSearch.usenet", &c.Usenet, DefaultUsenetURL); err != nil {
+		return err
+	}
+	if c.Cache.MaxEntries <= 0 {
+		c.Cache.MaxEntries = 1000
+	}
+	if c.Cache.MaxRowsPerEntry <= 0 {
+		c.Cache.MaxRowsPerEntry = 100
+	}
+	if c.Cache.TTLSeconds <= 0 {
+		c.Cache.TTLSeconds = 600
+	}
+	return nil
+}
+
+func setMetaNetworkDefaults(key string, c *MetaNetworkConfig, defaultURL string) error {
+	if c.URL == "" {
+		c.URL = defaultURL
+	}
+	if c.SearchTimeoutMs <= 0 {
+		c.SearchTimeoutMs = 1500
+	}
+	if c.UDPSearchTimeoutMs <= 0 {
+		c.UDPSearchTimeoutMs = 800
+	}
+	if c.MaxResults <= 0 {
+		c.MaxResults = 50
+	}
+	if c.MaxUDPResults <= 0 {
+		c.MaxUDPResults = 10
+	}
+	if c.Feed.MaxRows <= 0 {
+		c.Feed.MaxRows = 250000
+	}
+	if c.Feed.ReconnectMinSeconds <= 0 {
+		c.Feed.ReconnectMinSeconds = 5
+	}
+	if c.Feed.ReconnectMaxSeconds <= 0 {
+		c.Feed.ReconnectMaxSeconds = 300
+	}
+	if c.Feed.ReconnectMaxSeconds < c.Feed.ReconnectMinSeconds {
+		return fmt.Errorf("%s.feed.reconnectMaxSeconds (%d) is below reconnectMinSeconds (%d)",
+			key, c.Feed.ReconnectMaxSeconds, c.Feed.ReconnectMinSeconds)
+	}
+	if c.MaxUDPResults > maxMetaUDPResults {
+		return fmt.Errorf("%s.maxUDPResults (%d) exceeds %d: every row is a datagram answering one unauthenticated request",
+			key, c.MaxUDPResults, maxMetaUDPResults)
+	}
+	if c.MaxResults > maxMetaResults {
+		return fmt.Errorf("%s.maxResults (%d) exceeds the per-search ceiling %d", key, c.MaxResults, maxMetaResults)
+	}
+	if !c.Enabled {
+		return nil
+	}
+	u, err := url.Parse(c.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("%s.url %q is invalid: use http://host:port or https://host:port", key, c.URL)
+	}
+	return nil
 }

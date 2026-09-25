@@ -220,6 +220,7 @@ func BuildSearchResultPacket(files []storage.File, moreAvailable bool) (*Buffer,
 			Hash:       file.Hash,
 			SourceID:   file.SourceID,
 			SourcePort: file.SourcePort,
+			Meta:       file.Meta,
 		})
 	}
 	more := uint8(0)

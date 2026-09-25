@@ -42,6 +42,7 @@
   因此当某次上报使用了已存在的哈希却给出不同大小时，它会得到属于自己的记录，
   而不会覆盖他人的记录。缺少有效大小的记录会被直接拒绝，因为它永远无法被提供下载。
   详见 [`docs/server-client-communication.md`](docs/server-client-communication.md#file-identity)。
+- eD2K 搜索中的 Torrent 与 Usenet 结果：每次 TCP 与 UDP 搜索的关键词会通过 `MetaIngest` 服务（兼容 gRPC，基于共享契约 [`enodemeta`](https://github.com/ModderMule/enodemeta)）转发给 torrent-crawler / usenet-crawler 守护进程，其结果合并进同一个回复中。这些条目使用伪哈希与 `FT_META_*` 标签，并在文件名前加上前缀（`[torrent] ` / `[usenet] `），便于普通客户端区分。每个网络、其订阅源以及结果缓存均为可选项，默认关闭。详见 [`docs/meta-search.md`](docs/meta-search.md)。
 - 易于扩展多种存储引擎
 
 ## NAT Traversal 传输截图
@@ -197,6 +198,8 @@ storage:
 ```
 
 ## 构建与测试
+
+Torrent/Usenet 契约模块是一个 git 子模块，请使用 `git clone --recurse-submodules` 克隆，或在已有的检出目录中执行 `git submodule update --init`。需要 Go 1.25 或更高版本。
 
 运行所有常规测试：
 

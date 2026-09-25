@@ -141,6 +141,60 @@ filter:
     # file's MD5, so an unchanged database transfers nothing.
     updateDays: 7
 
+# Torrent and Usenet releases merged into eD2K search results, from the
+# torrent-crawler / usenet-crawler daemons over their MetaIngest service. Each row
+# carries a pseudo-hash and FT_META_* tags; a stock eMule shows it (the name prefix
+# marks it) but cannot download it. Every network is off by default, and off means
+# searches are answered exactly as before. See docs/meta-search.md.
+metaSearch:
+  # Send meta rows to every client. false limits them to clients that announced
+  # SRVCAP_METASEARCH (0x2000) at login, or a UDP OP_GLOBSEARCHREQ3 with flag 0x02.
+  advertiseToLegacyClients: true
+  # Live Search calls allowed in flight for UDP global searches. Past it a UDP
+  # search is answered from the cache and feed only, never by waiting on a daemon.
+  udpMaxConcurrent: 16
+  torrent:
+    enabled: false
+    url: "http://127.0.0.1:9701"   # torrent-crawler's MetaIngest listener
+    # The daemon's ingest.auth_token. Required unless the daemon is on loopback. Put
+    # the real value in enode.local.yaml, which is gitignored.
+    token: ""
+    namePrefix: "[torrent] "       # prepended to every filename; "" for none
+    liveSearch: true               # forward each search's keywords to the daemon
+    searchTimeoutMs: 1500          # TCP: the reply waits at most this long for the daemon
+    udpSearchTimeoutMs: 800        # UDP: shorter, it holds a shared worker
+    maxResults: 50                 # rows merged into one TCP search answer
+    maxUDPResults: 10              # rows per UDP answer (one datagram each); max 50
+    # Subscribe to the daemon's published feed and match it in memory, so those
+    # releases need no round trip. Restarts from a snapshot on every start.
+    feed:
+      enabled: false
+      maxRows: 250000              # ~1 KB per row
+      reconnectMinSeconds: 5
+      reconnectMaxSeconds: 300
+  usenet:
+    enabled: false
+    url: "http://127.0.0.1:9702"   # usenet-crawler's MetaIngest listener
+    token: ""
+    namePrefix: "[usenet] "
+    liveSearch: true
+    searchTimeoutMs: 1500
+    udpSearchTimeoutMs: 800
+    maxResults: 50
+    maxUDPResults: 10
+    feed:
+      enabled: false
+      maxRows: 250000
+      reconnectMinSeconds: 5
+      reconnectMaxSeconds: 300
+  # Cache live Search answers per network, keyed by the forwarded keywords, excludes,
+  # file type and size bounds. Off by default: a repeat query then asks the daemon again.
+  cache:
+    enabled: false
+    maxEntries: 1000               # distinct queries kept, least recently used evicted
+    maxRowsPerEntry: 100
+    ttlSeconds: 600
+
 natTraversal:
   enabled: true
   port: 2004

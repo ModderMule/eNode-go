@@ -44,6 +44,22 @@ const (
 	searchTypeComplete uint32 = 0x30000101
 )
 
+// SearchTermTag, SearchFileTypeTag, SearchExtTag, SearchSizeGtTag and SearchSizeLtTag
+// are the tag types a caller outside this package needs to read a parsed tree: a
+// SearchString leaf with SearchTermTag is a keyword, the others are constraints.
+const (
+	SearchTermTag     = searchTypeText
+	SearchFileTypeTag = searchTypeFileType
+	SearchExtTag      = searchTypeExt
+	SearchSizeGtTag   = searchTypeSizeGt
+	SearchSizeLtTag   = searchTypeSizeLt
+)
+
+// SearchTerms splits a keyword leaf into the terms the engines match one by one.
+func SearchTerms(text string) []string {
+	return splitTerms(text)
+}
+
 // whereNode is a partially built WHERE clause. Three states matter and must not
 // be conflated:
 //

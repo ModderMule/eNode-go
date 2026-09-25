@@ -47,6 +47,7 @@ func BuildGlobSearchResPackets(files []storage.File) ([]*Buffer, error) {
 			Hash:       file.Hash,
 			SourceID:   file.SourceID,
 			SourcePort: file.SourcePort,
+			Meta:       file.Meta,
 		})
 		b, err := MakeUDPPacket(PrED2K, pack)
 		if err != nil {

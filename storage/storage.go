@@ -102,6 +102,29 @@ type File struct {
 	Codec      string
 	SourceID   uint32
 	SourcePort uint16
+	// Meta is set on a row that stands for a torrent or Usenet release rather than an
+	// eD2K file (see docs/meta-search.md), and nil on every row an engine returns.
+	// Such rows are merged into search answers only and never stored.
+	Meta *MetaInfo
+}
+
+// MetaInfo is what a torrent or Usenet row carries beyond an eD2K record: the
+// FT_META_* tags (0x60-0x6C) of the enode.meta.v1 contract. Plain values, so
+// storage takes no dependency on the contract module.
+type MetaInfo struct {
+	// Kind is the network: 1 BitTorrent v1/hybrid, 2 BitTorrent v2, 3 NZB.
+	Kind      uint8
+	Version   uint8
+	FileIndex uint32
+	FilePath  string
+	TotalSize uint64
+	CatalogID string
+	Seeders   uint32
+	Peers     uint32
+	AgeDays   uint32
+	Indexer   string
+	Flags     uint32
+	Magnet    string
 }
 
 type Server struct {

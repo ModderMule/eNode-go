@@ -1,8 +1,10 @@
 module enode
 
-go 1.23.0
+go 1.25.0
 
 require (
+	connectrpc.com/connect/v2 v2.0.0-alpha.1
+	github.com/ModderMule/enodemeta v0.0.0-00010101000000-000000000000
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/maxmind/geoipupdate/v7 v7.1.1
 	github.com/ory/dockertest/v3 v3.12.0
@@ -50,5 +52,13 @@ require (
 	golang.org/x/sync v0.15.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/text v0.26.0 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
+
+// enodemeta is the enode.meta.v1 contract shared with torrent-crawler, usenet-crawler
+// and eMuleQt: the MetaIngest service, its generated connect code and the eD2K
+// pseudo-hash. It is a git submodule at ./enodemeta (`git submodule update --init`),
+// and must be imported rather than regenerated here: protobuf-go panics on a
+// duplicate descriptor registration.
+replace github.com/ModderMule/enodemeta => ./enodemeta

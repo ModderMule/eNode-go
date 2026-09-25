@@ -13,6 +13,8 @@ import (
 
 	"enode/logging"
 	"enode/storage"
+
+	"github.com/ModderMule/enodemeta/metahash"
 )
 
 type TCPRuntimeConfig struct {
@@ -112,6 +114,11 @@ type ServerRuntime struct {
 	// the decision short-circuits before dialling at all. nil selects the real
 	// probe; nothing outside tests sets it.
 	firewallProbe func(*tcpClient) bool
+	// meta supplies torrent/Usenet rows merged into search answers, or nil when no
+	// catalogue daemon is configured. Set once by SetMetaSearcher before the listeners
+	// bind, then only read. metaAdvertiseLegacy sends them to clients that did not ask.
+	meta                MetaSearcher
+	metaAdvertiseLegacy bool
 }
 
 // ipv6Enabled reports whether IPv6 is on at all (dual-stack accept, CT_MOD_IP_V6
@@ -487,6 +494,10 @@ type tcpClient struct {
 	// tag. Only read by this connection's own request handlers, so it needs no
 	// lock. It gates whether this session may receive IPv6 sentinel sources.
 	ipv6Capable bool
+	// metaCapable is set at login when the client sent SrvCapMetaSearch in
+	// CT_SERVER_FLAGS: it can act on torrent/Usenet rows. Written once on this
+	// connection's goroutine before its first search, and read only by it.
+	metaCapable bool
 
 	// infoMu guards info, logged and hasLowID. The connection's own goroutine
 	// writes them during login, but two other goroutines read them: the periodic
@@ -879,6 +890,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// Record the client's obfuscation capabilities so OP_FOUNDSOURCES_OBFU can
 	// re-publish them per source. Absent tag → 0, i.e. no crypt advertised.
 	c.info.CryptOptions = cryptOptionsFromLoginFlags(loginFlags(req.Tags))
+	c.metaCapable = loginFlags(req.Tags)&SrvCapMetaSearch != 0
 	c.info.IPv6 = v6Bytes
 	// ipv6Capable is read cross-goroutine by the callback path (isV6Capable), so it
 	// is written under infoMu here rather than as a bare field assignment.
@@ -1201,7 +1213,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	// and taking it per file would lock once per offered file.
 	info := c.snapshotInfo()
 	softLimit, hardLimit := c.server.TCP.SoftFileLimit, c.server.TCP.HardFileLimit
-	var zeroSize int
+	var zeroSize, metaHashes int
 	// The whole packet is written in one AddFiles call. Storing record by record cost
 	// a fixed set of round-trips per file, so a database outside the host turned one
 	// 200-file offer into most of a minute of blocked read loop and held pool
@@ -1219,6 +1231,15 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 			// Dropped before the counter so it is charged against neither publish
 			// limit: a client is not penalised for a record the server refuses.
 			zeroSize++
+			continue
+		}
+		if metahash.RejectOfferedFile(record.Hash) {
+			// A torrent/Usenet pseudo-hash (docs/meta-search.md). A stock client cannot
+			// offer one — a pseudo-hash download never obtains a hashset, so it never
+			// enters the shared-file map — but a modified client can, and the row it
+			// advertises would then acquire "sources" that serve nothing. Dropped before
+			// the counter, like a zero size.
+			metaHashes++
 			continue
 		}
 		c.offeredFiles++
@@ -1266,6 +1287,10 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	if zeroSize > 0 {
 		logging.Warnf("offer files zero size remote=%s id=%d dropped=%d of=%d",
 			c.remoteHost, info.ID, zeroSize, len(records))
+	}
+	if metaHashes > 0 {
+		logging.Warnf("offer files meta hash remote=%s id=%d dropped=%d of=%d",
+			c.remoteHost, info.ID, metaHashes, len(records))
 	}
 }
 
@@ -1343,7 +1368,8 @@ func (c *tcpClient) handleSearchRequest(data *Buffer) {
 		return
 	}
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST expr=%s", c.remoteHost, formatSearchExpr(expr))
-	files := c.server.Storage.FindBySearch(expr)
+	metaCh := c.server.startMetaSearch(expr, c.metaCapable, false)
+	files := mergeMetaResults(c.server.Storage.FindBySearch(expr), metaCh)
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST resultCount=%d", c.remoteHost, len(files))
 	// A zero-result reply must still be sent. OP_SEARCHRESULT is the only packet
 	// that reaches eMule's LocalEd2kSearchEnd, which is what cancels the 50 s
@@ -2286,7 +2312,10 @@ func (s *ServerRuntime) udpGlobSearchReq(b *Buffer, remote *net.UDPAddr, conn *n
 	if err != nil {
 		return
 	}
-	files := s.Storage.FindBySearch(expr)
+	// OP_GLOBSEARCHREQ and ...REQ2 carry no tag block, so the requester cannot have
+	// asked for meta rows: it gets them only when they go to every client.
+	metaCh := s.startMetaSearch(expr, false, true)
+	files := mergeMetaResults(s.Storage.FindBySearch(expr), metaCh)
 	if len(files) == 0 {
 		return
 	}
@@ -2305,7 +2334,8 @@ func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn *
 	// a half-consumed tag — and ParseSearchExpr then built a query out of tag
 	// payload bytes. Bail instead; the tag block is mandatory for this opcode,
 	// so a failure here means the datagram is not parseable.
-	if _, err := b.GetTags(); err != nil {
+	tags, err := b.GetTags()
+	if err != nil {
 		logging.Warnf("udp glob search tags decode failed remote=%s err=%v", remote, err)
 		return
 	}
@@ -2313,7 +2343,9 @@ func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn *
 	if err != nil {
 		return
 	}
-	files := s.Storage.FindBySearch(expr)
+	metaCapable := udpSearchFlags(tags)&SrvCapUDPMetaSearch != 0
+	metaCh := s.startMetaSearch(expr, metaCapable, true)
+	files := mergeMetaResults(s.Storage.FindBySearch(expr), metaCh)
 	if len(files) == 0 {
 		return
 	}

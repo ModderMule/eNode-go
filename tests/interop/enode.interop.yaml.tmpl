@@ -85,6 +85,46 @@ filter:
     licenseKey: ""
     updateDays: 7
 
+# Off: the rig has no catalogue daemons, and the interop tests pin plain eD2K answers.
+metaSearch:
+  advertiseToLegacyClients: true
+  udpMaxConcurrent: 16
+  torrent:
+    enabled: false
+    url: "http://127.0.0.1:9701"
+    token: ""
+    namePrefix: "[torrent] "
+    liveSearch: true
+    searchTimeoutMs: 1500
+    udpSearchTimeoutMs: 800
+    maxResults: 50
+    maxUDPResults: 10
+    feed:
+      enabled: false
+      maxRows: 250000
+      reconnectMinSeconds: 5
+      reconnectMaxSeconds: 300
+  usenet:
+    enabled: false
+    url: "http://127.0.0.1:9702"
+    token: ""
+    namePrefix: "[usenet] "
+    liveSearch: true
+    searchTimeoutMs: 1500
+    udpSearchTimeoutMs: 800
+    maxResults: 50
+    maxUDPResults: 10
+    feed:
+      enabled: false
+      maxRows: 250000
+      reconnectMinSeconds: 5
+      reconnectMaxSeconds: 300
+  cache:
+    enabled: false
+    maxEntries: 1000
+    maxRowsPerEntry: 100
+    ttlSeconds: 600
+
 natTraversal:
   enabled: false
 

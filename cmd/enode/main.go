@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -17,6 +18,7 @@ import (
 	"enode/config"
 	"enode/ed2k"
 	"enode/logging"
+	"enode/meta"
 	"enode/netfilter"
 	"enode/storage"
 )
@@ -215,6 +217,16 @@ func run(ctx context.Context, configPath string) error {
 	tcpFlags := ed2k.BuildTCPFlags(tcpCfg)
 	udpFlags := ed2k.BuildUDPFlags(udpCfg)
 
+	// Torrent/Usenet rows from the catalogue daemons. Built before the runtime so the
+	// FlagMetaSearch bit reaches both advertised flag words; attached and started
+	// below, before the listeners bind. See docs/meta-search.md.
+	var metaSearcher *meta.Searcher
+	if cfg.MetaSearch.AnyEnabled() {
+		metaSearcher = meta.New(cfg.MetaSearch)
+		tcpFlags |= ed2k.FlagMetaSearch
+		udpFlags |= ed2k.FlagMetaSearch
+	}
+
 	// The address clients are told to reach us on. cfg.Address is the *bind*
 	// address and defaults to 0.0.0.0, which IPv4ToInt32LE encodes as 0 — so
 	// OP_SERVERIDENT advertised server IP 0.0.0.0 to everyone. The UDP path
@@ -314,6 +326,17 @@ func run(ctx context.Context, configPath string) error {
 	gossipHandler := buildGossipHandler(cfg, advertisedIP, serverIPv6)
 	if gossipHandler != nil {
 		runtime.SetGossipHandler(gossipHandler)
+	}
+
+	// Same ordering rule as the gossip handler: the searcher is read without a lock by
+	// every search, so it is attached before any listener binds.
+	if metaSearcher != nil {
+		warnMetaTokens(cfg.MetaSearch)
+		runtime.SetMetaSearcher(metaSearcher, cfg.MetaSearch.AdvertiseToLegacyClientsOrDefault())
+		stopMeta := metaSearcher.Start(ctx)
+		defer stopMeta()
+		logging.Infof("meta search enabled: networks=%v advertiseToLegacyClients=%t cache=%t",
+			metaSearcher.Networks(), cfg.MetaSearch.AdvertiseToLegacyClientsOrDefault(), cfg.MetaSearch.Cache.Enabled)
 	}
 
 	// Local admin status dashboard. Default on and bound to loopback; a bind
@@ -870,4 +893,27 @@ func adminBindIsLoopback(bindIP string) bool {
 	// Not an IP literal: only the empty default (resolved to 127.0.0.1 elsewhere)
 	// and "localhost" are loopback; any other hostname is treated as exposed.
 	return bindIP == "" || bindIP == "localhost"
+}
+
+// warnMetaTokens flags an enabled daemon on a non-loopback address with no token. The
+// daemon refuses to start that way, so the likely cause is a token left out of this
+// server's config — every call would then fail as unauthenticated.
+func warnMetaTokens(c config.MetaSearchConfig) {
+	for _, n := range []struct {
+		name string
+		cfg  config.MetaNetworkConfig
+	}{{meta.NetworkTorrent, c.Torrent}, {meta.NetworkUsenet, c.Usenet}} {
+		if !n.cfg.Enabled || n.cfg.Token != "" {
+			continue
+		}
+		u, err := url.Parse(n.cfg.URL)
+		if err != nil {
+			continue
+		}
+		if ip := net.ParseIP(u.Hostname()); u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback()) {
+			continue
+		}
+		logging.Warnf("metaSearch.%s.url %s is not loopback but no token is set; the daemon will refuse every call",
+			n.name, n.cfg.URL)
+	}
 }

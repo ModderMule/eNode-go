@@ -64,6 +64,14 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   are ignored; past the hard limit it is told why and disconnected. Counted cumulatively
   across a session, because eMule never sends more than 200 files in one packet. See
   [`docs/server-client-communication.md`](docs/server-client-communication.md#per-client-publish-limits).
+- Torrent and Usenet results in eD2K search: keywords of every TCP and UDP search are
+  forwarded to the torrent-crawler / usenet-crawler daemons over their `MetaIngest`
+  service (gRPC-compatible, via the shared
+  [`enodemeta`](https://github.com/ModderMule/enodemeta) contract), and their releases
+  come back merged into the same reply. The rows use a pseudo-hash and `FT_META_*` tags
+  and carry a filename prefix (`[torrent] ` / `[usenet] `) so stock clients can tell
+  them apart. Each network, its feed subscription and a result cache are optional and
+  off by default. See [`docs/meta-search.md`](docs/meta-search.md).
 - Login required before any request: every TCP opcode but `OP_LOGINREQUEST` and
   `OP_DISCONNECT` is refused on a session that has not logged in, so nothing can reach
   the index without an identity the server can account for and clean up. See
@@ -229,6 +237,10 @@ storage:
 ```
 
 ## Build & Test
+
+The torrent/Usenet contract module is a git submodule, so clone with
+`git clone --recurse-submodules`, or run `git submodule update --init` in an existing
+checkout. Go 1.25 or newer.
 
 Run all standard tests:
 

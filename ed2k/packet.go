@@ -8,6 +8,7 @@ import (
 	"io"
 
 	"enode/logging"
+	"enode/storage"
 )
 
 // ErrPacketTooLarge is returned when a peer declares a payload above
@@ -41,6 +42,8 @@ type SharedFile struct {
 	Hash       []byte
 	SourceID   uint32
 	SourcePort uint16
+	// Meta adds the FT_META_* tags of a torrent/Usenet row; nil for an eD2K file.
+	Meta *storage.MetaInfo
 }
 
 type Packet struct {
@@ -298,6 +301,9 @@ func AddFile(packet *[]PacketItem, file SharedFile) {
 	if file.Codec != "" {
 		tags = append(tags, Tag{Type: TypeString, Code: TagMediaCodec, Data: file.Codec})
 	}
+	if file.Meta != nil {
+		tags = appendMetaTags(tags, file.Meta)
+	}
 	*packet = append(*packet,
 		PacketItem{Type: TypeHash, Value: file.Hash},
 		PacketItem{Type: TypeUint32, Value: file.SourceID},
@@ -363,4 +369,35 @@ func (p *Packet) Append(chunk []byte) {
 	if excess > 0 && excess <= len(chunk) {
 		p.Excess = append([]byte(nil), chunk[len(chunk)-excess:]...)
 	}
+}
+
+// appendMetaTags adds the FT_META_* tags after the classic ones. Kind, version and
+// catalogue id are always sent — a capable client drops a row without them — and the
+// optional strings only when present, so a row stays as small as its release allows.
+func appendMetaTags(tags []Tag, m *storage.MetaInfo) []Tag {
+	tags = append(tags,
+		Tag{Type: TypeUint8, Code: TagMetaKind, Data: m.Kind},
+		Tag{Type: TypeUint8, Code: TagMetaVersion, Data: m.Version},
+		Tag{Type: TypeUint32, Code: TagMetaFileIndex, Data: m.FileIndex},
+	)
+	if m.FilePath != "" {
+		tags = append(tags, Tag{Type: TypeString, Code: TagMetaFilePath, Data: m.FilePath})
+	}
+	if m.TotalSize > 0 {
+		tags = append(tags, Tag{Type: TypeUint64, Code: TagMetaTotalSize, Data: m.TotalSize})
+	}
+	tags = append(tags,
+		Tag{Type: TypeString, Code: TagMetaID, Data: m.CatalogID},
+		Tag{Type: TypeUint32, Code: TagMetaSeeders, Data: m.Seeders},
+		Tag{Type: TypeUint32, Code: TagMetaPeers, Data: m.Peers},
+		Tag{Type: TypeUint32, Code: TagMetaAge, Data: m.AgeDays},
+	)
+	if m.Indexer != "" {
+		tags = append(tags, Tag{Type: TypeString, Code: TagMetaIndexer, Data: m.Indexer})
+	}
+	tags = append(tags, Tag{Type: TypeUint32, Code: TagMetaFlags, Data: m.Flags})
+	if m.Magnet != "" {
+		tags = append(tags, Tag{Type: TypeString, Code: TagMetaMagnet, Data: m.Magnet})
+	}
+	return tags
 }
