@@ -56,8 +56,13 @@ func TestNegotiate(t *testing.T) {
 	cases := map[string]string{
 		"":                            Default,
 		"de-DE,de;q=0.9,en;q=0.8":     "de",
-		"fr-FR,fr;q=0.9":              Default,
-		"fr-FR, en-US;q=0.8, de;q=.5": "en",
+		"fr-FR,fr;q=0.9":              "fr",
+		"sv-SE,sv;q=0.9":              Default,
+		"sv-SE, en-US;q=0.8, de;q=.5": "en",
+		"fr-FR, en-US;q=0.8, de;q=.5": "fr",
+		"pt-BR,pt;q=0.9":              "pt",
+		"zh-CN":                       "zh",
+		"ja":                          "ja",
 		"DE":                          "de",
 	}
 	for header, want := range cases {

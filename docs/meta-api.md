@@ -104,9 +104,24 @@ Errors carry an `enode.meta.v1.ErrorInfo` detail with a `msg_code`:
 | `unauthenticated` | `auth.required`, `auth.invalid_credentials`, `auth.session_expired` |
 | `permission_denied` | `account.pending`, `account.expired`, `account.disabled`, with `pending_steps` |
 
-The texts are in `locales/{en,de}.json`. The raw HTTP route returns the same
+The texts are in `locales/<lang>.json`, one file per language that eMuleQt ships:
+`en de es fr it ja ko pt zh`. The raw HTTP route returns the same
 information as JSON: `{"code", "message", "info": ErrorInfo}`, with the matching
 HTTP status, and `WWW-Authenticate: Basic` on a `401`.
+
+How the language is chosen: the file name is the language key, and
+`locales.Negotiate` walks the `Accept-Language` header in the order the client
+listed it (q-values are ignored), reduces each tag to its base subtag (`pt-BR` →
+`pt`, `zh-CN` → `zh`) and takes the first one with a file, else English. A code
+missing from a language falls back to English, then to the code itself. The
+account pages negotiate per request; on the Meta API only the `pending_steps`
+titles follow `Accept-Language` — error messages are English, and a client
+translates the `MsgCode` itself. `pt` is Brazilian Portuguese and `zh` Simplified
+Chinese, as in eMuleQt.
+
+Adding a code: put it in `locales/en.json`, then run
+`scripts/translate_missing.py export`, fill `scripts/missing.local.json`, run
+`scripts/translate_missing.py apply` and `go test ./locales`.
 
 Rate limits: `rateLimit.perIPPerMinute` for every download, and
 `perAccountPerMinute` per account when accounts are on. Behind a reverse proxy, set
