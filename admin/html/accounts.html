@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Name}} — accounts</title>
+<style>
+:root{color-scheme:light dark;--bg:#0f1216;--card:#1a1f27;--fg:#e6e9ef;--muted:#8b94a3;--accent:#4ea1ff;--ok:#3ecf8e;--err:#ff6b6b;--line:#2a313c}
+@media (prefers-color-scheme:light){:root{--bg:#f4f6fa;--card:#ffffff;--fg:#1a1f27;--muted:#5c6675;--accent:#1769d1;--ok:#149a63;--err:#c53030;--line:#e2e6ee}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:28px 20px 48px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 14px;margin-bottom:16px}
+h1{font-size:22px;margin:0}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:22px 0 8px}
+a{color:var(--accent)}
+.bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+input,select,button{font:inherit;padding:7px 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+button{cursor:pointer;border-color:var(--accent);color:var(--accent)}
+button.danger{border-color:var(--err);color:var(--err)}
+.layout{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:16px}
+@media (max-width:860px){.layout{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+td,th{padding:8px 12px;border-top:1px solid var(--line);text-align:left;font-weight:400;font-size:14px}
+th{color:var(--muted);border-top:none}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:rgba(127,127,127,.08)}
+tr.sel{outline:2px solid var(--accent);outline-offset:-2px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.muted{color:var(--muted)}
+.s-active{color:var(--ok);font-weight:600}
+.s-pending,.s-expired{color:var(--accent)}
+.s-disabled{color:var(--err);font-weight:600}
+.actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
+#msg{min-height:1.5em}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><h1>{{.Name}} — accounts</h1><a href="/">← status</a></header>
+<div class="bar">
+<input id="q" placeholder="search username or email" size="28">
+<select id="state"><option value="">all states</option><option>pending</option><option>active</option><option>expired</option><option>disabled</option></select>
+<button id="search">Search</button>
+<button id="prev">‹ prev</button><button id="next">next ›</button>
+<span class="muted" id="page"></span>
+</div>
+<div id="msg" class="muted"></div>
+<div class="layout">
+<table><thead><tr><th>ID</th><th>User</th><th>State</th><th>Access until</th><th>Created</th></tr></thead><tbody id="rows"></tbody></table>
+<div class="card" id="detail"><span class="muted">Select an account.</span></div>
+</div>
+</div>
+<script>
+var offset = 0, selected = 0, pageSize = 50;
+function el(tag, text, cls){ var e = document.createElement(tag); if(text !== undefined){ e.textContent = text; } if(cls){ e.className = cls; } return e; }
+function day(s){ return s ? s.replace('T',' ').replace('Z',' UTC') : '—'; }
+function msg(t, bad){ var m = document.getElementById('msg'); m.textContent = t || ''; m.style.color = bad ? 'var(--err)' : ''; }
+async function api(path, body){
+  var opt = body === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json','X-Enode-Admin':'1'}, body: JSON.stringify(body)};
+  var r = await fetch(path, opt);
+  var d = await r.json().catch(function(){ return {}; });
+  if(!r.ok){ throw new Error(d.error || ('HTTP ' + r.status)); }
+  return d;
+}
+async function load(){
+  var q = new URLSearchParams({q: document.getElementById('q').value, state: document.getElementById('state').value, offset: offset});
+  try{
+    var rows = await api('/api/accounts?' + q);
+    var tb = document.getElementById('rows'); tb.replaceChildren();
+    rows.forEach(function(a){
+      var tr = tb.insertRow(); if(a.id === selected){ tr.className = 'sel'; }
+      tr.appendChild(el('td', a.id));
+      var u = el('td', a.username); if(a.email){ u.appendChild(el('div', a.email, 'muted')); } tr.appendChild(u);
+      tr.appendChild(el('td', a.state, 's-' + a.state));
+      tr.appendChild(el('td', a.accessUntil ? day(a.accessUntil) : 'no expiry'));
+      tr.appendChild(el('td', day(a.createdAt)));
+      tr.onclick = function(){ selected = a.id; show(a.id); load(); };
+    });
+    document.getElementById('page').textContent = rows.length ? (offset + 1) + '–' + (offset + rows.length) : 'no accounts';
+    document.getElementById('next').disabled = rows.length < pageSize;
+    document.getElementById('prev').disabled = offset === 0;
+    msg('');
+  }catch(e){ msg(e.message, true); }
+}
+async function show(id){
+  try{ render(await api('/api/accounts/' + id)); }catch(e){ msg(e.message, true); }
+}
+async function act(id, action, body, confirmText){
+  if(confirmText && !confirm(confirmText)){ return; }
+  try{ render(await api('/api/accounts/' + id + '/' + action, body || {})); msg(action + ' done'); load(); }catch(e){ msg(e.message, true); }
+}
+function table(head, rows){
+  var t = el('table'); var h = t.createTHead().insertRow();
+  head.forEach(function(x){ h.appendChild(el('th', x)); });
+  var b = t.createTBody();
+  rows.forEach(function(r){ var tr = b.insertRow(); r.forEach(function(x){ tr.appendChild(el('td', x)); }); });
+  return t;
+}
+function render(a){
+  var d = document.getElementById('detail'); d.replaceChildren();
+  d.appendChild(el('h2', a.username + ' (#' + a.id + ')'));
+  d.appendChild(el('div', a.email || 'no email', 'muted'));
+  var st = el('div'); st.appendChild(document.createTextNode('State: ')); st.appendChild(el('span', a.state, 's-' + a.state)); d.appendChild(st);
+  d.appendChild(el('div', 'Access until: ' + (a.accessUntil ? day(a.accessUntil) : 'no expiry')));
+  d.appendChild(el('div', 'Registered: ' + day(a.createdAt), 'muted'));
+
+  var acts = el('div', undefined, 'actions');
+  if(a.state === 'disabled'){
+    var en = el('button', 'Enable'); en.onclick = function(){ act(a.id, 'enable'); }; acts.appendChild(en);
+  }else{
+    var dis = el('button', 'Disable', 'danger'); dis.onclick = function(){ act(a.id, 'disable', {}, 'Disable ' + a.username + '?'); }; acts.appendChild(dis);
+  }
+  if(a.accessUntil){
+    var days = el('input'); days.type = 'number'; days.value = '30'; days.style.width = '6em';
+    var adj = el('button', 'Move access by days'); adj.onclick = function(){ act(a.id, 'adjust', {days: parseInt(days.value, 10) || 0}); };
+    acts.appendChild(days); acts.appendChild(adj);
+  }
+  d.appendChild(acts);
+
+  d.appendChild(el('h2', 'Registration steps'));
+  if(!a.steps.length){ d.appendChild(el('div', 'none configured', 'muted')); }
+  else{
+    d.appendChild(table(['Step', 'Status', 'Completed'], a.steps.map(function(s){ return [s.title + ' (' + s.id + ')', s.status, day(s.completedAt)]; })));
+    var open = a.steps.filter(function(s){ return s.status === 'pending' || s.status === 'failed'; });
+    if(open.length){
+      var sa = el('div', undefined, 'actions'); var sel = el('select');
+      open.forEach(function(s){ var o = el('option', s.title); o.value = s.id; sel.appendChild(o); });
+      var sk = el('button', 'Skip step'); sk.onclick = function(){ act(a.id, 'skip-step', {step: sel.value}, 'Mark this step as skipped for ' + a.username + '?'); };
+      sa.appendChild(sel); sa.appendChild(sk); d.appendChild(sa);
+    }
+  }
+  d.appendChild(el('h2', 'Payments'));
+  if(!a.payments.length){ d.appendChild(el('div', 'none', 'muted')); }
+  else{
+    d.appendChild(table(['#', 'Provider', 'Plan', 'Status', 'Amount', 'Created', 'Credited', 'Revoked'], a.payments.map(function(p){
+      return [p.id, p.provider + (p.externalId ? ' ' + p.externalId : ''), p.plan + (p.periodDays ? ' (' + p.periodDays + 'd)' : ''),
+        p.status, p.amount ? p.amount + ' ' + p.currency : '', day(p.createdAt), day(p.creditedAt), day(p.revokedAt)];
+    })));
+  }
+}
+document.getElementById('search').onclick = function(){ offset = 0; load(); };
+document.getElementById('q').onkeydown = function(e){ if(e.key === 'Enter'){ offset = 0; load(); } };
+document.getElementById('state').onchange = function(){ offset = 0; load(); };
+document.getElementById('next').onclick = function(){ offset += pageSize; load(); };
+document.getElementById('prev').onclick = function(){ offset = Math.max(0, offset - pageSize); load(); };
+load();
+</script>
+</body>
+</html>

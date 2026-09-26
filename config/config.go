@@ -61,6 +61,7 @@ type Config struct {
 	Filter FilterConfig `yaml:"filter"`
 
 	MetaSearch MetaSearchConfig `yaml:"metaSearch"`
+	MetaAPI    MetaAPIConfig    `yaml:"metaApi"`
 
 	Storage StorageConfig `yaml:"storage"`
 	Debug   DebugConfig   `yaml:"debug"`
@@ -219,10 +220,16 @@ func (c IPv6Config) ProbeReachabilityOrDefault() bool {
 // is *bool so an absent key defaults on rather than off; BindIP defaults to
 // 127.0.0.1 so the dashboard is reachable out of the box but never off-box unless
 // the operator widens it deliberately.
+//
+// Username and Password protect the dashboard from non-loopback clients with HTTP
+// Basic auth. A loopback client never needs them. Without them, a non-loopback client
+// sees the status page only, never account data or account actions.
 type AdminConfig struct {
-	Enabled *bool  `yaml:"enabled"`
-	BindIP  string `yaml:"bindIP"`
-	Port    uint16 `yaml:"port"`
+	Enabled  *bool  `yaml:"enabled"`
+	BindIP   string `yaml:"bindIP"`
+	Port     uint16 `yaml:"port"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
 }
 
 // EnabledOrDefault reports whether the admin dashboard is served, defaulting to true.
@@ -389,6 +396,10 @@ type MetaNetworkConfig struct {
 	// answer, where every row is its own datagram and the cap is an amplification bound.
 	MaxResults    int `yaml:"maxResults"`
 	MaxUDPResults int `yaml:"maxUDPResults"`
+	// CountInServerStatus adds this network's files to the file total in
+	// OP_SERVERSTATUS and OP_GLOBSERVSTATRES: the daemon's GetInfo files with
+	// LiveSearch on (searches reach the whole catalogue), the feed's rows without.
+	CountInServerStatus bool `yaml:"countInServerStatus"`
 
 	Feed MetaFeedConfig `yaml:"feed"`
 }
@@ -633,6 +644,9 @@ func setDefaults(cfg *Config) error {
 	if cfg.Admin.Port == 0 {
 		cfg.Admin.Port = 4560
 	}
+	if (cfg.Admin.Username == "") != (cfg.Admin.Password == "") {
+		return fmt.Errorf("admin.username and admin.password must be set together, or both left empty")
+	}
 	// Gossip cadence. 150 s sits just inside Lugdunum's own ~165 s keepalive, so our
 	// entry never lapses on a peer between rounds; 4096 is eserver's maxservers.
 	if cfg.Gossip.IntervalSeconds <= 0 {
@@ -718,6 +732,9 @@ func setDefaults(cfg *Config) error {
 			hardFiles, softFiles)
 	}
 	if err := setMetaSearchDefaults(&cfg.MetaSearch); err != nil {
+		return err
+	}
+	if err := setMetaAPIDefaults(&cfg.MetaAPI); err != nil {
 		return err
 	}
 	if cfg.Storage.MongoDB.Port == 0 {

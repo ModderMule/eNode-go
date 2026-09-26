@@ -1029,6 +1029,11 @@ type mongoIndex struct {
 	name   string
 	keys   bson.D
 	unique bool
+	// expireAfter makes it a TTL index: documents go once the keyed date is this old.
+	expireAfter *int32
+	// partial restricts the index to matching documents, e.g. so a unique key
+	// ignores rows whose field is not set yet.
+	partial bson.D
 }
 
 // mongoIndexes is every index the engine relies on.
@@ -1082,9 +1087,15 @@ var mongoIndexes = []mongoIndex{
 // Matched by name, not by keys: listIndexes reports a text index's keys as
 // {_fts: "text", _ftsx: 1}, never as the {name: "text"} it was created from.
 func (m *MongoDBEngine) ensureIndexes(ctx context.Context) ([]string, error) {
+	return m.ensureIndexList(ctx, mongoIndexes)
+}
+
+// ensureIndexList is ensureIndexes for any list, so the account collections can keep
+// their own, created only when accounts are enabled.
+func (m *MongoDBEngine) ensureIndexList(ctx context.Context, indexes []mongoIndex) ([]string, error) {
 	var order []string
 	byCollection := map[string][]mongoIndex{}
-	for _, idx := range mongoIndexes {
+	for _, idx := range indexes {
 		if _, ok := byCollection[idx.collection]; !ok {
 			order = append(order, idx.collection)
 		}
@@ -1114,6 +1125,12 @@ func (m *MongoDBEngine) ensureIndexes(ctx context.Context) ([]string, error) {
 			opts := options.Index().SetName(idx.name)
 			if idx.unique {
 				opts.SetUnique(true)
+			}
+			if idx.expireAfter != nil {
+				opts.SetExpireAfterSeconds(*idx.expireAfter)
+			}
+			if idx.partial != nil {
+				opts.SetPartialFilterExpression(idx.partial)
 			}
 			missing = append(missing, mongo.IndexModel{Keys: idx.keys, Options: opts})
 			names = append(names, idx.name)

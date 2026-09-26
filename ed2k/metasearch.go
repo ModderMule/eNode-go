@@ -2,6 +2,7 @@ package ed2k
 
 import (
 	"context"
+	"math"
 
 	"enode/storage"
 )
@@ -12,8 +13,13 @@ import (
 //
 // Search must return within its own deadline and must not fail: a slow or missing
 // daemon yields fewer rows, never an error, because the eD2K answer is sent either way.
+//
+// AdvertisedFiles is the file count the searcher adds to the server status total
+// (metaSearch.<network>.countInServerStatus). It is read on every status reply, so
+// it must answer from memory, never from a daemon.
 type MetaSearcher interface {
 	Search(ctx context.Context, expr *storage.SearchExpr, udp bool) []storage.File
+	AdvertisedFiles() int
 }
 
 // SetMetaSearcher attaches the meta searcher. advertiseToLegacy sends its rows to
@@ -26,6 +32,14 @@ type MetaSearcher interface {
 func (s *ServerRuntime) SetMetaSearcher(m MetaSearcher, advertiseToLegacy bool) {
 	s.meta = m
 	s.metaAdvertiseLegacy = advertiseToLegacy
+}
+
+// AdvertisedFiles is the file total sent in OP_SERVERSTATUS and OP_GLOBSERVSTATRES:
+// the cached eD2K count plus what the meta searcher counts toward it. Counts() keeps
+// returning the eD2K figure alone, so the dashboard can show both.
+func (s *ServerRuntime) AdvertisedFiles() int {
+	_, files := s.counters.Counts()
+	return s.advertisedFiles(files)
 }
 
 // metaSearchFor reports whether a requester gets meta rows. capable is whether it
@@ -91,4 +105,16 @@ func udpSearchFlags(tags []NamedTag) uint32 {
 		return 0
 	}
 	return 0
+}
+
+// advertisedFiles adds the meta file count to an eD2K file count, clamped to the
+// uint32 both status packets carry. Clients only display the figure, except that
+// eMule's automatic search type prefers the server over Kad on a large server with
+// more than 5M files (docs/meta-search.md).
+func (s *ServerRuntime) advertisedFiles(ed2kFiles int) int {
+	total := uint64(max(ed2kFiles, 0))
+	if s.meta != nil {
+		total += uint64(max(s.meta.AdvertisedFiles(), 0))
+	}
+	return int(min(total, math.MaxUint32))
 }

@@ -1,0 +1,15 @@
+{{define "register"}}<div class="card">
+<form method="post" action="/account/register">
+{{.CSRF}}
+<label for="username">{{call .T "ui.username"}}</label>
+<input id="username" name="username" autocomplete="username" required minlength="3" maxlength="32" value="{{.Username}}">
+<label for="email">{{call .T "ui.email_optional"}}</label>
+<input id="email" name="email" type="email" autocomplete="email" maxlength="254" value="{{.Email}}">
+<label for="password">{{call .T "ui.password"}}</label>
+<input id="password" name="password" type="password" autocomplete="new-password" required minlength="{{.MinPassword}}">
+<label for="password2">{{call .T "ui.password_confirm"}}</label>
+<input id="password2" name="password2" type="password" autocomplete="new-password" required minlength="{{.MinPassword}}">
+<button type="submit">{{call .T "ui.register"}}</button>
+</form>
+</div>
+<p class="muted"><a href="/account/login">{{call .T "ui.have_account"}}</a></p>{{end}}

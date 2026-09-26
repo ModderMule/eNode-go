@@ -495,6 +495,12 @@ func tagName(code uint8) string {
 		return "yourip"
 	case TagIPv6Status:
 		return "ipv6status"
+	case TagMetaAPI:
+		return "metaapi"
+	case TagMetaAPIVersion:
+		return "metaapiver"
+	case TagMetaAPIFingerprint:
+		return "metaapifp"
 	default:
 		return fmt.Sprintf("0x%x", code)
 	}

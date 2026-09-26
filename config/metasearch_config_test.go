@@ -42,6 +42,9 @@ func TestMetaSearchDefaults(t *testing.T) {
 		m.Torrent.MaxResults != 50 || m.Torrent.MaxUDPResults != 10 || m.Torrent.Feed.MaxRows != 250000 {
 		t.Fatalf("torrent defaults %+v", m.Torrent)
 	}
+	if m.Torrent.CountInServerStatus || m.Usenet.CountInServerStatus {
+		t.Fatal("countInServerStatus must be off by default")
+	}
 	if m.Cache.MaxEntries != 1000 || m.Cache.MaxRowsPerEntry != 100 || m.Cache.TTLSeconds != 600 {
 		t.Fatalf("cache defaults %+v", m.Cache)
 	}

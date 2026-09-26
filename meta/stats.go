@@ -1,0 +1,246 @@
+package meta
+
+import (
+	"context"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"enode/logging"
+
+	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
+)
+
+// defaultInfoInterval is how often each daemon's GetInfo is polled. The figures feed
+// the admin dashboard and, with countInServerStatus, the advertised file total; both
+// are display-only, and GetInfo makes the daemon count its catalogue, so once a
+// minute is plenty.
+const defaultInfoInterval = time.Minute
+
+// infoTimeout bounds one GetInfo call.
+const infoTimeout = 5 * time.Second
+
+// maxStatusFiles caps one network's contribution to the status file total, so the
+// int conversion cannot overflow on a 32-bit build. The wire field is a uint32 and
+// the ed2k side clamps the sum.
+const maxStatusFiles = 1<<31 - 1
+
+// NetworkStats is one network's figures for the admin dashboard: its configuration,
+// what its daemon last reported, what the feed holds, and counters since start.
+type NetworkStats struct {
+	Network             string
+	URL                 string
+	Prefix              string
+	LiveSearch          bool
+	FeedEnabled         bool
+	CountInServerStatus bool
+
+	// Reachable is whether the last GetInfo succeeded; InfoAt is when one last did.
+	// The daemon figures below are from that call and are kept across a failure.
+	Reachable bool
+	LastError string
+	InfoAt    time.Time
+	// Down is whether live searches are paused after an answer that will not change
+	// between searches (unavailable, unimplemented, unauthenticated).
+	Down bool
+
+	Daemon          string
+	Version         string
+	Indexer         string
+	SearchAvailable bool
+	Catalogued      uint64
+	Published       uint64
+	Files           uint64
+	LastSeq         uint64
+
+	FeedReleases int
+	FeedRows     int
+	FeedCursor   uint64
+	FeedCaughtUp bool
+
+	SearchesTCP  uint64
+	SearchesUDP  uint64
+	RowsServed   uint64
+	LiveCalls    uint64
+	LiveErrors   uint64
+	LiveTimeouts uint64
+	CacheHits    uint64
+	CacheMisses  uint64
+	// UDPSkipped counts UDP searches that made no live call because every
+	// udpMaxConcurrent slot was taken.
+	UDPSkipped uint64
+
+	// Counted is what this network adds to the file total in the server status: 0
+	// unless CountInServerStatus is set.
+	Counted int
+}
+
+// Stats returns every enabled network's figures, in configuration order.
+func (s *Searcher) Stats() []NetworkStats {
+	out := make([]NetworkStats, 0, len(s.sources))
+	for _, src := range s.sources {
+		out = append(out, src.stats())
+	}
+	return out
+}
+
+// AdvertisedFiles is the number of files the networks with countInServerStatus add
+// to the file total in OP_SERVERSTATUS and OP_GLOBSERVSTATRES. It reads only what
+// the info poller and the feeds already hold, so the status path never waits on a
+// daemon.
+func (s *Searcher) AdvertisedFiles() int {
+	total := 0
+	for _, src := range s.sources {
+		if src.countInStatus {
+			total += src.filesForStatus()
+		}
+	}
+	return total
+}
+
+// CacheEntries reports how many queries the shared result cache holds; 0 when the
+// cache is off.
+func (s *Searcher) CacheEntries() int {
+	if s.cache == nil {
+		return 0
+	}
+	return s.cache.Len()
+}
+
+// sourceCounters are one network's search counters since start.
+type sourceCounters struct {
+	searchesTCP  atomic.Uint64
+	searchesUDP  atomic.Uint64
+	rowsServed   atomic.Uint64
+	liveCalls    atomic.Uint64
+	liveErrors   atomic.Uint64
+	liveTimeouts atomic.Uint64
+	cacheHits    atomic.Uint64
+	cacheMisses  atomic.Uint64
+	udpSkipped   atomic.Uint64
+}
+
+// daemonInfo is the poller's view of one daemon. info survives a failed poll so the
+// dashboard keeps the last known figures.
+type daemonInfo struct {
+	mu        sync.Mutex
+	info      *metav1.GetInfoResponse
+	at        time.Time
+	reachable bool
+	lastErr   string
+	// polled is set after the first poll, so a daemon that is down at start is
+	// reported once as a warning rather than only at debug level.
+	polled bool
+}
+
+// pollInfo calls GetInfo at once and then every interval until ctx ends.
+func (src *source) pollInfo(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		src.refreshInfo(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (src *source) refreshInfo(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, infoTimeout)
+	defer cancel()
+	resp, err := src.client.GetInfo(ctx, &metav1.GetInfoRequest{})
+	if parent.Err() != nil {
+		// The process is stopping; that says nothing about the daemon.
+		return
+	}
+
+	d := &src.daemon
+	d.mu.Lock()
+	wasReachable, first := d.reachable, !d.polled
+	d.polled = true
+	if err != nil {
+		d.reachable = false
+		d.lastErr = err.Error()
+	} else {
+		d.info = resp
+		d.at = time.Now()
+		d.reachable = true
+		d.lastErr = ""
+	}
+	d.mu.Unlock()
+
+	switch {
+	case err != nil && wasReachable:
+		logging.Warnf("meta %s: GetInfo failed, keeping the last figures: %v", src.network, err)
+	case err != nil && first:
+		logging.Warnf("meta %s: daemon not reachable at %s: %v", src.network, src.url, err)
+	case err != nil:
+		logging.Debugf("meta %s: GetInfo failed: %v", src.network, err)
+	case !wasReachable:
+		logging.Infof("meta %s: daemon %s %s, %d releases / %d files catalogued, %d published, search available=%t",
+			src.network, resp.GetDaemon(), resp.GetVersion(), resp.GetCatalogued(), resp.GetFiles(),
+			resp.GetPublished(), resp.GetSearchAvailable())
+	}
+}
+
+// filesForStatus is what this network counts toward the server's file total: with
+// live search the daemon's whole catalogue is reachable, so its GetInfo file count;
+// without it only the feed answers, so the rows the feed holds.
+func (src *source) filesForStatus() int {
+	if src.live {
+		src.daemon.mu.Lock()
+		defer src.daemon.mu.Unlock()
+		return int(min(src.daemon.info.GetFiles(), uint64(maxStatusFiles)))
+	}
+	if src.feed != nil {
+		return src.feed.Rows()
+	}
+	return 0
+}
+
+func (src *source) stats() NetworkStats {
+	st := NetworkStats{
+		Network:             src.network,
+		URL:                 src.url,
+		Prefix:              src.prefix,
+		LiveSearch:          src.live,
+		FeedEnabled:         src.feed != nil,
+		CountInServerStatus: src.countInStatus,
+		Down:                src.isDown(),
+		SearchesTCP:         src.counters.searchesTCP.Load(),
+		SearchesUDP:         src.counters.searchesUDP.Load(),
+		RowsServed:          src.counters.rowsServed.Load(),
+		LiveCalls:           src.counters.liveCalls.Load(),
+		LiveErrors:          src.counters.liveErrors.Load(),
+		LiveTimeouts:        src.counters.liveTimeouts.Load(),
+		CacheHits:           src.counters.cacheHits.Load(),
+		CacheMisses:         src.counters.cacheMisses.Load(),
+		UDPSkipped:          src.counters.udpSkipped.Load(),
+	}
+
+	src.daemon.mu.Lock()
+	info := src.daemon.info
+	st.Reachable = src.daemon.reachable
+	st.LastError = src.daemon.lastErr
+	st.InfoAt = src.daemon.at
+	src.daemon.mu.Unlock()
+	st.Daemon = info.GetDaemon()
+	st.Version = info.GetVersion()
+	st.Indexer = info.GetIndexer()
+	st.SearchAvailable = info.GetSearchAvailable()
+	st.Catalogued = info.GetCatalogued()
+	st.Published = info.GetPublished()
+	st.Files = info.GetFiles()
+	st.LastSeq = info.GetLastSeq()
+
+	if src.feed != nil {
+		fs := src.feed.Stats()
+		st.FeedReleases, st.FeedRows, st.FeedCursor, st.FeedCaughtUp = fs.Releases, fs.Rows, fs.Cursor, fs.CaughtUp
+	}
+	if src.countInStatus {
+		st.Counted = src.filesForStatus()
+	}
+	return st
+}

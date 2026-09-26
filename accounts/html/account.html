@@ -1,0 +1,20 @@
+{{define "account"}}<div class="card">
+<table>
+<tr><td class="k">{{call .T "ui.username"}}</td><td>{{.Username}}</td></tr>
+<tr><td class="k">{{call .T "ui.state"}}</td><td class="{{if .Active}}ok{{else}}err{{end}}">{{call .T .StateKey}}</td></tr>
+<tr><td class="k">{{call .T "ui.access_until"}}</td><td>{{if .AccessUntil}}{{.AccessUntil}}{{else}}{{call .T "ui.no_expiry"}}{{end}}</td></tr>
+</table>
+</div>
+{{if .Pending}}
+<h2>{{call .T "ui.open_steps"}}</h2>
+<div class="card"><ul class="steps">
+{{range .Pending}}<li><span><strong>{{.Title}}</strong><br><span class="muted">{{.Message}}</span></span><a class="button" style="margin:0" href="{{.Path}}">{{call $.T "ui.continue"}}</a></li>
+{{end}}</ul></div>
+{{end}}
+{{if .Renewable}}
+<h2>{{call .T "ui.renew"}}</h2>
+<div class="card"><ul class="steps">
+{{range .Renewable}}<li><strong>{{.Title}}</strong><a class="button" style="margin:0" href="{{.Path}}">{{call $.T "ui.renew"}}</a></li>
+{{end}}</ul></div>
+{{end}}
+<p class="muted">{{call .T "ui.client_hint"}}</p>{{end}}

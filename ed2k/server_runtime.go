@@ -57,6 +57,8 @@ type TCPRuntimeConfig struct {
 	// NatRendezvousPort is advertised as the TagNatPort (0x9d) tag in OP_SERVERIDENT
 	// when server-independent rendezvous is on. Zero omits the tag.
 	NatRendezvousPort uint16
+	// MetaAPI is advertised in OP_SERVERIDENT when the Meta API is on.
+	MetaAPI MetaAPIAdvert
 	// SoftFileLimit and HardFileLimit cap how many files one session may publish.
 	// Past the soft limit the excess is ignored and the client is warned once; past
 	// the hard limit it is told why and disconnected. Zero means unlimited. Counted
@@ -1544,7 +1546,7 @@ func (s *ServerRuntime) advertisableServers() []storage.Server {
 
 func (c *tcpClient) sendServerStatus() {
 	clients, files := c.server.counters.Counts()
-	packet, err := BuildServerStatusPacket(clients, files)
+	packet, err := BuildServerStatusPacket(clients, c.server.advertisedFiles(files))
 	if err != nil {
 		return
 	}
@@ -1583,6 +1585,7 @@ func (c *tcpClient) sendServerIdent() {
 		NatPort:          c.server.TCP.NatRendezvousPort,
 		ClientIPv6:       clientV6,
 		ClientIPv6Status: v6Status,
+		MetaAPI:          c.server.TCP.MetaAPI,
 	})
 	if err != nil {
 		return
@@ -2254,7 +2257,7 @@ func (s *ServerRuntime) buildStatRes(challenge uint32, udpKey uint32, remote *ne
 		SoftFiles:      s.UDP.SoftFiles,
 		HardFiles:      s.UDP.HardFiles,
 		ObservedIP:     observed,
-	}, clients, files, int(s.LowIDs.Count()))
+	}, clients, s.advertisedFiles(files), int(s.LowIDs.Count()))
 }
 
 // udpCryptPingReply answers a server-UDP crypt-ping (see the call site in

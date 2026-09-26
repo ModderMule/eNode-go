@@ -239,6 +239,13 @@ func run(ctx context.Context, configPath string) error {
 		logging.Infof("advertising server IP %s (address=%q is not routable)", advertisedIP, cfg.Address)
 	}
 
+	// The client-facing Meta API, built before the runtime so OP_SERVERIDENT can
+	// advertise it; its listeners start below. See docs/meta-api.md.
+	metaAPI, err := buildMetaAPI(ctx, cfg, engine, metaSearcher, advertisedIP)
+	if err != nil {
+		return fmt.Errorf("meta api: %w", err)
+	}
+
 	serverHash := ed2k.MD5([]byte(fmt.Sprintf("%s%d", serverIdentitySeed(advertisedIP, cfg.Address), cfg.TCP.Port)))
 
 	runtime := ed2k.NewServerRuntime(
@@ -266,6 +273,7 @@ func run(ctx context.Context, configPath string) error {
 			ProbeIPv6:         dualStack && cfg.IPv6.ProbeReachabilityOrDefault(),
 			ServerIPv6:        serverIPv6,
 			NatRendezvousPort: natRendezvousPort,
+			MetaAPI:           metaAPI.advertisement(),
 			SoftFileLimit:     cfg.Files.SoftLimitOrDefault(),
 			HardFileLimit:     cfg.Files.HardLimitOrDefault(),
 		},
@@ -339,6 +347,14 @@ func run(ctx context.Context, configPath string) error {
 			metaSearcher.Networks(), cfg.MetaSearch.AdvertiseToLegacyClientsOrDefault(), cfg.MetaSearch.Cache.Enabled)
 	}
 
+	if metaAPI != nil {
+		stopMetaAPI, err := metaAPI.start(ctx)
+		if err != nil {
+			return fmt.Errorf("meta api: %w", err)
+		}
+		defer stopMetaAPI()
+	}
+
 	// Local admin status dashboard. Default on and bound to loopback; a bind
 	// failure is fatal because the operator asked for it. Static server facts are
 	// captured once; the live counters come from a snapshot read per request.
@@ -353,7 +369,7 @@ func run(ctx context.Context, configPath string) error {
 			natPort = cfg.NAT.Port
 		}
 		adminSrv := admin.New(
-			admin.Config{BindIP: cfg.Admin.BindIP, Port: cfg.Admin.Port},
+			admin.Config{BindIP: cfg.Admin.BindIP, Port: cfg.Admin.Port, Username: cfg.Admin.Username, Password: cfg.Admin.Password},
 			admin.StaticInfo{
 				Name:              cfg.Name,
 				Description:       cfg.Description,
@@ -375,6 +391,7 @@ func run(ctx context.Context, configPath string) error {
 				// return zero values when the subsystem is off, so neither needs a branch.
 				gossip := gossipHandler.Stats()
 				blockedIP, blockedGeo := accessFilter.Stats()
+				metaCacheEntries, metaStats := adminMetaStats(metaSearcher)
 				return admin.LiveStats{
 					Clients: clients,
 					Files:   files,
@@ -390,16 +407,24 @@ func run(ctx context.Context, configPath string) error {
 					GossipAdmitted:   gossip.Admitted,
 					FilterBlockedIP:  blockedIP,
 					FilterBlockedGeo: blockedGeo,
+					// Files stays the eD2K count; this is what clients are sent.
+					AdvertisedFiles:  runtime.AdvertisedFiles(),
+					MetaCacheEntries: metaCacheEntries,
+					Meta:             metaStats,
+					MetaAPI:          metaAPI.adminStats(),
 				}
 			},
 		)
+		if metaAPI != nil && metaAPI.accounts != nil {
+			adminSrv.SetAccounts(accountAdmin{svc: metaAPI.accounts})
+		}
 		if err := adminSrv.Start(); err != nil {
 			return fmt.Errorf("admin dashboard failed to bind %s:%d: %w", cfg.Admin.BindIP, cfg.Admin.Port, err)
 		}
 		defer adminSrv.Close()
 		logging.Infof("admin dashboard: http://%s:%d/", adminDisplayHost(cfg.Admin.BindIP), cfg.Admin.Port)
-		if !adminBindIsLoopback(cfg.Admin.BindIP) {
-			logging.Warnf("admin dashboard bound to %s: it has no authentication and is reachable off-box", cfg.Admin.BindIP)
+		if !adminBindIsLoopback(cfg.Admin.BindIP) && cfg.Admin.Username == "" {
+			logging.Warnf("admin dashboard bound to %s without admin.username/password: off-box clients see the status page (never accounts)", cfg.Admin.BindIP)
 		}
 	} else {
 		logging.Infof("admin dashboard: disabled")
@@ -916,4 +941,53 @@ func warnMetaTokens(c config.MetaSearchConfig) {
 		logging.Warnf("metaSearch.%s.url %s is not loopback but no token is set; the daemon will refuse every call",
 			n.name, n.cfg.URL)
 	}
+}
+
+// adminMetaStats maps the meta searcher's figures to the dashboard's own type, which
+// keeps package admin free of a meta import. With meta search off it returns an empty
+// list, so the page hides the section.
+func adminMetaStats(s *meta.Searcher) (cacheEntries int, out []admin.MetaNetworkStats) {
+	out = []admin.MetaNetworkStats{}
+	if s == nil {
+		return 0, out
+	}
+	for _, st := range s.Stats() {
+		infoAt := ""
+		if !st.InfoAt.IsZero() {
+			infoAt = st.InfoAt.Format(time.RFC3339)
+		}
+		out = append(out, admin.MetaNetworkStats{
+			Network:             st.Network,
+			URL:                 st.URL,
+			LiveSearch:          st.LiveSearch,
+			FeedEnabled:         st.FeedEnabled,
+			CountInServerStatus: st.CountInServerStatus,
+			Reachable:           st.Reachable,
+			LastError:           st.LastError,
+			InfoAt:              infoAt,
+			Down:                st.Down,
+			Daemon:              st.Daemon,
+			Version:             st.Version,
+			SearchAvailable:     st.SearchAvailable,
+			Catalogued:          st.Catalogued,
+			Published:           st.Published,
+			Files:               st.Files,
+			LastSeq:             st.LastSeq,
+			FeedReleases:        st.FeedReleases,
+			FeedRows:            st.FeedRows,
+			FeedCursor:          st.FeedCursor,
+			FeedCaughtUp:        st.FeedCaughtUp,
+			SearchesTCP:         st.SearchesTCP,
+			SearchesUDP:         st.SearchesUDP,
+			RowsServed:          st.RowsServed,
+			LiveCalls:           st.LiveCalls,
+			LiveErrors:          st.LiveErrors,
+			LiveTimeouts:        st.LiveTimeouts,
+			CacheHits:           st.CacheHits,
+			CacheMisses:         st.CacheMisses,
+			UDPSkipped:          st.UDPSkipped,
+			Counted:             st.Counted,
+		})
+	}
+	return s.CacheEntries(), out
 }

@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"encoding/binary"
 	"fmt"
+	"math"
+	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"enode/storage"
 
@@ -19,6 +23,7 @@ type fakeMeta struct {
 	mu    sync.Mutex
 	rows  []storage.File
 	calls []bool // the udp argument of each call
+	files int    // what AdvertisedFiles reports
 }
 
 func (f *fakeMeta) Search(_ context.Context, _ *storage.SearchExpr, udp bool) []storage.File {
@@ -27,6 +32,8 @@ func (f *fakeMeta) Search(_ context.Context, _ *storage.SearchExpr, udp bool) []
 	f.calls = append(f.calls, udp)
 	return f.rows
 }
+
+func (f *fakeMeta) AdvertisedFiles() int { return f.files }
 
 func (f *fakeMeta) callCount() int {
 	f.mu.Lock()
@@ -370,4 +377,82 @@ func TestGetSourcesOnMetaHashIsEmpty(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("a meta hash returned %d sources", len(got))
 	}
+}
+
+// fixedFilesEngine reports a fixed eD2K file count, so a status test can tell the
+// eD2K share of the advertised total from the meta share.
+type fixedFilesEngine struct {
+	storage.Engine
+	files int
+}
+
+func (e fixedFilesEngine) FilesCount() int { return e.files }
+
+// TestServerStatusAddsMetaFiles covers countInServerStatus on the wire: both status
+// packets carry eD2K + meta files, Counts() keeps the eD2K figure for the dashboard,
+// the sum is clamped to the uint32 field, and no searcher changes nothing.
+func TestServerStatusAddsMetaFiles(t *testing.T) {
+	cases := []struct {
+		name      string
+		meta      *fakeMeta
+		ed2kFiles int
+		want      uint32
+	}{
+		{"no searcher", nil, 700, 700},
+		{"searcher counting nothing", &fakeMeta{}, 700, 700},
+		{"meta files added", &fakeMeta{files: 1234}, 700, 1934},
+		{"clamped to uint32", &fakeMeta{files: math.MaxUint32}, 700, math.MaxUint32},
+	}
+	for _, tc := range cases {
+		rt := NewServerRuntime(TCPRuntimeConfig{}, UDPRuntimeConfig{},
+			fixedFilesEngine{Engine: storage.NewMemoryEngine(), files: tc.ed2kFiles})
+		if tc.meta != nil {
+			rt.SetMetaSearcher(tc.meta, true)
+		}
+
+		packet, err := rt.buildStatRes(0x1122, 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, b := payloadAfterOpcode(t, packet)
+		udp, err := ParseGlobServStatRes(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		tcp := readServerStatusFiles(t, rt)
+		_, dashboard := rt.Counts()
+		t.Logf("input: %s, ed2k files=%d; output: OP_GLOBSERVSTATRES files=%d OP_SERVERSTATUS files=%d Counts()=%d AdvertisedFiles()=%d",
+			tc.name, tc.ed2kFiles, udp.Files, tcp, dashboard, rt.AdvertisedFiles())
+
+		if udp.Files != tc.want || tcp != tc.want || uint32(rt.AdvertisedFiles()) != tc.want {
+			t.Errorf("%s: udp=%d tcp=%d advertised=%d, want %d", tc.name, udp.Files, tcp, rt.AdvertisedFiles(), tc.want)
+		}
+		if dashboard != tc.ed2kFiles {
+			t.Errorf("%s: Counts() files=%d, want the eD2K figure %d alone", tc.name, dashboard, tc.ed2kFiles)
+		}
+	}
+}
+
+// readServerStatusFiles sends one OP_SERVERSTATUS over a pipe and returns its file count.
+func readServerStatusFiles(t *testing.T, rt *ServerRuntime) uint32 {
+	t.Helper()
+	server, client := net.Pipe()
+	defer client.Close()
+	c := newTCPClient(rt, server, false)
+	got := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 64)
+		_ = client.SetReadDeadline(time.Now().Add(time.Second))
+		n, _ := client.Read(buf)
+		got <- buf[:n]
+	}()
+	c.sendServerStatus()
+	server.Close()
+	raw := <-got
+	// protocol, uint32 length, opcode, users, files
+	if len(raw) < 14 || raw[5] != OpServerStatus {
+		t.Fatalf("not an OP_SERVERSTATUS: % x", raw)
+	}
+	return binary.LittleEndian.Uint32(raw[10:14])
 }

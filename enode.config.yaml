@@ -165,6 +165,10 @@ metaSearch:
     udpSearchTimeoutMs: 800        # UDP: shorter, it holds a shared worker
     maxResults: 50                 # rows merged into one TCP search answer
     maxUDPResults: 10              # rows per UDP answer (one datagram each); max 50
+    # Add this network's catalogue files to the file total sent in OP_SERVERSTATUS
+    # and OP_GLOBSERVSTATRES: the daemon's file count with liveSearch on, the feed's
+    # rows held with it off. Off by default: eD2K clients then see eD2K files only.
+    countInServerStatus: false
     # Subscribe to the daemon's published feed and match it in memory, so those
     # releases need no round trip. Restarts from a snapshot on every start.
     feed:
@@ -182,6 +186,7 @@ metaSearch:
     udpSearchTimeoutMs: 800
     maxResults: 50
     maxUDPResults: 10
+    countInServerStatus: false
     feed:
       enabled: false
       maxRows: 250000
@@ -194,6 +199,94 @@ metaSearch:
     maxEntries: 1000               # distinct queries kept, least recently used evicted
     maxRowsPerEntry: 100
     ttlSeconds: 600
+
+# Client-facing Meta API (enode.meta.v1 MetaApi + AccountApi): how eMuleQt downloads
+# the .torrent / .nzb behind a torrent or Usenet search row, and optionally logs in
+# first. Off by default. Advertised to clients in OP_SERVERIDENT (ST_META_API 0x9E).
+# See docs/meta-api.md.
+metaApi:
+  enabled: false
+  # Base URL sent to clients as ST_META_API. "" derives it from the advertised server
+  # IP and the gRPC port (or the HTTP port when gRPC is off).
+  advertiseURL: ""
+  # Base URL of the HTTP endpoint as reported by GetCaps. "" derives it likewise.
+  httpAdvertiseURL: ""
+  # Accounts without tls send passwords in clear text. Only set this when a TLS
+  # reverse proxy terminates in front of both listeners.
+  allowInsecureAuth: false
+  # Take client addresses (rate limits, logs) from X-Forwarded-For. Only behind a
+  # reverse proxy that sets it; otherwise a client can dodge every per-IP limit.
+  trustForwardedFor: false
+  tls:
+    certFile: ""                   # PEM; with keyFile, both listeners serve TLS
+    keyFile: ""
+    # Send the certificate's SPKI pin as ST_META_API_FP (0x9C), so a client can trust
+    # a self-signed certificate on a bare-IP server.
+    advertiseFingerprint: false
+  grpc:
+    enabled: true                  # gRPC + gRPC-Web; on whenever the API is
+    listen: "0.0.0.0:4671"
+  http:
+    # Plain HTTP endpoint: Connect protocol (proto or JSON POST), GET /caps and the raw
+    # GET /meta/v1/{hash}?id={catalog_id}. Off by default. When accounts are enabled
+    # this listener also serves the account website (/account), even with this off.
+    enabled: false
+    listen: "0.0.0.0:4672"
+  metafileCache:
+    maxBytes: 268435456            # 256 MiB of verified metafiles, least recently used evicted
+    ttlSeconds: 3600
+    negativeTtlSeconds: 60         # how long "not found" / "failed verification" is remembered
+  fetchTimeoutMs: 3000             # one FetchMetaFile call to a catalogue daemon
+  maxMetafileBytes: 16777216       # larger metafiles are refused
+  rateLimit:
+    perIPPerMinute: 30             # metafile downloads per client address; 0 = unlimited
+    perAccountPerMinute: 120       # per logged-in account; 0 = unlimited
+  # Optional username/password login. Off = the API is public. On = a user registers
+  # on this server's website first (publicURL + /account/register) and the eMule
+  # client logs in with that username and password.
+  accounts:
+    enabled: false
+    publicURL: ""                  # the website as users reach it, e.g. https://enode.example.org
+    allowRegistration: true
+    sessionTtlHours: 720
+    minPasswordLength: 8
+    pollSeconds: 300               # background check of open steps (unconfirmed payments)
+    # Registration steps, in order, beyond username and password. Each has an id (in
+    # URLs), a type and enabled; the rest is the type's own. No enabled step means a
+    # new account is active at once. More step types and payment providers can be
+    # added later without changing the others.
+    steps:
+      # Paid access through a WooCommerce shop: the user picks a plan, is sent to the
+      # shop to pay, and the server reads the order status through the shop's REST
+      # API. Needs the mysql or mongodb engine (the memory engine loses accounts).
+      - id: payment
+        type: payment
+        enabled: false
+        renewable: true            # reopen the step when the paid period ends
+        # Keep re-checking a confirmed payment for this many days (hourly, or at once on
+        # a webhook) and take its access back if the shop refunds or cancels it. 0 = off.
+        refundWindowDays: 0
+        plans:
+          - id: monthly
+            title: "30 days"
+            periodDays: 30         # 0 = access never expires
+            providerRefs:
+              woocommerce: "0"     # the WooCommerce product id of this plan
+        providers:
+          woocommerce:
+            enabled: true
+            storeURL: ""           # the shop's home URL, e.g. https://shop.example.org/
+            # A REST API key with read/write access (WooCommerce > Settings > Advanced >
+            # REST API). Put the real values in enode.local.yaml, which is gitignored.
+            consumerKey: ""
+            consumerSecret: ""
+            # Secret of an order.updated webhook pointed at
+            # {publicURL}/account/step/payment/hook/woocommerce. "" disables it; the
+            # poller still confirms every payment.
+            webhookSecret: ""
+            allowInsecureStore: false  # permit a plain-HTTP shop that is not on loopback
+            title: "Shop checkout"
+            timeoutSeconds: 15
 
 natTraversal:
   enabled: true
@@ -234,6 +327,11 @@ admin:
   enabled: true
   bindIP: "127.0.0.1"   # loopback only; "0.0.0.0" / "::" exposes it on all interfaces
   port: 4560
+  # Basic-auth credentials for clients that are not on loopback (a loopback client never
+  # needs them; one arriving through a reverse proxy does). Without them such a client
+  # sees the status page only. Put real values in enode.local.yaml.
+  username: ""
+  password: ""
 
 storage:
   engine: memory

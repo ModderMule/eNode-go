@@ -20,6 +20,8 @@ admin:
   enabled: true          # default on (an absent block still enables it)
   bindIP: "127.0.0.1"    # loopback only; "0.0.0.0" / "::" exposes it on all interfaces
   port: 4560             # HTTP port
+  username: ""           # Basic-auth credentials for non-loopback clients;
+  password: ""           # set both or neither (see "Security model")
 ```
 
 Defaults: **enabled**, bound to **127.0.0.1**, port **4560** (chosen to stay clear of
@@ -33,8 +35,8 @@ INFO  admin dashboard: http://127.0.0.1:4560/
 INFO  admin dashboard: disabled
 ```
 
-If `bindIP` is set to a non-loopback address, the server additionally logs a warning
-that the page is reachable off-box.
+If `bindIP` is set to a non-loopback address and no credentials are configured, the
+server additionally logs a warning that off-box clients can see the status page.
 
 ## Endpoints
 
@@ -42,6 +44,25 @@ that the page is reachable off-box.
 |---------------|--------|----------------------------------------------------------------|
 | `/`           | GET    | The HTML dashboard (static server facts rendered server-side). |
 | `/stats.json` | GET    | The live counters as JSON.                                     |
+| `/accounts`   | GET    | Meta API account administration page (only with accounts on).  |
+| `/api/accounts?q=&state=&offset=` | GET | Account list as JSON, 50 per page, newest first. |
+| `/api/accounts/{id}` | GET | One account with its registration steps and payments.    |
+| `/api/accounts/{id}/{action}` | POST | `disable`, `enable`, `adjust` (`{"days": ±N}`), `skip-step` (`{"step": "payment"}`). Returns the updated account. |
+
+### Account administration
+
+With Meta API accounts enabled (see [meta-api.md](meta-api.md)) the dashboard links to
+`/accounts`: search by username or email, filter by state, and open an account to see
+its steps and payments (including credited and revoked times). Actions:
+
+- **Disable / Enable.** A disabled account is refused by the API whatever its steps
+  or paid period; enabling settles its state from its steps again.
+- **Move access by days.** Extends (counted from the later of now and the current end)
+  or shortens the paid period. Not offered for an account whose access does not expire.
+- **Skip step.** Closes an open registration step without it being done, e.g. to let a
+  user in without paying.
+
+Every action is logged with the operator's address.
 
 The page renders only the static facts (name, description, version, storage engine,
 ports, feature flags). Every **dynamic** value is left as an empty placeholder that
@@ -69,14 +90,24 @@ so a dashboard left open polling every few seconds cannot turn into a flood of
 
 ## Security model
 
-The dashboard is **loopback-only by default** and has **no authentication**. This is
-intentional for the common case (an operator inspecting a server from the same
-machine, e.g. over an SSH tunnel). Binding it to a non-loopback address publishes an
-unauthenticated status page — only do so behind your own access control (a reverse
-proxy with auth, a firewall, a VPN).
+The dashboard is **loopback-only by default**. Access rules (`admin/auth.go`):
 
-> ToDo (tracked in `admin.New`): add an optional token / basic-auth gate before a
-> non-loopback bind is documented as a supported configuration.
+| Client | Credentials configured | Status page, `/stats.json` | Accounts pages and API |
+|---|---|---|---|
+| loopback (and no proxy header) | either | yes, no login | yes, no login |
+| anyone else | no | yes (as before) | **403** |
+| anyone else | yes | Basic auth | Basic auth |
+
+- A request that reached loopback **through a proxy** (`X-Forwarded-For`, `Forwarded`,
+  `X-Real-IP`, `X-Forwarded-Host`) is *not* treated as local, so a reverse proxy on the
+  same machine cannot open the dashboard to the internet by accident.
+- Non-loopback requests are rate-limited (120 per minute per address) and failed logins
+  are logged. Credentials are compared in constant time. Basic auth sends the password
+  with every request: expose the dashboard only over TLS (a reverse proxy, or an SSH
+  tunnel).
+- State-changing requests must carry `X-Enode-Admin: 1` and, when the browser sends an
+  `Origin`, come from the dashboard's own origin. A cross-site page cannot set that
+  header, so even the login-free loopback case is safe from CSRF.
 
 ## Quick check
 

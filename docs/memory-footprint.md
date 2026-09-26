@@ -27,7 +27,7 @@ plus 50% headroom for the garbage collector (§6).
 
 The file cost applies to the `memory` storage engine only. With `mysql` or
 `mongodb` the index lives in the database and the Go process pays only the session
-cost — see §7.
+cost — see §7, and §7.1 for a full 50,000-user MariaDB server spec.
 
 For what those unit costs come to at one concrete server size — and for the per-client
 `softLimit` that decides how large the index gets in the first place — see §4, and
@@ -334,6 +334,92 @@ all. The process then costs:
 So eMule Sunrise's 46,516 users would be **~730 MiB of Go process**, and the 15 GiB of
 index becomes the database's problem, where it is paged rather than resident. That is
 the trade: RAM for query latency.
+
+### 7.1 A 50,000-user server on MariaDB
+
+`storage.engine: mysql`, `dialect: mariadb`, 50,000 online users. The Go-side figures are
+the measured unit costs of §2.3. **The MariaDB figures are arithmetic from the schema in
+[`misc/enode.sql`](../misc/enode.sql), not measured** — load the table and read
+`information_schema.TABLES` (`DATA_LENGTH`, `INDEX_LENGTH`) plus the `FTS_*` auxiliary
+tables before buying hardware on them.
+
+#### eNode-go process
+
+| Item | Size |
+|---|---:|
+| Base | 12 MiB |
+| Sessions: 50,000 × 15.8 KiB | 771 MiB |
+| **Live total** | **~0.8 GiB** |
+| With GC headroom (×1.5, §6) | ~1.2 GiB |
+| `pendingResults` (§8), ~200 KB per paging session | ~1 GB at 10% of users; 9.3 GiB worst case |
+| Meta search, only if enabled (2 feeds × 250k rows × ~1 KB + 1,000 × 100-row query cache) | ~0.6 GB |
+| Kernel socket buffers (outside RSS, §6) | 0.2–0.5 GB |
+
+Provision **2–4 GB** and set `GOMEMLIMIT=3GiB`.
+
+#### MariaDB data
+
+Volume follows files per user, not users. At the network average of **589 files per user**
+(§4.2) and 1.2 sources per distinct file (§3): 29.5 M `sources` rows and 24.5 M `files`
+rows.
+
+| Table | Rows | Bytes/row (row + indexes + page fill) | Size |
+|---|---:|---:|---:|
+| `sources` — clustered row ~160 B (60-char name, empty tag columns), 9 secondary indexes ~250 B, `name_ft` FULLTEXT ~150 B | 29.5 M | ~550 | ~16 GB |
+| `files` — clustered row ~90 B, 4 secondary indexes ~170 B (random-hash inserts leave pages ~50–70% full) | 24.5 M | ~270 | ~6.6 GB |
+| `clients` — online plus not-yet-swept offline rows | 50k–1 M | ~150 | < 0.2 GB |
+| **Total** | | | **~23 GB (20–30 GB)** |
+
+**Size `innodb_buffer_pool_size` to hold all of it — ~28 GB.** Every login re-offers the
+client's whole share, and the `ON DUPLICATE KEY UPDATE` upserts hit random pages of the
+`hash`, `hash_size` and `id_file+id_client` indexes. Unique keys cannot use the change
+buffer, so a pool smaller than the indexes turns most offers into random disk reads.
+
+As with the memory engine, `files.softLimit` is the lever (§4.1). With every user at the
+default 10,000, the same arithmetic gives ~500 M sources and ~417 M files: **~390 GB**,
+which no longer fits a buffer pool on ordinary hardware.
+
+#### Load to plan for (assumptions, not measured)
+
+| Operation | Assumption | Rate |
+|---|---|---:|
+| Logins | 2 h average session | ~7/s |
+| Offers | 589 files per login, 200 per packet | ~21 packets/s, ~4,100 source upserts/s |
+| Searches | 1 per user per 5 min | ~170/s |
+| Source lookups | ~50 downloads per user, re-asked every 20 min | ~2,000/s |
+
+**Throughput is the wall, not RAM.** The only measured load
+([`remote-database.local.md`](remote-database.local.md) §5.4) topped out at ~262
+operations/s on the default 8 connections, p50 ~100 ms, in Docker on a development machine
+— well below the rates above. InnoDB FULLTEXT on ~30 M rows is CPU-heavy for common words,
+and the offer/counter-refresh deadlocks described in that document's §6.1 grow with offer
+rate. Load-test at this scale before committing to hardware.
+
+#### Server specs
+
+Two hosts (recommended):
+
+| | eNode-go host | MariaDB host |
+|---|---|---|
+| CPU | 4 vCPU | 8–16 cores |
+| RAM | 4–8 GB | 48 GB (28 GB pool, per-connection buffers, FTS cache, OS) |
+| Disk | 20 GB (logs) | NVMe RAID1, 250–500 GB, ≥ 20k random IOPS |
+| Network | 1 Gbit port, ~50–100 Mbit/s sustained | private link, RTT < 1 ms (the DSN has no TLS) |
+
+One host: 16 cores, 64 GB RAM, 2 × 1 TB NVMe RAID1, 1 Gbit.
+
+MariaDB settings:
+
+- `innodb_buffer_pool_size=28G`, `innodb_log_file_size=4G`.
+- `innodb_flush_log_at_trx_commit=2` and binlog off unless replicating — the index is
+  rebuilt by clients re-offering, so losing the last second on a crash is acceptable.
+- `max_connections` ≥ 100, with eNode's `storage.mysql.connections` raised from 8 to
+  32–64.
+- `innodb_ft_total_cache_size` 1–2 GB; optionally `innodb_ft_enable_stopword=OFF` (rebuild
+  the index afterwards, see [`database-engines.local.md`](database-engines.local.md)).
+
+eNode-go host OS limits: `ulimit -n` ≥ 131072, `nf_conntrack_max` ≥ 256k if conntrack is
+active, `net.core.somaxconn` 4096, default socket buffer sizes.
 
 ---
 

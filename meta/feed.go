@@ -127,6 +127,21 @@ func (f *Feed) Rows() int {
 	return f.rows
 }
 
+// FeedStats is what a feed holds and where its stream stands.
+type FeedStats struct {
+	Releases int
+	Rows     int
+	Cursor   uint64
+	CaughtUp bool
+}
+
+// Stats reports what the feed holds, for the admin dashboard.
+func (f *Feed) Stats() FeedStats {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return FeedStats{Releases: len(f.releases), Rows: f.rows, Cursor: f.cursor, CaughtUp: f.caughtUp}
+}
+
 // subscribe runs one stream to its end. It reports whether any message arrived, so
 // a stream that worked for a while resets the backoff.
 func (f *Feed) subscribe(ctx context.Context) (bool, error) {

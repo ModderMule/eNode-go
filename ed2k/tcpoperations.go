@@ -30,6 +30,19 @@ type ServerConfig struct {
 	// about this session's IPv6, sent as a TagIPv6Status (0xab) uint8 tag. Zero omits
 	// the tag, which is also how "the server has no verdict" is expressed.
 	ClientIPv6Status uint8
+	// MetaAPI advertises the client-facing Meta API. A zero value omits its tags.
+	MetaAPI MetaAPIAdvert
+}
+
+// MetaAPIAdvert is what OP_SERVERIDENT tells a client about the Meta API.
+type MetaAPIAdvert struct {
+	// URL is the API's base URL, sent as TagMetaAPI (0x9e). Empty omits every tag.
+	URL string
+	// Version is the highest contract major version served, TagMetaAPIVersion (0x9f).
+	Version uint32
+	// Fingerprint is "sha256/<base64>" of the certificate's SPKI, TagMetaAPIFingerprint
+	// (0x9c). Empty omits it.
+	Fingerprint string
 }
 
 type LoginRequest struct {
@@ -391,6 +404,16 @@ func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
 	// backward-compatible tag loop as the IPv6 tag above — a legacy client ignores it.
 	if conf.NatPort != 0 {
 		tags = append(tags, Tag{Type: TypeUint16, Code: TagNatPort, Data: conf.NatPort})
+	}
+	// Meta API discovery (enode.meta.v1). Only when the API is on, so every other
+	// server's packet is unchanged; a legacy client skips the tags like the ones above.
+	if conf.MetaAPI.URL != "" {
+		tags = append(tags,
+			Tag{Type: TypeString, Code: TagMetaAPI, Data: conf.MetaAPI.URL},
+			Tag{Type: TypeUint32, Code: TagMetaAPIVersion, Data: conf.MetaAPI.Version})
+		if conf.MetaAPI.Fingerprint != "" {
+			tags = append(tags, Tag{Type: TypeString, Code: TagMetaAPIFingerprint, Data: conf.MetaAPI.Fingerprint})
+		}
 	}
 	// Per-session reflection tags, appended last so the packet a legacy session
 	// receives stays byte-identical to the pre-reflection server. Both ride the same

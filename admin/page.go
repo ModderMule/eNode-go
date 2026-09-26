@@ -13,8 +13,12 @@ import (
 // (id="clients", …) that the page script fills from /stats.json, so no dynamic
 // value is ever baked into the served HTML.
 //
-//go:embed html/dashboard.html
+//go:embed html/dashboard.html html/accounts.html
 var dashboardFS embed.FS
 
 // pageTemplate is parsed once at startup from the embedded file.
 var pageTemplate = template.Must(template.ParseFS(dashboardFS, "html/dashboard.html"))
+
+// accountsTemplate is the account administration page; like the dashboard it renders
+// static facts only and loads everything else from /api/accounts.
+var accountsTemplate = template.Must(template.ParseFS(dashboardFS, "html/accounts.html"))

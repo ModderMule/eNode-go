@@ -141,6 +141,7 @@ metaSearch:
     udpSearchTimeoutMs: 800
     maxResults: 50
     maxUDPResults: 10
+    countInServerStatus: false      # add this network's files to the server status total
     feed:
       enabled: false
       maxRows: 250000
@@ -163,10 +164,64 @@ The server refuses to start in these cases:
 It logs a warning at startup when an enabled daemon is not on loopback and no token
 is set.
 
+## Server status and the dashboard
+
+### File total
+
+With `metaSearch.<network>.countInServerStatus`, a network's files are added to the
+file total that eD2K clients see in `OP_SERVERSTATUS` and `OP_GLOBSERVSTATRES`. Which
+number is added depends on `liveSearch`:
+
+- **`liveSearch` on:** the daemon's `GetInfo.files`, the number of files its
+  catalogued releases hold. A live search can reach every one of them. eD2K counts
+  files, not releases, and a multi-file release shows up as one search row per file,
+  so the contract carries this count separately from `catalogued`.
+- **`liveSearch` off:** only the feed can answer, so the count is the rows the feed
+  holds.
+
+Each network's `GetInfo` is polled at start and then every minute, with a 5 s
+deadline. The status path reads only the last answer, so a status reply never waits
+on a daemon. If a poll fails, the last figures are kept, so a daemon restart does not
+make the advertised total dip. The sum is clamped to the packets' `uint32`.
+
+The setting is off by default. Clients mostly only display the number: in the
+server list, in network info, and when adding up totals. There is one exception.
+eMule's and eMuleQt's **automatic** search type chooses the server over Kad only when
+all of these hold:
+
+- the server has more than 40 000 users (and fewer than 2 million);
+- it advertises more than 5 000 000 files;
+- the client's server list has fewer than 40 servers.
+
+Counting catalogue files can push a large server past the 5 000 000 line.
+
+### Admin dashboard
+
+The dashboard's Files card shows the eD2K count. When counted networks add to the
+total, a line under it shows the advertised total. When meta search is on, a
+**Torrent / Usenet** section adds one card per network. Each card shows:
+
+- whether the daemon is reachable, or live search is paused after an
+  unavailable/unimplemented/unauthenticated answer (the last error appears on hover);
+- the daemon's name and version;
+- catalogued releases and files, and the published count;
+- the live-search state, and whether the daemon has a search index;
+- feed rows and releases held, and whether the feed has caught up, or how far its
+  cursor lags the daemon's `last_seq`;
+- search counters since start: TCP and UDP searches, rows served, live calls with
+  their errors and timeouts, cache hits against lookups, and UDP searches that made no
+  live call because every `udpMaxConcurrent` slot was taken;
+- what the network adds to the server status file total.
+
+The same figures are in `/stats.json`: `advertisedFiles`, `metaCacheEntries`, and the
+`meta` array.
+
+## Downloading a row
+
+The `.torrent` / `.nzb` behind a row is served by the client-facing Meta API
+(`FetchMetaFile` proxy with verification, `ST_META_API` discovery, optional
+accounts). See [meta-api.md](meta-api.md).
+
 ## Not implemented yet
 
-- The client-facing Meta API that serves `.torrent` / `.nzb` files (`FetchMetaFile`
-  proxy, `ST_META_API` discovery). This is phase 4 of the plan. Until it exists, a
-  capable client can act only on rows that carry a magnet.
 - Persisting feed rows in the MySQL/MongoDB engines. The feed is in memory only.
-- Counting meta rows in the advertised file total, and dashboard counters for them.

@@ -1,0 +1,48 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="{{.Lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>{{.Title}} — {{.ServerName}}</title>
+<style>
+:root{color-scheme:light dark;--bg:#0f1216;--card:#1a1f27;--fg:#e6e9ef;--muted:#8b94a3;--accent:#4ea1ff;--ok:#3ecf8e;--err:#ff6b6b;--line:#2a313c}
+@media (prefers-color-scheme:light){:root{--bg:#f4f6fa;--card:#ffffff;--fg:#1a1f27;--muted:#5c6675;--accent:#1769d1;--ok:#149a63;--err:#c53030;--line:#e2e6ee}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:560px;margin:0 auto;padding:28px 16px 48px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:18px}
+h1{font-size:22px;margin:0}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:24px 0 10px}
+.muted{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}
+.notice{border:1px solid var(--accent);color:var(--accent);border-radius:10px;padding:10px 14px;margin-bottom:16px}
+label{display:block;font-size:13px;color:var(--muted);margin:12px 0 4px}
+input,select{width:100%;padding:9px 11px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}
+button,.button{display:inline-block;margin-top:16px;padding:9px 16px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;font:inherit;font-weight:600;cursor:pointer;text-decoration:none}
+button.link{background:none;border:none;color:var(--accent);padding:0;margin:0;font-weight:400}
+table{width:100%;border-collapse:collapse}
+td,th{padding:8px 10px;border-top:1px solid var(--line);text-align:left;font-weight:400}
+tr:first-child td,tr:first-child th{border-top:none}
+td.k,th{color:var(--muted)}
+.ok{color:var(--ok);font-weight:600}
+.err{color:var(--err);font-weight:600}
+ul.steps{list-style:none;padding:0;margin:0}
+ul.steps li{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line)}
+ul.steps li:first-child{border-top:none}
+a{color:var(--accent)}
+footer{margin-top:24px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<h1>{{.Title}}</h1>
+{{if .LoggedIn}}<form method="post" action="/account/logout">{{.CSRF}}<button class="link" type="submit">{{call .T "ui.logout"}} ({{.Username}})</button></form>{{end}}
+</header>
+{{if .Notice}}<div class="notice">{{.Notice}}</div>{{end}}
+{{.Body}}
+<footer>{{.ServerName}}</footer>
+</div>
+</body>
+</html>{{end}}

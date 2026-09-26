@@ -244,6 +244,16 @@ const (
 	// being published as a v6 source. 0xAB is free across the ST_*, CT_* and OP_*
 	// namespaces in both surveyed C++ trees. See docs/ipv6-client-implementation-spec.md §3a.
 	TagIPv6Status uint8 = 0xab
+	// TagMetaAPI* are the enode.meta.v1 OP_SERVERIDENT discovery tags: where the
+	// client-facing Meta API (docs/meta-api.md) listens, which contract version it
+	// serves, and optionally the SPKI pin of its certificate. Values are the
+	// contract's ST_META_API* (github.com/ModderMule/enodemeta/tags), pinned by a test.
+	// 0x9C/0x9E/0x9F collide with no ST_* or CT_* tag in either surveyed C++ tree
+	// (only with unrelated OP_* opcodes), and eMule's OP_SERVERIDENT tag loop skips
+	// an unknown string or uint32 tag. Emitted only when metaApi.enabled is on.
+	TagMetaAPIFingerprint uint8 = 0x9c
+	TagMetaAPI            uint8 = 0x9e
+	TagMetaAPIVersion     uint8 = 0x9f
 )
 
 // TagMeta* are the FT_META_* search-result tags of the enode.meta.v1 contract, carried

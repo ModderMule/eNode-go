@@ -1,0 +1,26 @@
+{{define "payment"}}<div class="card">
+<form method="post" action="{{.Path}}checkout">
+{{.CSRF}}
+<label for="plan">{{call .T "ui.plan"}}</label>
+<select id="plan" name="plan">
+{{range .Plans}}<option value="{{.ID}}">{{.Title}}{{if .PeriodDays}} — {{.PeriodDays}} {{call $.T "ui.days"}}{{end}}</option>
+{{end}}</select>
+{{if gt (len .Providers) 1}}<label for="provider">{{call .T "ui.provider"}}</label>
+<select id="provider" name="provider">
+{{range .Providers}}<option value="{{.Name}}">{{.Title}}</option>
+{{end}}</select>
+{{else}}{{range .Providers}}<input type="hidden" name="provider" value="{{.Name}}">{{end}}{{end}}
+<button type="submit">{{call .T "ui.pay"}}</button>
+</form>
+</div>
+{{if .Payments}}
+<h2>{{call .T "ui.payments"}}</h2>
+<div class="card">
+<table>
+<tr><th>{{call .T "ui.date"}}</th><th>{{call .T "ui.plan"}}</th><th>{{call .T "ui.status"}}</th></tr>
+{{range .Payments}}<tr><td>{{.Date}}</td><td>{{.Plan}}{{if .Amount}} · {{.Amount}}{{end}}</td><td class="{{.Class}}">{{.Status}}</td></tr>
+{{end}}</table>
+{{if .HasOpen}}<form method="post" action="{{.Path}}refresh">{{.CSRF}}<button type="submit">{{call .T "ui.check_again"}}</button></form>{{end}}
+</div>
+{{end}}
+<p class="muted"><a href="/account">{{call .T "ui.back"}}</a></p>{{end}}

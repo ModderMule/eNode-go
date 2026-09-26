@@ -27,6 +27,13 @@ tr:first-child td{border-top:none}
 td.k{color:var(--muted);width:45%}
 td.v{font-variant-numeric:tabular-nums}
 .on{color:var(--ok);font-weight:600}
+.mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.mcard{padding:0;overflow:hidden}
+.mcard .head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 14px}
+.mcard .name{font-weight:700}
+.mcard table{border:none;border-radius:0}
+.mcard td{padding:7px 14px;font-size:14px}
+.mcard tr:first-child td{border-top:1px solid var(--line)}
 .off{color:var(--muted)}
 footer{margin-top:24px;color:var(--muted);font-size:12px}
 a{color:var(--accent)}
@@ -43,12 +50,23 @@ a{color:var(--accent)}
 
 <div class="grid">
 <div class="card"><div class="label">Clients online</div><div class="value" id="clients">…</div></div>
-<div class="card"><div class="label">Files</div><div class="value" id="files">…</div></div>
+<div class="card"><div class="label">Files</div><div class="value" id="files">…</div><div class="desc" id="filesAdvertised" style="margin:0"></div></div>
 <div class="card"><div class="label">LowID registrations</div><div class="value" id="lowIDs">…</div></div>
 <div class="card"><div class="label">Peer servers</div><div class="value" id="servers">…</div><div class="desc" id="gossip" style="margin:0"></div></div>
 <div class="card"><div class="label">Blocked addresses</div><div class="value" id="blocked">…</div><div class="desc" id="blockedBreak" style="margin:0"></div></div>
 <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">…</div></div>
 </div>
+
+<section id="metaSection" hidden>
+<h2>Torrent / Usenet</h2>
+<p class="desc" id="metaSummary" style="margin:0 0 10px"></p>
+<div class="mgrid" id="metaCards"></div>
+</section>
+
+<section id="metaApiSection" hidden>
+<h2>Meta API{{if .Accounts}} · <a href="/accounts">manage accounts</a>{{end}}</h2>
+<table id="metaApiTable"></table>
+</section>
 
 <h2>Listeners</h2>
 <table>
@@ -84,6 +102,92 @@ function fmtUptime(total){
   return parts.join(' ');
 }
 function setText(id, val){ var el = document.getElementById(id); if(el){ el.textContent = val; } }
+function num(n){ return Number(n || 0).toLocaleString(); }
+// metaCard builds one network's card. Everything a daemon reported is inserted as
+// text, never as markup: the daemon name and version are its own strings.
+function metaCard(m){
+  var card = document.createElement('div');
+  card.className = 'card mcard';
+  var head = document.createElement('div');
+  head.className = 'head';
+  var name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = m.network;
+  var badge = document.createElement('span');
+  var ok = m.reachable && !m.down;
+  badge.className = 'badge ' + (ok ? 'ok' : 'err');
+  badge.textContent = !m.reachable ? 'unreachable' : (m.down ? 'search paused' : 'reachable');
+  if(m.lastError){ badge.title = m.lastError; }
+  head.appendChild(name);
+  head.appendChild(badge);
+  card.appendChild(head);
+
+  var lookups = m.cacheHits + m.cacheMisses;
+  var lag = m.lastSeq > m.feedCursor ? m.lastSeq - m.feedCursor : 0;
+  var rows = [
+    ['Daemon', m.daemon ? m.daemon + (m.version ? ' ' + m.version : '') : '—'],
+    ['Catalogue', num(m.catalogued) + ' releases · ' + num(m.files) + ' files'],
+    ['Published', num(m.published)],
+    ['Live search', !m.liveSearch ? 'off' : (m.searchAvailable ? 'on' : 'on, daemon has no index')],
+    ['Feed', !m.feedEnabled ? 'off' : num(m.feedRows) + ' rows · ' + num(m.feedReleases) + ' releases · '
+      + (m.feedCaughtUp ? (lag ? 'lag ' + num(lag) : 'caught up') : 'catching up')],
+    ['Searches', 'tcp ' + num(m.searchesTCP) + ' · udp ' + num(m.searchesUDP)],
+    ['Rows served', num(m.rowsServed)],
+    ['Live calls', num(m.liveCalls) + ' · ' + num(m.liveErrors) + ' errors · ' + num(m.liveTimeouts) + ' timeouts'],
+    ['Cache hits', lookups ? num(m.cacheHits) + ' / ' + num(lookups) + ' (' + Math.round(100 * m.cacheHits / lookups) + '%)' : '—'],
+    ['UDP skipped', num(m.udpSkipped)],
+    ['Server status', m.countInServerStatus ? '+' + num(m.counted) + ' files' : 'not counted']
+  ];
+  var table = document.createElement('table');
+  rows.forEach(function(r){
+    var tr = table.insertRow();
+    var k = tr.insertCell(); k.className = 'k'; k.textContent = r[0];
+    var v = tr.insertCell(); v.className = 'v'; v.textContent = r[1];
+  });
+  card.appendChild(table);
+  return card;
+}
+function renderMeta(d){
+  var list = d.meta || [];
+  var section = document.getElementById('metaSection');
+  if(!section){ return; }
+  section.hidden = list.length === 0;
+  setText('filesAdvertised', d.advertisedFiles !== d.files
+    ? 'advertised ' + num(d.advertisedFiles) + ' incl. torrent/usenet' : '');
+  if(!list.length){ return; }
+  setText('metaSummary', 'result cache: ' + num(d.metaCacheEntries) + ' queries');
+  var cards = document.getElementById('metaCards');
+  cards.replaceChildren.apply(cards, list.map(metaCard));
+}
+// renderMetaAPI fills the Meta API table; hidden when the API is off. Values are
+// inserted as text.
+function renderMetaAPI(d){
+  var a = d.metaApi;
+  var section = document.getElementById('metaApiSection');
+  if(!section){ return; }
+  section.hidden = !a;
+  if(!a){ return; }
+  var rows = [
+    ['Mode', a.authMode === 'account' ? 'accounts required' : 'public'],
+    ['gRPC', a.grpcUrl || 'off'],
+    ['HTTP', a.httpUrl || 'off'],
+    ['Metafiles served', num(a.served) + ' · ' + num(a.cacheHits) + ' from cache (' + num(Math.round(a.cacheBytes / 1024)) + ' KiB)'],
+    ['Fetch failures', num(a.notFound) + ' not found · ' + num(a.verifyFailed) + ' failed verification · ' + num(a.upstreamErrors) + ' upstream'],
+    ['Rate limited', num(a.rateLimited)]
+  ];
+  if(a.authMode === 'account'){
+    rows.push(['Accounts', num(a.accountsActive) + ' active · ' + num(a.accountsPending) + ' pending · '
+      + num(a.accountsExpired) + ' expired · ' + num(a.accountsDisabled) + ' disabled']);
+    rows.push(['Logins', num(a.logins) + ' · ' + num(a.authFailures) + ' failed']);
+  }
+  var table = document.getElementById('metaApiTable');
+  table.replaceChildren();
+  rows.forEach(function(r){
+    var tr = table.insertRow();
+    var k = tr.insertCell(); k.className = 'k'; k.textContent = r[0];
+    var v = tr.insertCell(); v.className = 'v'; v.textContent = r[1];
+  });
+}
 function setStatus(text, cls){
   var el = document.getElementById('status');
   if(el){ el.textContent = text; el.className = 'badge ' + cls; }
@@ -107,6 +211,8 @@ async function refresh(){
     setText('blocked', (d.filterBlockedIP + d.filterBlockedGeo).toLocaleString());
     setText('blockedBreak', d.filterBlockedIP + ' ipfilter, ' + d.filterBlockedGeo + ' geoip');
     setText('uptime', fmtUptime(d.uptimeSeconds));
+    renderMeta(d);
+    renderMetaAPI(d);
     setText('updated', 'updated ' + new Date(d.time).toLocaleTimeString());
     setStatus('live', 'ok');
   }catch(e){

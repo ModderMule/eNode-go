@@ -1,0 +1,11 @@
+{{define "login"}}<div class="card">
+<form method="post" action="/account/login">
+{{.CSRF}}
+<label for="username">{{call .T "ui.username"}}</label>
+<input id="username" name="username" autocomplete="username" required value="{{.Username}}">
+<label for="password">{{call .T "ui.password"}}</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required>
+<button type="submit">{{call .T "ui.login"}}</button>
+</form>
+</div>
+{{if .AllowRegistration}}<p class="muted"><a href="/account/register">{{call .T "ui.no_account"}}</a></p>{{end}}{{end}}

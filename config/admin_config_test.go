@@ -52,3 +52,19 @@ func TestAdminDefaults(t *testing.T) {
 		}
 	})
 }
+
+// TestAdminCredentialsTogether checks a half-configured admin login is refused
+// rather than silently leaving the dashboard open or locked.
+func TestAdminCredentialsTogether(t *testing.T) {
+	for _, c := range []struct {
+		user, pass string
+		ok         bool
+	}{{"", "", true}, {"root", "secret", true}, {"root", "", false}, {"", "secret", false}} {
+		cfg := Config{Admin: AdminConfig{Username: c.user, Password: c.pass}}
+		err := setDefaults(&cfg)
+		t.Logf("input: username=%q password set=%v output: %v", c.user, c.pass != "", err)
+		if (err == nil) != c.ok {
+			t.Errorf("username=%q password=%q: err=%v, want ok=%v", c.user, c.pass, err, c.ok)
+		}
+	}
+}

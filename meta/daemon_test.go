@@ -32,6 +32,20 @@ type fakeDaemon struct {
 	searches    []*metav1.SearchRequest
 	feed        []*metav1.SubscribeResponse
 	subscribes  []uint64 // after_seq of each Subscribe
+	info        *metav1.GetInfoResponse
+	infoErr     error
+}
+
+func (d *fakeDaemon) GetInfo(context.Context, *metav1.GetInfoRequest) (*metav1.GetInfoResponse, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.infoErr != nil {
+		return nil, d.infoErr
+	}
+	if d.info == nil {
+		return &metav1.GetInfoResponse{}, nil
+	}
+	return d.info, nil
 }
 
 func (d *fakeDaemon) Search(ctx context.Context, req *metav1.SearchRequest) (*metav1.SearchResponse, error) {

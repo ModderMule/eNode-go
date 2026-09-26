@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"time"
 
+	"enode/internal/ratelimit"
 	"enode/logging"
 )
 
@@ -24,6 +25,10 @@ import (
 type Config struct {
 	BindIP string
 	Port   uint16
+	// Username and Password are the Basic-auth credentials a non-loopback client
+	// needs. Empty means such a client sees the status page only (see auth.go).
+	Username string
+	Password string
 }
 
 // StaticInfo holds the server facts that do not change while the process runs.
@@ -45,6 +50,9 @@ type StaticInfo struct {
 	IPv6              bool
 	NAT               bool
 	ServerIndependent bool
+
+	// Accounts is set by SetAccounts: the Meta API has accounts to manage.
+	Accounts bool
 }
 
 // LiveStats holds the figures that change over the life of the server. It is
@@ -77,29 +85,117 @@ type LiveStats struct {
 	// and by the GeoIP country deny-list respectively.
 	FilterBlockedIP  int64 `json:"filterBlockedIP"`
 	FilterBlockedGeo int64 `json:"filterBlockedGeo"`
+
+	// Torrent/Usenet meta search. Files above is the eD2K count alone; AdvertisedFiles
+	// is the total clients are sent in the server status, which adds the networks set
+	// to countInServerStatus. Meta is empty when meta search is off.
+	AdvertisedFiles  int                `json:"advertisedFiles"`
+	MetaCacheEntries int                `json:"metaCacheEntries"`
+	Meta             []MetaNetworkStats `json:"meta"`
+
+	// MetaAPI is the client-facing Meta API; nil when it is off.
+	MetaAPI *MetaAPIStats `json:"metaApi"`
+}
+
+// MetaAPIStats are the Meta API's figures (docs/meta-api.md). Accounts counts are
+// zero in public mode.
+type MetaAPIStats struct {
+	// AuthMode is "public" or "account".
+	AuthMode string `json:"authMode"`
+	GRPCURL  string `json:"grpcUrl"`
+	HTTPURL  string `json:"httpUrl"`
+
+	Served         int64 `json:"served"`
+	CacheHits      int64 `json:"cacheHits"`
+	CacheBytes     int64 `json:"cacheBytes"`
+	NotFound       int64 `json:"notFound"`
+	VerifyFailed   int64 `json:"verifyFailed"`
+	UpstreamErrors int64 `json:"upstreamErrors"`
+	RateLimited    int64 `json:"rateLimited"`
+	AuthFailures   int64 `json:"authFailures"`
+	Logins         int64 `json:"logins"`
+
+	AccountsPending  int `json:"accountsPending"`
+	AccountsActive   int `json:"accountsActive"`
+	AccountsExpired  int `json:"accountsExpired"`
+	AccountsDisabled int `json:"accountsDisabled"`
+}
+
+// MetaNetworkStats is one torrent or Usenet network's figures: the meta.NetworkStats
+// fields the page shows. The caller maps one to the other so this package keeps no
+// dependency on the meta package.
+type MetaNetworkStats struct {
+	Network             string `json:"network"`
+	URL                 string `json:"url"`
+	LiveSearch          bool   `json:"liveSearch"`
+	FeedEnabled         bool   `json:"feedEnabled"`
+	CountInServerStatus bool   `json:"countInServerStatus"`
+
+	// Reachable is whether the last GetInfo poll succeeded. The daemon figures are
+	// from the last successful poll, InfoAt (RFC 3339, "" before the first one).
+	Reachable bool   `json:"reachable"`
+	LastError string `json:"lastError"`
+	InfoAt    string `json:"infoAt"`
+	// Down is whether live searches are paused after an unavailable, unimplemented
+	// or unauthenticated answer.
+	Down bool `json:"down"`
+
+	Daemon          string `json:"daemon"`
+	Version         string `json:"version"`
+	SearchAvailable bool   `json:"searchAvailable"`
+	Catalogued      uint64 `json:"catalogued"`
+	Published       uint64 `json:"published"`
+	Files           uint64 `json:"files"`
+	LastSeq         uint64 `json:"lastSeq"`
+
+	FeedReleases int    `json:"feedReleases"`
+	FeedRows     int    `json:"feedRows"`
+	FeedCursor   uint64 `json:"feedCursor"`
+	FeedCaughtUp bool   `json:"feedCaughtUp"`
+
+	SearchesTCP  uint64 `json:"searchesTCP"`
+	SearchesUDP  uint64 `json:"searchesUDP"`
+	RowsServed   uint64 `json:"rowsServed"`
+	LiveCalls    uint64 `json:"liveCalls"`
+	LiveErrors   uint64 `json:"liveErrors"`
+	LiveTimeouts uint64 `json:"liveTimeouts"`
+	CacheHits    uint64 `json:"cacheHits"`
+	CacheMisses  uint64 `json:"cacheMisses"`
+	UDPSkipped   uint64 `json:"udpSkipped"`
+
+	// Counted is what this network adds to AdvertisedFiles.
+	Counted int `json:"counted"`
 }
 
 // Server is the admin dashboard HTTP server.
 type Server struct {
-	cfg      Config
-	static   StaticInfo
-	snapshot func() LiveStats
-	http     *http.Server
-	ln       net.Listener
+	cfg       Config
+	static    StaticInfo
+	snapshot  func() LiveStats
+	accounts  AccountAdmin
+	authLimit *ratelimit.Limiter
+	http      *http.Server
+	ln        net.Listener
 }
 
 // New builds a dashboard server. static holds the unchanging server facts;
 // snapshot returns the current live figures each time it is called (once per
 // /stats.json request).
 //
-// ToDo: the dashboard has no authentication — it relies on the localhost-only
-// default bind. Before documenting a non-loopback bind as supported, add an
-// optional token/basic-auth gate so an operator can expose it safely.
+// A loopback client always gets in. A non-loopback one needs cfg.Username and
+// cfg.Password when they are set, and without them sees the status page only; see
+// auth.go.
 func New(cfg Config, static StaticInfo, snapshot func() LiveStats) *Server {
-	s := &Server{cfg: cfg, static: static, snapshot: snapshot}
+	// Non-loopback requests only: bounds password guessing, and leaves room for the
+	// page polling /stats.json every 5 s.
+	s := &Server{cfg: cfg, static: static, snapshot: snapshot, authLimit: ratelimit.New(120)}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/stats.json", s.handleStats)
-	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("GET /stats.json", s.guard(false, s.handleStats))
+	mux.HandleFunc("GET /accounts", s.guard(true, s.handleAccountsPage))
+	mux.HandleFunc("GET /api/accounts", s.guard(true, s.handleAccountList))
+	mux.HandleFunc("GET /api/accounts/{id}", s.guard(true, s.handleAccountDetail))
+	mux.HandleFunc("POST /api/accounts/{id}/{action}", s.guard(true, s.handleAccountAction))
+	mux.HandleFunc("/", s.guard(false, s.handleIndex))
 	s.http = &http.Server{
 		Handler: mux,
 		// A dashboard reachable off-box (if the operator widens BindIP) should not

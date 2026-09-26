@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,15 @@ func testServer(t *testing.T) (string, LiveStats) {
 		GossipAdmitted:   19,
 		FilterBlockedIP:  64,
 		FilterBlockedGeo: 8,
+		AdvertisedFiles:  6337,
+		MetaCacheEntries: 12,
+		Meta: []MetaNetworkStats{{
+			Network: "torrent", URL: "http://127.0.0.1:9701", LiveSearch: true, CountInServerStatus: true,
+			Reachable: true, InfoAt: "2026-07-22T09:59:00Z", Daemon: "torrent-crawler-1", Version: "v1.2.3",
+			SearchAvailable: true, Catalogued: 1200, Published: 300, Files: 5000, LastSeq: 42,
+			SearchesTCP: 9, SearchesUDP: 4, RowsServed: 30, LiveCalls: 6, LiveErrors: 1, LiveTimeouts: 2,
+			CacheHits: 5, CacheMisses: 6, UDPSkipped: 1, Counted: 5000,
+		}},
 	}
 	s := New(Config{}, static, func() LiveStats { return live })
 	ts := httptest.NewServer(s.http.Handler)
@@ -71,7 +81,7 @@ func TestStatsJSONReturnsSnapshot(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("decode LiveStats: %v", err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("stats=%+v, want %+v", got, want)
 	}
 
@@ -87,9 +97,26 @@ func TestStatsJSONReturnsSnapshot(t *testing.T) {
 		"clients", "files", "lowIDs", "servers", "uptimeSeconds", "time",
 		"gossipKnown", "gossipVerified", "gossipParked", "gossipAdmitted",
 		"filterBlockedIP", "filterBlockedGeo",
+		"advertisedFiles", "metaCacheEntries", "meta",
 	} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("stats.json missing key %q", key)
+		}
+	}
+	// The per-network keys the dashboard script reads.
+	var first map[string]any
+	if list, _ := raw["meta"].([]any); len(list) > 0 {
+		first, _ = list[0].(map[string]any)
+	}
+	for _, key := range []string{
+		"network", "reachable", "down", "lastError", "daemon", "version", "searchAvailable",
+		"catalogued", "published", "files", "lastSeq", "liveSearch", "feedEnabled", "feedRows",
+		"feedReleases", "feedCursor", "feedCaughtUp", "searchesTCP", "searchesUDP", "rowsServed",
+		"liveCalls", "liveErrors", "liveTimeouts", "cacheHits", "cacheMisses", "udpSkipped",
+		"countInServerStatus", "counted",
+	} {
+		if _, ok := first[key]; !ok {
+			t.Errorf("stats.json meta[0] missing key %q", key)
 		}
 	}
 	t.Logf("output: %d keys, gossipVerified=%v servers=%v", len(raw), raw["gossipVerified"], raw["servers"])
@@ -121,6 +148,7 @@ func TestIndexRendersStaticOnly(t *testing.T) {
 	for _, id := range []string{
 		`id="clients"`, `id="files"`, `id="lowIDs"`, `id="servers"`, `id="uptime"`,
 		`id="gossip"`, `id="blocked"`, `id="blockedBreak"`,
+		`id="filesAdvertised"`, `id="metaSection"`, `id="metaSummary"`, `id="metaCards"`,
 	} {
 		if !strings.Contains(html, id) {
 			t.Errorf("index HTML missing placeholder element %s", id)

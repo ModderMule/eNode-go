@@ -146,6 +146,10 @@ type MemoryEngine struct {
 	files   map[string]File
 	sources map[string][]Source
 	servers []Server
+
+	// accts is the AccountStore half (accounts_memory.go), under its own lock.
+	acctMu sync.Mutex
+	accts  memoryAccounts
 }
 
 func NewMemoryEngine() *MemoryEngine {
