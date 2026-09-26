@@ -222,6 +222,13 @@ The `.torrent` / `.nzb` behind a row is served by the client-facing Meta API
 (`FetchMetaFile` proxy with verification, `ST_META_API` discovery, optional
 accounts). See [meta-api.md](meta-api.md).
 
-## Not implemented yet
+Clients can also search the catalogues directly, with paging and a torrent / Usenet /
+both selector, through `MetaApi.Search`. See [meta-api.md](meta-api.md#searching-the-catalogues).
 
-- Persisting feed rows in the MySQL/MongoDB engines. The feed is in memory only.
+## By design / deferred
+
+- Rows are held in memory only (feed and caches). Persisting them in the MySQL/MongoDB
+  engines is not planned: the caches are enough.
+- Content filtering of meta rows by name is deferred. eNode-go has no filename filter
+  (`filter:` is IP and country only); category filtering is configured in the
+  crawlers.

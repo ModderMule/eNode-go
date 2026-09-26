@@ -37,11 +37,14 @@ const downBackoff = 30 * time.Second
 // Searcher answers the meta half of a search from every enabled network.
 type Searcher struct {
 	sources []*source
-	cache   *Cache
+	cache   *Cache[[]storage.File]
 	// udpSlots bounds live calls made for UDP searches; see config.udpMaxConcurrent.
 	udpSlots chan struct{}
 	// infoInterval is how often each daemon's GetInfo is polled.
 	infoInterval time.Duration
+	// catalog caches MetaApi.Search chunks; nil until EnableCatalog.
+	catalog        *Cache[Chunk]
+	catalogTimeout time.Duration
 }
 
 // source is one network: its daemon client, its feed and its limits.
@@ -57,7 +60,7 @@ type source struct {
 	maxResults    int
 	maxUDPResults int
 	feed          *Feed
-	cache         *Cache
+	cache         *Cache[[]storage.File]
 	// downUntil is a unix-nano deadline before which live calls are skipped.
 	downUntil atomic.Int64
 

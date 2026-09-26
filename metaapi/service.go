@@ -46,9 +46,11 @@ type Service struct {
 	maxMetafileBytes  int
 	trustForwardedFor bool
 
-	ipLimit      *ratelimit.Limiter
-	accountLimit *ratelimit.Limiter
-	loginLimit   *ratelimit.Limiter
+	// metafileLimits cap GetMetaFile; search has its own.
+	metafileLimits limits
+	loginLimit     *ratelimit.Limiter
+	// search is nil when MetaApi.Search is not served.
+	search *catalogSearch
 
 	basicMu    sync.Mutex
 	basicCache map[string]basicEntry
@@ -61,6 +63,7 @@ type ServiceStats struct {
 	RateLimited  atomic.Int64
 	AuthFailures atomic.Int64
 	Logins       atomic.Int64
+	Searches     atomic.Int64
 }
 
 type basicEntry struct {
@@ -75,6 +78,8 @@ type ServiceConfig struct {
 	PerIPPerMinute      int
 	PerAccountPerMinute int
 	TrustForwardedFor   bool
+	// Search serves MetaApi.Search; nil answers it unimplemented.
+	Search *SearchConfig
 }
 
 var (
@@ -84,17 +89,26 @@ var (
 
 // NewService returns the API over fetcher; accts may be nil for a public API.
 func NewService(cfg ServiceConfig, fetcher *Fetcher, accts *accounts.Service) *Service {
-	return &Service{
+	s := &Service{
 		fetcher:           fetcher,
 		accounts:          accts,
 		httpURL:           cfg.HTTPURL,
 		maxMetafileBytes:  cfg.MaxMetafileBytes,
 		trustForwardedFor: cfg.TrustForwardedFor,
-		ipLimit:           ratelimit.New(cfg.PerIPPerMinute),
-		accountLimit:      ratelimit.New(cfg.PerAccountPerMinute),
+		metafileLimits:    limits{ip: ratelimit.New(cfg.PerIPPerMinute), account: ratelimit.New(cfg.PerAccountPerMinute)},
 		loginLimit:        ratelimit.New(20),
 		basicCache:        map[string]basicEntry{},
 	}
+	if cfg.Search != nil && cfg.Search.Catalog != nil {
+		s.search = &catalogSearch{
+			cfg: *cfg.Search,
+			limits: limits{
+				ip:      ratelimit.New(cfg.Search.PerIPPerMinute),
+				account: ratelimit.New(cfg.Search.PerAccountPerMinute),
+			},
+		}
+	}
+	return s
 }
 
 // Stats returns the counters.
@@ -114,10 +128,12 @@ func (s *Service) GetCaps(context.Context, *metav1.GetCapsRequest) (*metav1.Caps
 		ContractVersion:  ContractVersion,
 		Kinds:            s.fetcher.Kinds(),
 		AuthMode:         s.AuthMode(),
-		SearchAvailable:  false,
 		MaxMetafileBytes: uint32(s.maxMetafileBytes),
 		HttpUrl:          s.httpURL,
+		Networks:         s.SearchNetworks(),
 	}
+	caps.SearchAvailable = len(caps.Networks) > 0
+	caps.SearchRequiresAccount = caps.SearchAvailable && s.accounts != nil && s.search.cfg.RequireAccount
 	if s.accounts != nil {
 		caps.RegistrationUrl = s.accounts.RegistrationURL()
 		caps.AccountUrl = s.accounts.AccountURL()
@@ -136,11 +152,6 @@ func (s *Service) GetMetaFile(ctx context.Context, req *metav1.GetMetaFileReques
 		return nil, s.toConnectError(err)
 	}
 	return mf, nil
-}
-
-// Search is reserved for phase 7.
-func (s *Service) Search(context.Context, *metav1.SearchRequest) (*metav1.SearchResponse, error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, "MetaApi.Search is not offered by this server")
 }
 
 // GetAuthStatus reports the caller's login state. It never fails for a missing or
@@ -221,36 +232,11 @@ func (s *Service) Logout(ctx context.Context, _ *metav1.LogoutRequest) (*metav1.
 	return &metav1.LogoutResponse{}, nil
 }
 
-// Authorize applies the rate limits and, when accounts are on, requires an active
-// account. auth is the Authorization header, ip the client address. It returns the
-// account (zero when public) or a connect error carrying ErrorInfo.
+// Authorize applies the metafile rate limits and, when accounts are on, requires an
+// active account. auth is the Authorization header, ip the client address. It
+// returns the account (zero when public) or a connect error carrying ErrorInfo.
 func (s *Service) Authorize(ctx context.Context, auth, ip string) (storage.Account, error) {
-	if !s.ipLimit.Allow(ip) {
-		s.stats.RateLimited.Add(1)
-		return storage.Account{}, s.toConnectError(accounts.NewError(accounts.KindRateLimited, accounts.CodeRateLimited))
-	}
-	if s.accounts == nil {
-		return storage.Account{}, nil
-	}
-	if auth == "" {
-		return storage.Account{}, s.toConnectError(accounts.NewError(accounts.KindUnauthenticated, accounts.CodeAuthRequired))
-	}
-	acct, err := s.resolve(ctx, auth, ip)
-	if err != nil {
-		return storage.Account{}, s.toConnectError(err)
-	}
-	status, err := s.accounts.Authorize(ctx, &acct)
-	if err != nil {
-		return storage.Account{}, s.toConnectError(err)
-	}
-	if !status.Active() {
-		return storage.Account{}, s.forbidden(ctx, status)
-	}
-	if !s.accountLimit.Allow("a:" + acct.Username) {
-		s.stats.RateLimited.Add(1)
-		return storage.Account{}, s.toConnectError(accounts.NewError(accounts.KindRateLimited, accounts.CodeRateLimited))
-	}
-	return acct, nil
+	return s.authorize(ctx, auth, ip, s.metafileLimits, s.accounts != nil)
 }
 
 // resolve turns an Authorization header into an account: a bearer session token,
@@ -416,4 +402,34 @@ func basic(auth string) (user, pass string, ok bool) {
 	}
 	user, pass, ok = strings.Cut(string(raw), ":")
 	return user, pass, ok
+}
+
+// authorize applies lim and, when required, demands an active account.
+func (s *Service) authorize(ctx context.Context, auth, ip string, lim limits, required bool) (storage.Account, error) {
+	if !lim.ip.Allow(ip) {
+		s.stats.RateLimited.Add(1)
+		return storage.Account{}, s.toConnectError(accounts.NewError(accounts.KindRateLimited, accounts.CodeRateLimited))
+	}
+	if !required {
+		return storage.Account{}, nil
+	}
+	if auth == "" {
+		return storage.Account{}, s.toConnectError(accounts.NewError(accounts.KindUnauthenticated, accounts.CodeAuthRequired))
+	}
+	acct, err := s.resolve(ctx, auth, ip)
+	if err != nil {
+		return storage.Account{}, s.toConnectError(err)
+	}
+	status, err := s.accounts.Authorize(ctx, &acct)
+	if err != nil {
+		return storage.Account{}, s.toConnectError(err)
+	}
+	if !status.Active() {
+		return storage.Account{}, s.forbidden(ctx, status)
+	}
+	if !lim.account.Allow("a:" + acct.Username) {
+		s.stats.RateLimited.Add(1)
+		return storage.Account{}, s.toConnectError(accounts.NewError(accounts.KindRateLimited, accounts.CodeRateLimited))
+	}
+	return acct, nil
 }

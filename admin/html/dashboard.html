@@ -136,6 +136,7 @@ function metaCard(m){
     ['Live calls', num(m.liveCalls) + ' · ' + num(m.liveErrors) + ' errors · ' + num(m.liveTimeouts) + ' timeouts'],
     ['Cache hits', lookups ? num(m.cacheHits) + ' / ' + num(lookups) + ' (' + Math.round(100 * m.cacheHits / lookups) + '%)' : '—'],
     ['UDP skipped', num(m.udpSkipped)],
+    ['API search', num(m.catalogCalls) + ' calls · ' + num(m.catalogErrors) + ' failed · ' + num(m.catalogCacheHits) + ' cached chunks'],
     ['Server status', m.countInServerStatus ? '+' + num(m.counted) + ' files' : 'not counted']
   ];
   var table = document.createElement('table');
@@ -173,6 +174,8 @@ function renderMetaAPI(d){
     ['HTTP', a.httpUrl || 'off'],
     ['Metafiles served', num(a.served) + ' · ' + num(a.cacheHits) + ' from cache (' + num(Math.round(a.cacheBytes / 1024)) + ' KiB)'],
     ['Fetch failures', num(a.notFound) + ' not found · ' + num(a.verifyFailed) + ' failed verification · ' + num(a.upstreamErrors) + ' upstream'],
+    ['Search', a.search === 'off' ? 'off' : (a.search === 'account' ? 'accounts required' : 'public')
+      + ' · ' + num(a.searches) + ' searches · ' + num(a.searchCacheEntries) + ' cached chunks'],
     ['Rate limited', num(a.rateLimited)]
   ];
   if(a.authMode === 'account'){

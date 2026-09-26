@@ -59,8 +59,9 @@ type fixture struct {
 	stepOpen   *stubStep
 }
 
-// start runs a Server on loopback ports with one torrent in the fake catalogue.
-func start(t *testing.T, withAccounts, httpAPI bool, perIP int) *fixture {
+// start runs a Server on loopback ports with one torrent in the fake catalogue, and
+// MetaApi.Search when search is given.
+func start(t *testing.T, withAccounts, httpAPI bool, perIP int, search ...*SearchConfig) *fixture {
 	t.Helper()
 	file, hash := testTorrent(t, "Served.Release.2026")
 	src := newFakeSource()
@@ -87,7 +88,11 @@ func start(t *testing.T, withAccounts, httpAPI bool, perIP int) *fixture {
 	if httpAPI || withAccounts {
 		cfg.HTTPListen = "127.0.0.1:0"
 	}
-	fx.svc = NewService(ServiceConfig{MaxMetafileBytes: 1 << 20, PerIPPerMinute: perIP}, fetcher, fx.accts)
+	svcCfg := ServiceConfig{MaxMetafileBytes: 1 << 20, PerIPPerMinute: perIP}
+	if len(search) > 0 {
+		svcCfg.Search = search[0]
+	}
+	fx.svc = NewService(svcCfg, fetcher, fx.accts)
 	srv, err := NewServer(cfg, fx.svc, web)
 	if err != nil {
 		t.Fatal(err)

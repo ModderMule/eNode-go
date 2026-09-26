@@ -986,6 +986,9 @@ func adminMetaStats(s *meta.Searcher) (cacheEntries int, out []admin.MetaNetwork
 			CacheHits:           st.CacheHits,
 			CacheMisses:         st.CacheMisses,
 			UDPSkipped:          st.UDPSkipped,
+			CatalogCalls:        st.CatalogCalls,
+			CatalogErrors:       st.CatalogErrors,
+			CatalogCacheHits:    st.CatalogCacheHits,
 			Counted:             st.Counted,
 		})
 	}

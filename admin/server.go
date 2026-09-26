@@ -115,6 +115,11 @@ type MetaAPIStats struct {
 	AuthFailures   int64 `json:"authFailures"`
 	Logins         int64 `json:"logins"`
 
+	// Search is "off", "public" or "account" (needs an active account).
+	Search             string `json:"search"`
+	Searches           int64  `json:"searches"`
+	SearchCacheEntries int    `json:"searchCacheEntries"`
+
 	AccountsPending  int `json:"accountsPending"`
 	AccountsActive   int `json:"accountsActive"`
 	AccountsExpired  int `json:"accountsExpired"`
@@ -162,6 +167,11 @@ type MetaNetworkStats struct {
 	CacheHits    uint64 `json:"cacheHits"`
 	CacheMisses  uint64 `json:"cacheMisses"`
 	UDPSkipped   uint64 `json:"udpSkipped"`
+	// CatalogCalls, CatalogErrors and CatalogCacheHits are MetaApi.Search's daemon
+	// calls, failed chunk loads and cached chunks served.
+	CatalogCalls     uint64 `json:"catalogCalls"`
+	CatalogErrors    uint64 `json:"catalogErrors"`
+	CatalogCacheHits uint64 `json:"catalogCacheHits"`
 
 	// Counted is what this network adds to AdvertisedFiles.
 	Counted int `json:"counted"`

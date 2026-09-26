@@ -129,6 +129,8 @@ func TestFetcherErrors(t *testing.T) {
 	src := newFakeSource()
 	src.errs["down"] = connect.NewError(connect.CodeUnavailable, "down")
 	src.errs["wrongkind"] = connect.NewError(connect.CodeInvalidArgument, "not a torrent id")
+	src.errs["magnet"] = connect.NewError(connect.CodeFailedPrecondition, "magnet-only release")
+	src.errs["corrupt"] = connect.NewError(connect.CodeDataLoss, "stored bytes do not hash")
 	src.files["huge"] = &metav1.MetaFile{Content: append(bytes.Repeat([]byte{'x'}, 2<<20), file...)}
 	f := newTestFetcher(src)
 
@@ -149,6 +151,8 @@ func TestFetcherErrors(t *testing.T) {
 		{"missing", hash[:], "gone", connect.CodeNotFound, CodeNotFound},
 		{"wrong kind at daemon", hash[:], "wrongkind", connect.CodeNotFound, CodeNotFound},
 		{"daemon down", hash[:], "down", connect.CodeUnavailable, CodeUnavailable},
+		{"magnet-only release", hash[:], "magnet", connect.CodeFailedPrecondition, CodeMagnetOnly},
+		{"daemon data loss", hash[:], "corrupt", connect.CodeDataLoss, CodeVerifyFailed},
 		{"too large", hash[:], "huge", connect.CodeResourceExhausted, CodeTooLarge},
 	}
 	for _, c := range cases {

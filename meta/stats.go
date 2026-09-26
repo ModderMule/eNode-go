@@ -69,6 +69,11 @@ type NetworkStats struct {
 	// UDPSkipped counts UDP searches that made no live call because every
 	// udpMaxConcurrent slot was taken.
 	UDPSkipped uint64
+	// CatalogCalls, CatalogErrors and CatalogCacheHits are MetaApi.Search's daemon
+	// calls, failed chunk loads and cached chunks served.
+	CatalogCalls     uint64
+	CatalogErrors    uint64
+	CatalogCacheHits uint64
 
 	// Counted is what this network adds to the file total in the server status: 0
 	// unless CountInServerStatus is set.
@@ -118,6 +123,11 @@ type sourceCounters struct {
 	cacheHits    atomic.Uint64
 	cacheMisses  atomic.Uint64
 	udpSkipped   atomic.Uint64
+	// catalogCalls, catalogErrors and catalogCacheHits count MetaApi.Search chunk
+	// loads: daemon calls, failed loads (errors and timeouts), cached chunks served.
+	catalogCalls     atomic.Uint64
+	catalogErrors    atomic.Uint64
+	catalogCacheHits atomic.Uint64
 }
 
 // daemonInfo is the poller's view of one daemon. info survives a failed poll so the
@@ -218,6 +228,9 @@ func (src *source) stats() NetworkStats {
 		CacheHits:           src.counters.cacheHits.Load(),
 		CacheMisses:         src.counters.cacheMisses.Load(),
 		UDPSkipped:          src.counters.udpSkipped.Load(),
+		CatalogCalls:        src.counters.catalogCalls.Load(),
+		CatalogErrors:       src.counters.catalogErrors.Load(),
+		CatalogCacheHits:    src.counters.catalogCacheHits.Load(),
 	}
 
 	src.daemon.mu.Lock()

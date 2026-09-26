@@ -47,7 +47,37 @@ type MetaAPIConfig struct {
 	MaxMetafileBytes int `yaml:"maxMetafileBytes"`
 
 	RateLimit MetaAPIRateLimitConfig `yaml:"rateLimit"`
+	Search    MetaAPISearchConfig    `yaml:"search"`
 	Accounts  AccountsConfig         `yaml:"accounts"`
+}
+
+// MetaAPISearchConfig is MetaApi.Search: a paged search of the torrent and Usenet
+// catalogues behind metaSearch, for clients that browse them directly.
+type MetaAPISearchConfig struct {
+	// Enabled serves MetaApi.Search whenever the API is on. *bool, defaults on. It
+	// needs at least one metaSearch network with liveSearch on.
+	Enabled *bool `yaml:"enabled"`
+	// RequireAccount asks for an active account, as metafile downloads do. It only
+	// applies with metaApi.accounts.enabled. *bool, defaults on; false lets anyone
+	// search while downloads still need an account.
+	RequireAccount *bool `yaml:"requireAccount"`
+	// TimeoutMs bounds the daemon calls behind one page.
+	TimeoutMs int `yaml:"timeoutMs"`
+	// MaxLimit caps the releases on one page.
+	MaxLimit int `yaml:"maxLimit"`
+	// Window is the deepest release paging reaches.
+	Window int `yaml:"window"`
+
+	Cache MetaAPISearchCacheConfig `yaml:"cache"`
+	// RateLimit caps searches, separately from metafile downloads. 0 disables a limit.
+	RateLimit MetaAPIRateLimitConfig `yaml:"rateLimit"`
+}
+
+// MetaAPISearchCacheConfig caches daemon answers in chunks of 100 releases per
+// network and search, so paging forward and repeated searches cost no daemon call.
+type MetaAPISearchCacheConfig struct {
+	MaxEntries int `yaml:"maxEntries"`
+	TTLSeconds int `yaml:"ttlSeconds"`
 }
 
 // MetaAPITLSConfig serves both listeners over TLS when CertFile and KeyFile are set.
@@ -126,6 +156,17 @@ func (c MetaAPIConfig) HTTPListenerEnabled() bool {
 
 // TLSEnabled reports whether the listeners serve TLS.
 func (c MetaAPIConfig) TLSEnabled() bool { return c.TLS.CertFile != "" && c.TLS.KeyFile != "" }
+
+// SearchEnabled reports whether MetaApi.Search is served, defaulting to on with the API.
+func (c MetaAPIConfig) SearchEnabled() bool {
+	return c.Enabled && boolOrDefault(c.Search.Enabled, true)
+}
+
+// SearchRequiresAccount reports whether MetaApi.Search needs an active account: only
+// with accounts on, and then by default.
+func (c MetaAPIConfig) SearchRequiresAccount() bool {
+	return c.Accounts.Enabled && boolOrDefault(c.Search.RequireAccount, true)
+}
 
 // AllowRegistrationOrDefault reports whether new users may sign up, defaulting to true.
 func (c AccountsConfig) AllowRegistrationOrDefault() bool {
@@ -207,6 +248,9 @@ func setMetaAPIDefaults(c *MetaAPIConfig) error {
 	if c.RateLimit.PerIPPerMinute < 0 || c.RateLimit.PerAccountPerMinute < 0 {
 		return fmt.Errorf("metaApi.rateLimit values must not be negative; 0 disables a limit")
 	}
+	if err := setMetaAPISearchDefaults(&c.Search); err != nil {
+		return err
+	}
 	a := &c.Accounts
 	if a.SessionTTLHours <= 0 {
 		a.SessionTTLHours = 720
@@ -249,6 +293,41 @@ func setMetaAPIDefaults(c *MetaAPIConfig) error {
 		return fmt.Errorf("metaApi.accounts.publicURL %q is invalid: it is the website users register on, e.g. https://enode.example.org", a.PublicURL)
 	}
 	a.PublicURL = strings.TrimRight(a.PublicURL, "/")
+	return nil
+}
+
+// Search limits. maxSearchWindow matches the daemons' own paging depth.
+const (
+	maxSearchLimit  = 500
+	maxSearchWindow = 10000
+)
+
+func setMetaAPISearchDefaults(c *MetaAPISearchConfig) error {
+	if c.TimeoutMs <= 0 {
+		c.TimeoutMs = 5000
+	}
+	if c.MaxLimit <= 0 {
+		c.MaxLimit = 100
+	}
+	if c.Window <= 0 {
+		c.Window = 1000
+	}
+	if c.Cache.MaxEntries <= 0 {
+		c.Cache.MaxEntries = 2000
+	}
+	if c.Cache.TTLSeconds <= 0 {
+		c.Cache.TTLSeconds = 600
+	}
+	switch {
+	case c.RateLimit.PerIPPerMinute < 0 || c.RateLimit.PerAccountPerMinute < 0:
+		return fmt.Errorf("metaApi.search.rateLimit values must not be negative")
+	case c.MaxLimit > maxSearchLimit:
+		return fmt.Errorf("metaApi.search.maxLimit (%d) exceeds %d", c.MaxLimit, maxSearchLimit)
+	case c.Window > maxSearchWindow:
+		return fmt.Errorf("metaApi.search.window (%d) exceeds %d", c.Window, maxSearchWindow)
+	case c.Window < c.MaxLimit:
+		return fmt.Errorf("metaApi.search.window (%d) is smaller than maxLimit (%d)", c.Window, c.MaxLimit)
+	}
 	return nil
 }
 

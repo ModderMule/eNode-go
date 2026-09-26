@@ -7,6 +7,7 @@ import (
 
 	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
 	"github.com/ModderMule/enodemeta/metahash"
+	"github.com/ModderMule/enodemeta/model"
 	"github.com/ModderMule/enodemeta/pbconv"
 	"github.com/ModderMule/enodemeta/tags"
 )
@@ -19,11 +20,8 @@ import (
 // its unprefixed name; the network's prefix is applied when the row is sent, so the
 // prefix itself can never match a keyword.
 func EntryToFile(pb *metav1.MetaEntry) (storage.File, error) {
-	entry := pbconv.EntryFromProto(pb)
-	if err := entry.Validate(); err != nil {
-		return storage.File{}, err
-	}
-	if err := entry.Mint(); err != nil {
+	entry, err := mint(pb)
+	if err != nil {
 		return storage.File{}, err
 	}
 	parsed, err := metahash.Parse(entry.MetaHash)
@@ -71,4 +69,26 @@ func EntryToFile(pb *metav1.MetaEntry) (storage.File, error) {
 			Magnet:    entry.Magnet,
 		},
 	}, nil
+}
+
+// MintEntry validates one daemon row and returns it with the server-minted meta_hash
+// set, for MetaApi.Search. It runs the same checks as EntryToFile, except the
+// zero-size rule, which exists for eMule's search list only.
+func MintEntry(pb *metav1.MetaEntry) (*metav1.MetaEntry, error) {
+	entry, err := mint(pb)
+	if err != nil {
+		return nil, err
+	}
+	return pbconv.EntryToProto(entry), nil
+}
+
+func mint(pb *metav1.MetaEntry) (model.Entry, error) {
+	entry := pbconv.EntryFromProto(pb)
+	if err := entry.Validate(); err != nil {
+		return model.Entry{}, err
+	}
+	if err := entry.Mint(); err != nil {
+		return model.Entry{}, err
+	}
+	return entry, nil
 }

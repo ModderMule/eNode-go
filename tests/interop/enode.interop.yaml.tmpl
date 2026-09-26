@@ -168,6 +168,22 @@ metaApi:
   rateLimit:
     perIPPerMinute: 30             # metafile downloads per client address; 0 = unlimited
     perAccountPerMinute: 120       # per logged-in account; 0 = unlimited
+  # MetaApi.Search: paged search of the torrent and Usenet catalogues (the metaSearch
+  # networks with liveSearch on). A request picks torrent, Usenet or both (default).
+  search:
+    enabled: true                  # served whenever the API is
+    # With accounts enabled: true = searching needs an active account, like downloads;
+    # false = anyone may search, downloads still need an account.
+    requireAccount: true
+    timeoutMs: 5000                # daemon calls behind one page
+    maxLimit: 100                  # releases per page
+    window: 1000                   # deepest release reachable by paging
+    cache:
+      maxEntries: 2000             # chunks of 100 releases per network and search
+      ttlSeconds: 600              # pages stay stable this long
+    rateLimit:
+      perIPPerMinute: 30           # searches per client address; 0 = unlimited
+      perAccountPerMinute: 120     # per logged-in account; 0 = unlimited
   # Optional username/password login. Off = the API is public. On = a user registers
   # on this server's website first (publicURL + /account/register) and the eMule
   # client logs in with that username and password.

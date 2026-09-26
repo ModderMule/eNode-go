@@ -54,6 +54,7 @@ const (
 	CodeUnavailable    = "metafile.upstream_unavailable"
 	CodeInvalidRequest = "metafile.invalid_request"
 	CodeTooLarge       = "metafile.too_large"
+	CodeMagnetOnly     = "metafile.magnet_only"
 )
 
 // Fetcher serves metafiles: from its cache, or from the owning daemon, checked
@@ -197,6 +198,9 @@ func (f *Fetcher) fetch(ctx context.Context, hash metahash.Hash, kind metahash.K
 		case connect.CodeNotFound:
 			f.stats.NotFound.Add(1)
 			f.remember(string(hash[:])+"\x00"+catalogID, fe)
+		case connect.CodeFailedPrecondition:
+			f.stats.NotFound.Add(1)
+			f.remember(string(hash[:])+"\x00"+catalogID, fe)
 		default:
 			f.stats.UpstreamError.Add(1)
 			logging.Warnf("meta api: fetch %s %s from %s: %v", hash, catalogID, network, err)
@@ -260,7 +264,12 @@ func classify(err error) *FetchError {
 		// invalid_argument: the id is not one of that daemon's kinds — from the
 		// client's side the release simply is not there.
 		return &FetchError{Code: connect.CodeNotFound, MsgCode: CodeNotFound, cause: err}
-	case connect.CodeFailedPrecondition, connect.CodeDataLoss:
+	case connect.CodeFailedPrecondition:
+		// The server sends no identity, so the daemon's other failed_precondition
+		// (identity mismatch) cannot happen: this is a magnet-only release, which has
+		// no metafile. The client uses the row's magnet instead.
+		return &FetchError{Code: connect.CodeFailedPrecondition, MsgCode: CodeMagnetOnly, cause: err}
+	case connect.CodeDataLoss:
 		return &FetchError{Code: connect.CodeDataLoss, MsgCode: CodeVerifyFailed, cause: err}
 	default:
 		return &FetchError{Code: connect.CodeUnavailable, MsgCode: CodeUnavailable, cause: err}

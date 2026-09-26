@@ -31,6 +31,10 @@ type metaAPIRuntime struct {
 	advert   ed2k.MetaAPIAdvert
 	grpcURL  string
 	httpURL  string
+	// searcher backs MetaApi.Search; nil when search is off.
+	searcher *meta.Searcher
+	// searchMode is "off", "public" or "account", for the dashboard.
+	searchMode string
 }
 
 // buildMetaAPI builds the Meta API when metaApi.enabled is on, or returns nil.
@@ -80,13 +84,39 @@ func buildMetaAPI(ctx context.Context, cfg config.Config, engine storage.Engine,
 	if c.HTTPAPIEnabled() {
 		rt.httpURL = metaAPIURL(c.HTTPAdvertiseURL, c.HTTP.Listen, tls, advertisedIP)
 	}
-	rt.svc = metaapi.NewService(metaapi.ServiceConfig{
+	svcCfg := metaapi.ServiceConfig{
 		HTTPURL:             rt.httpURL,
 		MaxMetafileBytes:    c.MaxMetafileBytes,
 		PerIPPerMinute:      c.RateLimit.PerIPPerMinute,
 		PerAccountPerMinute: c.RateLimit.PerAccountPerMinute,
 		TrustForwardedFor:   c.TrustForwardedFor,
-	}, fetcher, accts)
+	}
+	rt.searchMode = "off"
+	if c.SearchEnabled() && searcher != nil {
+		if len(searcher.CatalogNetworks()) == 0 {
+			logging.Warnf("meta api: search is enabled but no metaSearch network has liveSearch on; MetaApi.Search finds nothing")
+		}
+		s := c.Search
+		searcher.EnableCatalog(meta.CatalogConfig{
+			Timeout:    time.Duration(s.TimeoutMs) * time.Millisecond,
+			MaxEntries: s.Cache.MaxEntries,
+			TTL:        time.Duration(s.Cache.TTLSeconds) * time.Second,
+		})
+		svcCfg.Search = &metaapi.SearchConfig{
+			Catalog:             searcher,
+			RequireAccount:      c.SearchRequiresAccount(),
+			MaxLimit:            s.MaxLimit,
+			Window:              s.Window,
+			PerIPPerMinute:      s.RateLimit.PerIPPerMinute,
+			PerAccountPerMinute: s.RateLimit.PerAccountPerMinute,
+		}
+		rt.searcher = searcher
+		rt.searchMode = "public"
+		if c.SearchRequiresAccount() {
+			rt.searchMode = "account"
+		}
+	}
+	rt.svc = metaapi.NewService(svcCfg, fetcher, accts)
 
 	scfg := metaapi.ServerConfig{
 		HTTPAPI:           c.HTTPAPIEnabled(),
@@ -167,6 +197,11 @@ func (rt *metaAPIRuntime) adminStats() *admin.MetaAPIStats {
 		RateLimited:    ss.RateLimited.Load(),
 		AuthFailures:   ss.AuthFailures.Load(),
 		Logins:         ss.Logins.Load(),
+		Search:         rt.searchMode,
+		Searches:       ss.Searches.Load(),
+	}
+	if rt.searcher != nil {
+		out.SearchCacheEntries = rt.searcher.CatalogCacheEntries()
 	}
 	if rt.accounts != nil {
 		out.AuthMode = "account"

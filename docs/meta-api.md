@@ -3,7 +3,9 @@
 eNode-go merges torrent and Usenet releases into eD2K search results
 (see [meta-search.md](meta-search.md)). A row carries a meta hash and `FT_META_*`
 tags, but not the `.torrent` or `.nzb` itself. The **Meta API** serves those files to
-a client such as eMuleQt. It is phase 4 of `docs/meta-search-torrent-usenet-plan.local.md`.
+a client such as eMuleQt. It also searches the torrent and Usenet catalogues
+directly, with paging (`MetaApi.Search`). These are phases 4 and 7 of
+`docs/meta-search-torrent-usenet-plan.local.md`.
 
 The operator can require an **account** to use the API. Accounts are off by default,
 so the API is public. With them on, a user registers on the server's own website
@@ -32,9 +34,9 @@ eMuleQt generates its C++ code from the same file. Its two services reuse `MetaF
 
 | RPC | Auth | Purpose |
 |---|---|---|
-| `MetaApi.GetCaps` | never | Contract version, kinds served, auth mode, registration and account URLs, HTTP endpoint URL. |
+| `MetaApi.GetCaps` | never | Contract version, kinds served, auth mode, registration and account URLs, HTTP endpoint URL, whether search is served, which networks it covers and whether it needs an account. |
 | `MetaApi.GetMetaFile` | when accounts are on | The `.torrent` / `.nzb` behind a row, verified against the meta hash. |
-| `MetaApi.Search` | — | Reserved for phase 7. It answers `unimplemented`, and `Caps.search_available` is false. |
+| `MetaApi.Search` | when accounts are on and `search.requireAccount` | Paged search of the torrent and/or Usenet catalogues. See [Searching the catalogues](#searching-the-catalogues). |
 | `AccountApi.GetAuthStatus` | optional | Login state, account state, expiry, open registration steps, links. It never fails for a missing or bad credential. |
 | `AccountApi.Login` | — | Takes a username and password and returns a bearer token. |
 | `AccountApi.Logout` | bearer | Revokes the token. |
@@ -95,6 +97,7 @@ Errors carry an `enode.meta.v1.ErrorInfo` detail with a `msg_code`:
 |---|---|
 | `invalid_argument` | `metafile.invalid_request`: not a meta hash, or no `catalog_id` |
 | `not_found` | `metafile.not_found` |
+| `failed_precondition` | `metafile.magnet_only`: the release has no metafile; use the row's `magnet` |
 | `data_loss` | `metafile.verify_failed` |
 | `unavailable` | `metafile.upstream_unavailable` |
 | `resource_exhausted` | `metafile.too_large` or `ratelimit.exceeded` |
@@ -109,10 +112,77 @@ Rate limits: `rateLimit.perIPPerMinute` for every download, and
 `perAccountPerMinute` per account when accounts are on. Behind a reverse proxy, set
 `trustForwardedFor` so the limits see real client addresses.
 
+## Searching the catalogues
+
+`MetaApi.Search(SearchRequest)` searches the catalogue daemons directly: the whole
+catalogue, not only the rows an eD2K search blended in. It is on whenever the API is
+(`metaApi.search.enabled`, default on) and covers every `metaSearch` network with
+`liveSearch` on. `Caps.search_available` and `Caps.networks` say what a server offers.
+
+**Request.** `query` is required: keywords that must all match, at most 256 bytes.
+The other fields are optional filters passed to the daemons: `exclude`, `kinds`,
+`min_size`, `max_size`, `min_seeders`, `max_age_days`, `type`.
+`network` picks what to search:
+
+| `network` | Searches |
+|---|---|
+| `META_NETWORK_UNSPECIFIED` (default) | torrent and Usenet |
+| `META_NETWORK_TORRENT` | torrent only |
+| `META_NETWORK_USENET` | Usenet only |
+
+A network the server does not offer gives an empty result, not an error. `kinds`
+narrows further within the chosen networks, for example BT v2 only.
+
+**Paging counts releases, not rows.** A multi-file release is several entries with
+one `catalog_id` (the whole-set row and one per file), and they always arrive on
+the same page. `limit` defaults to 50 and is capped at `search.maxLimit` (100).
+Ask for the next page with the returned `next_offset`. Zero means there is no
+further page. Paging stops at `search.window` releases (1000). `total` is the sum
+the daemons report, or 0 when it is not known.
+
+**Both networks** interleave one release from each in turn (torrent, Usenet,
+torrent, …). When one network runs out, the other continues alone. The order is
+deterministic, so page N is the same on every call while the answers are cached.
+
+**Cache.** Each network's answer is fetched in chunks of 100 releases and cached per
+network, search and chunk (`search.cache`, 2000 chunks, 600 s). Paging forward and
+repeated searches cost no daemon call, and pages stay stable for the TTL. This cache
+is separate from the eD2K search cache (`metaSearch.cache`), so deep paging cannot
+evict what eD2K searches rely on. Keywords are compared case-insensitively and in
+any order.
+
+**Entries** are `MetaEntry` rows with the server-minted `meta_hash`. `meta_hash` and
+`catalog_id` are all `GetMetaFile` needs. A row with the magnet-only flag
+(`flags` bit 3) has no metafile: use its `magnet`.
+
+**Failures.** If one network is down or slow (`search.timeoutMs`, 5 s), the page
+comes from the other one and `total` is 0. If every selected network fails, the call
+returns `unavailable` / `search.unavailable`.
+
+| Code | `msg_code` |
+|---|---|
+| `invalid_argument` | `search.query_required`, `search.query_too_long` |
+| `unavailable` | `search.unavailable` |
+| `unimplemented` | `search.disabled` |
+| `resource_exhausted` | `ratelimit.exceeded` (`search.rateLimit`, separate from downloads) |
+| `unauthenticated` / `permission_denied` | as for `GetMetaFile` |
+
+**Accounts.** With accounts on, `search.requireAccount` (default `true`) decides
+whether searching needs an active account like downloads do. With `false`, anyone
+may search while downloads still need an account. `Caps.search_requires_account`
+tells the client which applies.
+
+```sh
+grpcurl -plaintext -d '{"query":"ubuntu","network":"META_NETWORK_TORRENT","limit":10}' \
+  localhost:4671 enode.meta.v1.MetaApi/Search
+curl -s -XPOST localhost:4672/enode.meta.v1.MetaApi/Search \
+  -H 'Content-Type: application/json' -d '{"query":"ubuntu","offset":10,"limit":10}'
+```
+
 ## Accounts
 
-`metaApi.accounts.enabled: true` makes `GetMetaFile` and `Search` require an
-**active** account. Other conditions for turning accounts on:
+`metaApi.accounts.enabled: true` makes `GetMetaFile` require an **active** account,
+and `Search` too unless `search.requireAccount` is `false`. Other conditions for turning accounts on:
 
 - Accounts require `tls`, or `allowInsecureAuth: true` when a TLS proxy terminates
   in front of both listeners.
@@ -134,13 +204,16 @@ long to reject as a wrong password.
 ### Recommended eMuleQt flow
 
 ```
-GetCaps ─► auth_mode == PUBLIC ─────────────────────────────► GetMetaFile
+GetCaps ─► auth_mode == PUBLIC ─────────────────────────────► Search / GetMetaFile
         └► ACCOUNT_REQUIRED ─► have a token? ─ yes ─► GetAuthStatus
-                                  │ no                  ├ ACTIVE ─► GetMetaFile
+                                  │ no                  ├ ACTIVE ─► Search / GetMetaFile
                                   ▼                     └ PENDING / EXPIRED ─► show pending_steps[].url
                    show "Register" (registration_url)
                    and a login form ─► Login ─► store token
 ```
+
+When `Caps.search_requires_account` is false, the client can call `Search` without
+logging in, and asks for a login only when the user downloads.
 
 `GetAuthStatus` and the `permission_denied` detail both list `pending_steps`. Each
 step has an `id`, a `kind` (payment, email verification, approval, other), a
@@ -330,6 +403,9 @@ Nothing is created unless accounts are enabled.
 - metafiles served and cache hits;
 - fetch failures (not found, failed verification, upstream);
 - how many requests were rate limited;
+- search mode (off, public, accounts required), searches and cached chunks. The
+  per-network cards count each network's search calls and chunk cache hits
+  (`catalogCalls`, `catalogErrors`, `catalogCacheHits` in the `meta` array);
 - account counts by state;
 - logins and failed logins.
 

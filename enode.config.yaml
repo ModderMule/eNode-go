@@ -159,7 +159,7 @@ metaSearch:
     # The daemon's ingest.auth_token. Required unless the daemon is on loopback. Put
     # the real value in enode.local.yaml, which is gitignored.
     token: ""
-    namePrefix: "[torrent] "       # prepended to every filename; "" for none
+    namePrefix: "[torrent emule-qt.org] "       # prepended to every filename; "" for none
     liveSearch: true               # forward each search's keywords to the daemon
     searchTimeoutMs: 1500          # TCP: the reply waits at most this long for the daemon
     udpSearchTimeoutMs: 800        # UDP: shorter, it holds a shared worker
@@ -180,7 +180,7 @@ metaSearch:
     enabled: false
     url: "http://127.0.0.1:9702"   # usenet-crawler's MetaIngest listener
     token: ""
-    namePrefix: "[usenet] "
+    namePrefix: "[usenet emule-qt.org] "
     liveSearch: true
     searchTimeoutMs: 1500
     udpSearchTimeoutMs: 800
@@ -195,7 +195,7 @@ metaSearch:
   # Cache live Search answers per network, keyed by the forwarded keywords, excludes,
   # file type and size bounds. Off by default: a repeat query then asks the daemon again.
   cache:
-    enabled: false
+    enabled: true
     maxEntries: 1000               # distinct queries kept, least recently used evicted
     maxRowsPerEntry: 100
     ttlSeconds: 600
@@ -241,6 +241,22 @@ metaApi:
   rateLimit:
     perIPPerMinute: 30             # metafile downloads per client address; 0 = unlimited
     perAccountPerMinute: 120       # per logged-in account; 0 = unlimited
+  # MetaApi.Search: paged search of the torrent and Usenet catalogues (the metaSearch
+  # networks with liveSearch on). A request picks torrent, Usenet or both (default).
+  search:
+    enabled: true                  # served whenever the API is
+    # With accounts enabled: true = searching needs an active account, like downloads;
+    # false = anyone may search, downloads still need an account.
+    requireAccount: true
+    timeoutMs: 5000                # daemon calls behind one page
+    maxLimit: 100                  # releases per page
+    window: 1000                   # deepest release reachable by paging
+    cache:
+      maxEntries: 2000             # chunks of 100 releases per network and search
+      ttlSeconds: 600              # pages stay stable this long
+    rateLimit:
+      perIPPerMinute: 30           # searches per client address; 0 = unlimited
+      perAccountPerMinute: 120     # per logged-in account; 0 = unlimited
   # Optional username/password login. Off = the API is public. On = a user registers
   # on this server's website first (publicURL + /account/register) and the eMule
   # client logs in with that username and password.

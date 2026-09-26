@@ -53,6 +53,10 @@ func TestMetaAPIValidation(t *testing.T) {
 		{"bad step id", "accounts:\n  steps:\n    - {id: 'Pay Now', type: payment}", "is invalid"},
 		{"step without type", "accounts:\n  steps:\n    - {id: pay}", "has no type"},
 		{"negative rate", "rateLimit: {perIPPerMinute: -1}", "negative"},
+		{"negative search rate", "search: {rateLimit: {perAccountPerMinute: -1}}", "metaApi.search.rateLimit"},
+		{"search limit too high", "search: {maxLimit: 501}", "metaApi.search.maxLimit"},
+		{"search window too deep", "search: {window: 20000}", "metaApi.search.window"},
+		{"search window below limit", "search: {maxLimit: 100, window: 50}", "smaller than maxLimit"},
 	}
 	for _, tc := range cases {
 		var c MetaAPIConfig
@@ -67,6 +71,39 @@ func TestMetaAPIValidation(t *testing.T) {
 		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
 			t.Errorf("%s: err=%v, want one mentioning %q", tc.name, err, tc.want)
 		}
+	}
+}
+
+func TestMetaAPISearchDefaults(t *testing.T) {
+	c, err := ApplyMetaAPIDefaults(MetaAPIConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := c.Search
+	t.Logf("input: empty metaApi output: search timeout=%dms maxLimit=%d window=%d cache=%d/%ds",
+		s.TimeoutMs, s.MaxLimit, s.Window, s.Cache.MaxEntries, s.Cache.TTLSeconds)
+	if s.TimeoutMs != 5000 || s.MaxLimit != 100 || s.Window != 1000 || s.Cache.MaxEntries != 2000 || s.Cache.TTLSeconds != 600 {
+		t.Errorf("search defaults %+v", s)
+	}
+	if c.SearchEnabled() {
+		t.Errorf("search on while the API is off")
+	}
+	c.Enabled = true
+	if !c.SearchEnabled() || c.SearchRequiresAccount() {
+		t.Errorf("public API: search=%v requiresAccount=%v, want true false", c.SearchEnabled(), c.SearchRequiresAccount())
+	}
+	c.Accounts.Enabled = true
+	if !c.SearchRequiresAccount() {
+		t.Errorf("accounts on: search must require an account by default")
+	}
+	off := false
+	c.Search.RequireAccount = &off
+	if c.SearchRequiresAccount() {
+		t.Errorf("requireAccount: false ignored")
+	}
+	c.Search.Enabled = &off
+	if c.SearchEnabled() {
+		t.Errorf("search.enabled: false ignored")
 	}
 }
 
@@ -124,5 +161,9 @@ func TestShippedConfigMetaAPI(t *testing.T) {
 	}
 	if len(c.Accounts.EnabledSteps()) != 0 {
 		t.Fatalf("the shipped config enables a registration step")
+	}
+	if c.Search.Enabled == nil || !*c.Search.Enabled || c.Search.RequireAccount == nil || !*c.Search.RequireAccount ||
+		c.Search.RateLimit.PerIPPerMinute != 30 {
+		t.Fatalf("the shipped search block: %+v", c.Search)
 	}
 }
