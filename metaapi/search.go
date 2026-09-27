@@ -123,7 +123,7 @@ func (c *catalogSearch) run(ctx context.Context, req *metav1.SearchRequest) (*me
 	if len(streams) == 0 {
 		return &metav1.SearchResponse{}, nil
 	}
-	page, more := mergePage(streams, offset, limit)
+	page, more := mergePage(streams, offset, limit, mergeOrder(req))
 
 	failed := 0
 	for _, st := range streams {
@@ -226,23 +226,42 @@ func (st *releaseStream) at(i int) (meta.Release, bool) {
 	}
 }
 
-// mergePage alternates the streams' releases, one from each in turn, and returns
-// the releases at [offset, offset+limit) and whether any stream has more past them.
-// A stream that runs out drops out of the rotation.
-func mergePage(streams []*releaseStream, offset, limit int) (page []meta.Release, more bool) {
+// mergePage merges the streams' releases and returns the releases at
+// [offset, offset+limit) and whether any stream has more past them. With a nil
+// before, it alternates the streams, one release from each in turn; otherwise it
+// takes whichever stream's next release sorts first, which interleaves streams
+// that each arrive in that order into one list in that order. A tie goes to the
+// earlier stream. A stream that runs out drops out.
+func mergePage(streams []*releaseStream, offset, limit int, before releaseLess) (page []meta.Release, more bool) {
 	want := offset + limit
 	next := make([]int, len(streams))
 	var merged []meta.Release
 	for len(merged) < want {
 		progressed := false
-		for i, st := range streams {
-			if len(merged) == want {
-				break
+		if before != nil {
+			best := -1
+			var bestRelease meta.Release
+			for i, st := range streams {
+				release, ok := st.at(next[i])
+				if ok && (best < 0 || before(release, bestRelease)) {
+					best, bestRelease = i, release
+				}
 			}
-			if release, ok := st.at(next[i]); ok {
-				merged = append(merged, release)
-				next[i]++
+			if best >= 0 {
+				merged = append(merged, bestRelease)
+				next[best]++
 				progressed = true
+			}
+		} else {
+			for i, st := range streams {
+				if len(merged) == want {
+					break
+				}
+				if release, ok := st.at(next[i]); ok {
+					merged = append(merged, release)
+					next[i]++
+					progressed = true
+				}
 			}
 		}
 		if !progressed {
@@ -259,6 +278,46 @@ func mergePage(streams []*releaseStream, offset, limit int) (page []meta.Release
 		page = merged[offset:]
 	}
 	return page, more
+}
+
+// releaseLess reports whether release a sorts before release b.
+type releaseLess func(a, b meta.Release) bool
+
+// mergeOrder is how a request's networks merge: by key for the sorts every
+// network answers and every MetaEntry carries the key of — DATE (age_days) and
+// SIZE (total_size) — and alternately, nil, for everything else. Relevance scores
+// are not comparable between daemons, and a sort one network lacks comes back from
+// it in relevance order, which a keyed merge would scramble.
+func mergeOrder(req *metav1.SearchRequest) releaseLess {
+	ascending := req.GetSortAscending()
+	switch req.GetSort() {
+	case metav1.SearchSort_SEARCH_SORT_DATE:
+		// Newest first is the smallest age; ascending is oldest first.
+		return func(a, b meta.Release) bool {
+			if ascending {
+				return releaseKey(a).GetAgeDays() > releaseKey(b).GetAgeDays()
+			}
+			return releaseKey(a).GetAgeDays() < releaseKey(b).GetAgeDays()
+		}
+	case metav1.SearchSort_SEARCH_SORT_SIZE:
+		return func(a, b meta.Release) bool {
+			if ascending {
+				return releaseKey(a).GetTotalSize() < releaseKey(b).GetTotalSize()
+			}
+			return releaseKey(a).GetTotalSize() > releaseKey(b).GetTotalSize()
+		}
+	default:
+		return nil
+	}
+}
+
+// releaseKey is the row a release's sort keys are read from. Every row of a
+// release carries the release's total size and age, so the first will do.
+func releaseKey(release meta.Release) *metav1.MetaEntry {
+	if len(release) == 0 {
+		return nil
+	}
+	return release[0]
 }
 
 // total adds the daemons' counts, or reports 0 ("not counted") when any stream

@@ -170,8 +170,9 @@ func (src *source) loadChunk(ctx context.Context, base *metav1.SearchRequest, k 
 	return out, nil
 }
 
-// normalizeRequest is req as forwarded: no paging or network, and keywords, excludes
-// and kinds in a canonical order and case, so equal searches share cache entries.
+// normalizeRequest is req as forwarded: no paging or network, and keywords, excludes,
+// kinds, categories, groups and the sort in a canonical order and case, so equal
+// searches share cache entries.
 func normalizeRequest(req *metav1.SearchRequest) *metav1.SearchRequest {
 	out := proto.Clone(req).(*metav1.SearchRequest)
 	out.Limit, out.Offset, out.Network = 0, 0, metav1.MetaNetwork_META_NETWORK_UNSPECIFIED
@@ -181,7 +182,27 @@ func normalizeRequest(req *metav1.SearchRequest) *metav1.SearchRequest {
 	kinds := slices.Clone(out.GetKinds())
 	slices.Sort(kinds)
 	out.Kinds = slices.Compact(kinds)
+	categories := slices.Clone(out.GetCategories())
+	slices.Sort(categories)
+	out.Categories = slices.Compact(categories)
+	// Newsgroup names are lower case on the wire and in every daemon's catalogue.
+	out.Groups = slices.Compact(sortedLower(out.GetGroups()))
+	// Relevance is the default order, and a ranked order has no direction.
+	if rankedSort(out.GetSort()) {
+		out.Sort, out.SortAscending = metav1.SearchSort_SEARCH_SORT_UNSPECIFIED, false
+	}
 	return out
+}
+
+// rankedSort reports whether sort is a relevance order, which is best-first only
+// and cannot be compared across daemons.
+func rankedSort(sort metav1.SearchSort) bool {
+	switch sort {
+	case metav1.SearchSort_SEARCH_SORT_UNSPECIFIED, metav1.SearchSort_SEARCH_SORT_RELEVANCE, metav1.SearchSort_SEARCH_SORT_BEST:
+		return true
+	default:
+		return false
+	}
 }
 
 func requestKey(req *metav1.SearchRequest) string {

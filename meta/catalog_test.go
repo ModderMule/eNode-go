@@ -209,3 +209,41 @@ func TestMintEntryMatchesEntryToFile(t *testing.T) {
 		t.Fatalf("MintEntry modified its input")
 	}
 }
+
+// TestNormalizeRequestCanonicalizesTheFilters covers the cache key for the search
+// filters: the same search spelled another way must share a cache entry, and a
+// different one must not.
+func TestNormalizeRequestCanonicalizesTheFilters(t *testing.T) {
+	a := &metav1.SearchRequest{
+		Query:         "x",
+		Categories:    []uint32{5040, 5000, 5040},
+		Groups:        []string{"alt.binaries.B", "alt.binaries.a"},
+		Sort:          metav1.SearchSort_SEARCH_SORT_RELEVANCE,
+		SortAscending: true,
+		Alive:         true,
+	}
+	b := &metav1.SearchRequest{
+		Query:      "x",
+		Categories: []uint32{5000, 5040},
+		Groups:     []string{"alt.binaries.a", "alt.binaries.b"},
+		Alive:      true,
+	}
+	c := &metav1.SearchRequest{
+		Query:      "x",
+		Categories: []uint32{5000, 5040},
+		Groups:     []string{"alt.binaries.a", "alt.binaries.b"},
+		Alive:      true,
+		Sort:       metav1.SearchSort_SEARCH_SORT_SIZE,
+	}
+
+	ka, kb, kc := requestKey(normalizeRequest(a)), requestKey(normalizeRequest(b)), requestKey(normalizeRequest(c))
+	t.Logf("input: %v | %v | %v", a, b, c)
+	t.Logf("output: a==b %t, b==c %t, normalized a %v", ka == kb, kb == kc, normalizeRequest(a))
+
+	if ka != kb {
+		t.Errorf("the same search spelled differently must share a key")
+	}
+	if kb == kc {
+		t.Errorf("a different sort must not share a key")
+	}
+}

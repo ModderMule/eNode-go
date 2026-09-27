@@ -113,6 +113,70 @@ func TestSearchAlternatesNetworks(t *testing.T) {
 	}
 }
 
+// sized returns one-row releases named prefix0 … with the given sizes and ages.
+func sized(prefix string, sizes, ages []uint64) []meta.Release {
+	out := make([]meta.Release, len(sizes))
+	for i := range out {
+		id := fmt.Sprintf("%s%d", prefix, i)
+		out[i] = meta.Release{{Name: id, CatalogId: id, TotalSize: sizes[i], AgeDays: uint32(ages[i])}}
+	}
+	return out
+}
+
+// TestSearchMergesSortedNetworksByKey covers the sorts every network answers:
+// each daemon's page arrives in that order, and the merge keeps it across them.
+// Any other sort alternates, since one network's answer is in relevance order.
+func TestSearchMergesSortedNetworksByKey(t *testing.T) {
+	cat := newFakeCatalog()
+	// Each network in size-descending order, which is what the daemons return for
+	// SIZE; the ages are chosen so DATE puts them in another order.
+	cat.releases[networkTorrent] = sized("t", []uint64{900, 500, 100}, []uint64{3, 1, 9})
+	cat.releases[networkUsenet] = sized("u", []uint64{800, 200}, []uint64{0, 5})
+	svc := searchService(cat)
+
+	for _, tc := range []struct {
+		name          string
+		sort          metav1.SearchSort
+		ascending     bool
+		offset, limit uint32
+		want          string
+	}{
+		{"size", metav1.SearchSort_SEARCH_SORT_SIZE, false, 0, 10, "[t0 u0 t1 u1 t2]"},
+		{"size, second page", metav1.SearchSort_SEARCH_SORT_SIZE, false, 2, 2, "[t1 u1]"},
+		{"seeders is torrent-only, so it alternates", metav1.SearchSort_SEARCH_SORT_SEEDERS, false, 0, 10, "[t0 u0 t1 u1 t2]"},
+		{"relevance alternates", metav1.SearchSort_SEARCH_SORT_UNSPECIFIED, false, 0, 3, "[t0 u0 t1]"},
+	} {
+		resp, err := svc.Search(context.Background(), &metav1.SearchRequest{
+			Query: "x", Sort: tc.sort, SortAscending: tc.ascending, Offset: tc.offset, Limit: tc.limit,
+		})
+		got := fmt.Sprint(names(resp))
+		t.Logf("%s: input sort=%s asc=%t offset=%d limit=%d; output %s err=%v", tc.name, tc.sort, tc.ascending, tc.offset, tc.limit, got, err)
+		if err != nil || got != tc.want {
+			t.Fatalf("%s: got %s, want %s", tc.name, got, tc.want)
+		}
+	}
+
+	// DATE: each network newest first, as the daemons return it.
+	cat.releases[networkTorrent] = sized("t", []uint64{1, 1, 1}, []uint64{1, 3, 9})
+	cat.releases[networkUsenet] = sized("u", []uint64{1, 1}, []uint64{0, 5})
+	resp, err := svc.Search(context.Background(), &metav1.SearchRequest{Query: "x", Sort: metav1.SearchSort_SEARCH_SORT_DATE, Limit: 10})
+	got := fmt.Sprint(names(resp))
+	t.Logf("date: output %s err=%v", got, err)
+	if err != nil || got != "[u0 t0 t1 u1 t2]" {
+		t.Fatalf("date: got %s, want [u0 t0 t1 u1 t2]", got)
+	}
+
+	// DATE ascending: each network oldest first.
+	cat.releases[networkTorrent] = sized("t", []uint64{1, 1, 1}, []uint64{9, 3, 1})
+	cat.releases[networkUsenet] = sized("u", []uint64{1, 1}, []uint64{5, 0})
+	resp, err = svc.Search(context.Background(), &metav1.SearchRequest{Query: "x", Sort: metav1.SearchSort_SEARCH_SORT_DATE, SortAscending: true, Limit: 10})
+	got = fmt.Sprint(names(resp))
+	t.Logf("date ascending: output %s err=%v", got, err)
+	if err != nil || got != "[t0 u0 t1 t2 u1]" {
+		t.Fatalf("date ascending: got %s, want [t0 u0 t1 t2 u1]", got)
+	}
+}
+
 // TestSearchSaysWhetherTheTotalIsACount covers total_exact and window: the merged
 // total is a count only when every network's was.
 func TestSearchSaysWhetherTheTotalIsACount(t *testing.T) {
