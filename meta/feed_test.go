@@ -137,3 +137,27 @@ func TestFeedRunSubscribesAndReconnects(t *testing.T) {
 		t.Fatalf("first Subscribe after_seq=%v, want a snapshot (0)", subs)
 	}
 }
+
+// TestFeedMatchSubFiles: feed rows follow the live rule — a file row is found by
+// "Release - path", and a release matched by its own name answers with its whole-set
+// row only.
+func TestFeedMatchSubFiles(t *testing.T) {
+	f := newTestFeed(100)
+	pack := packEntries(nzbEntry("Foo.Season.1"), "foo.s01e01.mkv", "foo.s01e02.mkv")
+	f.apply(&metav1.SubscribeResponse{Changes: []*metav1.ReleaseChange{
+		{Seq: 1, CatalogId: pack[0].GetCatalogId(), Op: metav1.ChangeOp_CHANGE_OP_UPSERT, Entries: pack},
+	}, Cursor: 1})
+
+	got := f.Match(text("foo"), []string{"foo"}, 10)
+	t.Logf("input: foo; output: %s", fileNames(got))
+	if len(got) != 1 || got[0].Name != "Foo.Season.1" {
+		t.Fatalf("got %s, want only the whole-set row", fileNames(got))
+	}
+
+	expr := node(storage.SearchAnd, text("season"), text("e02"))
+	got = f.Match(expr, []string{"season", "e02"}, 10)
+	t.Logf("input: season AND e02; output: %s", fileNames(got))
+	if len(got) != 1 || got[0].Name != "Foo.Season.1 - foo.s01e02.mkv" {
+		t.Fatalf("got %s, want the second episode under its release's name", fileNames(got))
+	}
+}

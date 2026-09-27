@@ -42,13 +42,13 @@ Before a client holds `baseKey` it can't obfuscate anything, so it bootstraps
 | Offset | Field | eNode-go source |
 |---|---|---|
 | +0 | `challenge` (echoed) | `BuildGlobServStatResPacket`, `ed2k/udpoperations.go` |
-| +4 | current users (+2000) | |
+| +4 | current users | `advertisedUsers` |
 | +8 | current files | |
 | +12 | max users | |
 | +16 | soft file limit | `files.softLimit`, default 10000 — see [`server-client-communication.md`](server-client-communication.md#per-client-publish-limits) |
 | +20 | hard file limit | `files.hardLimit`, default 20000 |
 | +24 | UDP flags | |
-| +28 | low-ID users (+1000) | |
+| +28 | low-ID users | `advertisedLowIDs` |
 | +32 | UDP obf port (uint16) | |
 | +34 | TCP obf port (uint16) | |
 | +36 | **per-client UDP key** (uint32) | `deriveUDPKey(udp.serverKey, clientIP)` — the key the client adopts |

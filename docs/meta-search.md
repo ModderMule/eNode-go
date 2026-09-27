@@ -47,7 +47,7 @@ Each daemon row becomes one ordinary search record:
 |---|---|
 | hash | The 16-byte **meta hash** (`ED 2B 01 …`), minted by eNode-go from the row's identity (infohash or NZB digest) by `enodemeta/metahash`. A daemon never supplies it. |
 | client ID / port | `0` / `0`. eMule records no source. |
-| `FT_FILENAME` | `namePrefix` + the release's name. |
+| `FT_FILENAME` | `namePrefix` + the release's name. A file row of a multi-file release is named `Release Name - path/inside/release` (see [Sub-file rows](#sub-file-rows)). |
 | `FT_FILESIZE` | The selected file's size, or the release's total size for a whole-set row. |
 | `FT_FILETYPE` | The daemon's eD2K type string. |
 | `FT_SOURCES`, `FT_COMPLETE_SOURCES` | Torrent seeders capped at 99, which stays below eMule's spam heuristic. `0` for an NZB, which has no sources. |
@@ -56,6 +56,14 @@ Each daemon row becomes one ordinary search record:
 A stock eMule shows these rows normally, prefix included. A download started from
 one never finds a source. A capable client such as eMuleQt reads the `FT_META_*` tags
 and hands the release to its own BitTorrent or Usenet engine instead.
+
+The server sends the prefix to every client; it does not know which ones can read the
+tags. eMuleQt strips it again once the row's tags agree with its meta hash, and shows
+a network icon in its place (`SearchFile.cpp`). It removes only a leading bracket that
+names the network, `[torrent…]` or `[usenet…]`, so a custom prefix such as
+`[torrent example.org] ` goes too, while a release tag like `[Group] Title` stays. The
+prefix is therefore visible only in clients without meta support, where it is the
+sole hint of the row's origin.
 
 **Guard.** `OP_OFFERFILES` drops any record whose hash parses as a meta hash
 (`metahash.RejectOfferedFile`). Without it, a modified client could attach itself as
@@ -75,8 +83,9 @@ Tests pin both behaviours.
    - if the feed has not filled its quota, gets a **cache** hit or makes a **live**
      `MetaIngest.Search` within its deadline.
 3. Every row is run through `storage.MatchSearchExpr` against the **full** tree and its
-   unprefixed name. This keeps OR, NOT and extension constraints exact. It also means
-   the prefix itself can never match a keyword.
+   unprefixed name, one release at a time (see [Sub-file rows](#sub-file-rows)). This
+   keeps OR, NOT and extension constraints exact. It also means the prefix itself can
+   never match a keyword.
 4. eD2K files come first, then the torrent rows, then the Usenet rows. The total is
    capped at `storage.MaxSearchResults`. The existing 255-row paging
    (`OP_QUERY_MORE_RESULT`) is unchanged.
@@ -85,6 +94,37 @@ A daemon that is slow, down, or has no search index adds at most its deadline to
 search and contributes nothing. It never fails the search. If a daemon answers
 `unavailable`, `unimplemented` or `unauthenticated`, live calls to it pause for 30 s,
 so each search does not pay for that answer again.
+
+### Sub-file rows
+
+Both daemons find a release by its name **and** by the paths or file names inside
+it, and send every row of a release they found: the whole-set row plus one row per
+file. eNode-go (`meta.NameSubFiles`, on live answers and feed rows alike) renames
+each file row of a multi-file release to
+
+    Release Name - path/inside/release
+
+taking the release name from the whole-set row sent with it. A torrent's path is
+relative to the torrent's name; an NZB's is the file name. The file's extension stays
+last, so extension searches still work. A single-file release keeps its name. The
+name is not part of the meta hash, so the rename is hash-safe.
+
+Rows are then matched per release (`matchRelease` in `meta/searcher.go`):
+
+- If the whole-set row matches, it alone is returned. A season pack found by its
+  own name does not fill the answer with every episode.
+- Otherwise every file row whose `Release - path` name matches is returned, so
+  terms may come from the release name, a folder, or the file name.
+
+| Query against `Foo.Season.1` with `Disc1/S01E01.mkv`, `Disc1/S01E02.mkv` | Rows |
+|---|---|
+| `foo` | `Foo.Season.1` |
+| `s01e01`, `foo s01e01` | `Foo.Season.1 - Disc1/S01E01.mkv` |
+| `disc1` | both episodes |
+| `foo` + extension `mkv` (the whole-set row fails the extension) | both episodes |
+
+`MetaApi.Search` is not affected: it returns the daemon's rows with their own
+`name` and `file_path` fields.
 
 ### UDP
 

@@ -65,6 +65,10 @@ type Config struct {
 
 	Storage StorageConfig `yaml:"storage"`
 	Debug   DebugConfig   `yaml:"debug"`
+
+	// StatsBoost is deliberately absent from the published enode.config.yaml and
+	// only carried by local configs; see StatsBoostConfig.
+	StatsBoost StatsBoostConfig `yaml:"statsBoost"`
 }
 
 // DebugConfig gates debug-only development aids. SeedFixtures injects the dummy
@@ -78,6 +82,25 @@ type Config struct {
 type DebugConfig struct {
 	SeedFixtures bool   `yaml:"seedFixtures"`
 	FixturesFile string `yaml:"fixturesFile"`
+}
+
+// StatsBoostConfig adds fixed offsets to the counts advertised in both status
+// packets — TCP OP_SERVERSTATUS and UDP OP_GLOBSERVSTATRES — so the two channels
+// never disagree. It replaces the hard-coded +2000 users / +1000 LowIDs the UDP
+// reply used to carry (ported from the original's "fake value, for testing").
+//
+// Plain ints: a missing section is 0 everywhere, which advertises the real counts.
+// The offsets matter to eMule's Automatic search type, which, connected to both
+// networks, searches the server rather than Kad only when it reports more than
+// 40 000 and fewer than 2 000 000 users and more than 5 000 000 files (and the
+// client's server list holds fewer than 40 servers). See docs/stats-boost.local.md.
+//
+// Local-only on purpose: TestShippedConfigDocumentsEveryKey and
+// TestConfigFilesHaveMatchingKeys exempt it (localOnlyConfigKeys).
+type StatsBoostConfig struct {
+	Users      int `yaml:"users"`
+	LowIDUsers int `yaml:"lowIDUsers"`
+	Files      int `yaml:"files"`
 }
 
 // ServerEntry is one advertised peer server in OP_SERVERLIST. IP may be an IPv4
@@ -730,6 +753,10 @@ func setDefaults(cfg *Config) error {
 	if softFiles > 0 && hardFiles > 0 && hardFiles < softFiles {
 		return fmt.Errorf("files.hardLimit (%d) is below files.softLimit (%d): a client would be disconnected before the soft-limit warning could be sent",
 			hardFiles, softFiles)
+	}
+	if b := cfg.StatsBoost; b.Users < 0 || b.LowIDUsers < 0 || b.Files < 0 {
+		return fmt.Errorf("statsBoost.users (%d), statsBoost.lowIDUsers (%d) and statsBoost.files (%d) must not be negative",
+			b.Users, b.LowIDUsers, b.Files)
 	}
 	if err := setMetaSearchDefaults(&cfg.MetaSearch); err != nil {
 		return err

@@ -347,6 +347,18 @@ func run(ctx context.Context, configPath string) error {
 			metaSearcher.Networks(), cfg.MetaSearch.AdvertiseToLegacyClientsOrDefault(), cfg.MetaSearch.Cache.Enabled)
 	}
 
+	// Offsets added to the counts in OP_SERVERSTATUS and OP_GLOBSERVSTATRES. Local-only
+	// config; absent means the real counts are advertised.
+	runtime.SetStatsBoost(ed2k.StatsBoost{
+		Users:      cfg.StatsBoost.Users,
+		LowIDUsers: cfg.StatsBoost.LowIDUsers,
+		Files:      cfg.StatsBoost.Files,
+	})
+	if b := cfg.StatsBoost; b.Users != 0 || b.LowIDUsers != 0 || b.Files != 0 {
+		logging.Warnf("statsBoost active: advertising users+%d lowIDUsers+%d files+%d over the real counts",
+			b.Users, b.LowIDUsers, b.Files)
+	}
+
 	if metaAPI != nil {
 		stopMetaAPI, err := metaAPI.start(ctx)
 		if err != nil {
@@ -446,6 +458,15 @@ func run(ctx context.Context, configPath string) error {
 	}
 	defer ln.Close()
 	logging.Infof("listening: tcp %s:%d (obfuscation accepted: %t)", tcpCfg.Address, tcpCfg.Port, cfg.SupportCrypt)
+	if links := ed2kServerLinks(advertisedIP, serverIPv6, cfg.TCP.Port); len(links) > 0 {
+		// The link format has no name field (srchybrid/ED2KLink.cpp rejects anything but
+		// "/" after the port); clients learn the name from OP_SERVERIDENT after connecting.
+		for _, link := range links {
+			logging.Infof("ed2k server link (%s): %s", cfg.Name, link)
+		}
+	} else {
+		logging.Warnf("ed2k server link: unavailable, no public address known (set address or dynIp)")
+	}
 
 	udpMainHandler := runtime.UDPHandler(false)
 	if cfg.NAT.Enabled {
@@ -993,4 +1014,19 @@ func adminMetaStats(s *meta.Searcher) (cacheEntries int, out []admin.MetaNetwork
 		})
 	}
 	return s.CacheEntries(), out
+}
+
+// ed2kServerLinks returns the ed2k://|server|...|/ links clients paste to add this
+// server, in the format srchybrid/ED2KLink.cpp writes. The IPv4 link works in every
+// eMule; the bracketed IPv6 link only in clients that parse it (eMuleQt ED2KLink.cpp).
+// An unknown IPv4 (no routable address or dynIp) or IPv6 yields no link for it.
+func ed2kServerLinks(advertisedIP string, serverIPv6 []byte, port uint16) []string {
+	var links []string
+	if ip := net.ParseIP(advertisedIP); ip != nil && ip.To4() != nil && !ip.IsUnspecified() {
+		links = append(links, fmt.Sprintf("ed2k://|server|%s|%d|/", ip.To4(), port))
+	}
+	if len(serverIPv6) == net.IPv6len {
+		links = append(links, fmt.Sprintf("ed2k://|server|[%s]|%d|/", net.IP(serverIPv6), port))
+	}
+	return links
 }

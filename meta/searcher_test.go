@@ -183,3 +183,37 @@ func TestSearchFeedAndLiveDeduplicate(t *testing.T) {
 		t.Fatalf("a full quota from the feed still called the daemon")
 	}
 }
+
+// TestSearchMatchesSubFiles: the daemon returns every row of a release it found by
+// name or by path; a file row is kept when "Release - path" matches and the release's
+// own row does not, and the release's own row alone stands for a release it matches.
+func TestSearchMatchesSubFiles(t *testing.T) {
+	entries := packEntries(torrentEntry("Foo.Season.1", 50), "Disc1/S01E01.mkv", "Disc1/S01E02.mkv")
+	entries = append(entries, torrentEntry("Other.S01E01.Show.mkv", 5))
+	d := &fakeDaemon{entries: entries}
+	s := searcherFor(testConfig(t, true, false), map[string]*fakeDaemon{NetworkTorrent: d})
+
+	for _, tc := range []struct {
+		name string
+		expr *storage.SearchExpr
+		want []string
+	}{
+		{"release name", text("foo"), []string{"[torrent] Foo.Season.1"}},
+		{"file name", text("s01e01"), []string{"[torrent] Foo.Season.1 - Disc1/S01E01.mkv", "[torrent] Other.S01E01.Show.mkv"}},
+		{"release and file", text("foo s01e01"), []string{"[torrent] Foo.Season.1 - Disc1/S01E01.mkv"}},
+		{"folder", text("disc1"), []string{"[torrent] Foo.Season.1 - Disc1/S01E01.mkv", "[torrent] Foo.Season.1 - Disc1/S01E02.mkv"}},
+		{"release name, ext excludes the whole set", node(storage.SearchAnd, text("foo"), tagString(storage.SearchExtTag, "mkv")),
+			[]string{"[torrent] Foo.Season.1 - Disc1/S01E01.mkv", "[torrent] Foo.Season.1 - Disc1/S01E02.mkv"}},
+	} {
+		got := s.Search(context.Background(), tc.expr, false)
+		t.Logf("input: %s; output: %s", tc.name, fileNames(got))
+		if len(got) != len(tc.want) {
+			t.Fatalf("%s: got %s, want %v", tc.name, fileNames(got), tc.want)
+		}
+		for i, name := range tc.want {
+			if got[i].Name != name {
+				t.Fatalf("%s: row %d named %q, want %q", tc.name, i, got[i].Name, name)
+			}
+		}
+	}
+}

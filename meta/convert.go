@@ -82,6 +82,44 @@ func MintEntry(pb *metav1.MetaEntry) (*metav1.MetaEntry, error) {
 	return pbconv.EntryToProto(entry), nil
 }
 
+// SubFileSeparator joins a release's name and a file's path in a file row's name.
+const SubFileSeparator = " - "
+
+// NameSubFiles renames every file row of a multi-file release to
+// "Release Name - path/inside/release", so an eMule user sees which release a file
+// belongs to, and a search matches terms spread across the release's name and the
+// file's path. The release name is taken from the whole-set row the daemon sends
+// with the file rows; a release without one (a single-file release) keeps its names.
+//
+// The name is not part of the meta hash, so renaming a row cannot break it. The
+// file's own extension stays last, so extension searches still see it.
+func NameSubFiles(rows []storage.File) {
+	roots := map[string]string{}
+	for _, row := range rows {
+		if row.Meta != nil && isWholeSet(row) {
+			roots[row.Meta.CatalogID] = row.Name
+		}
+	}
+	if len(roots) == 0 {
+		return
+	}
+	for i := range rows {
+		row := &rows[i]
+		if row.Meta == nil || isWholeSet(*row) {
+			continue
+		}
+		root, ok := roots[row.Meta.CatalogID]
+		if !ok {
+			continue
+		}
+		sub := row.Meta.FilePath
+		if sub == "" {
+			sub = row.Name
+		}
+		row.Name = root + SubFileSeparator + sub
+	}
+}
+
 func mint(pb *metav1.MetaEntry) (model.Entry, error) {
 	entry := pbconv.EntryFromProto(pb)
 	if err := entry.Validate(); err != nil {
@@ -91,4 +129,9 @@ func mint(pb *metav1.MetaEntry) (model.Entry, error) {
 		return model.Entry{}, err
 	}
 	return entry, nil
+}
+
+// isWholeSet reports whether a row stands for its whole release rather than one file.
+func isWholeSet(row storage.File) bool {
+	return row.Meta.FileIndex == metahash.FileIndexWholeSet32
 }

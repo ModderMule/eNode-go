@@ -24,10 +24,12 @@ type fakeCatalog struct {
 	errs     map[string]error
 	loads    map[string]int
 	requests []*metav1.SearchRequest
+	// inexact makes a network's count a lower bound.
+	inexact map[string]bool
 }
 
 func newFakeCatalog() *fakeCatalog {
-	return &fakeCatalog{releases: map[string][]meta.Release{}, errs: map[string]error{}, loads: map[string]int{}}
+	return &fakeCatalog{releases: map[string][]meta.Release{}, errs: map[string]error{}, loads: map[string]int{}, inexact: map[string]bool{}}
 }
 
 func (c *fakeCatalog) CatalogNetworks() []string {
@@ -50,7 +52,7 @@ func (c *fakeCatalog) SearchCatalog(_ context.Context, network string, req *meta
 	}
 	all := c.releases[network]
 	start, end := min(k*meta.ChunkSize, len(all)), min((k+1)*meta.ChunkSize, len(all))
-	return meta.Chunk{Releases: all[start:end], Total: uint64(len(all)), More: end < len(all)}, nil
+	return meta.Chunk{Releases: all[start:end], Total: uint64(len(all)), TotalExact: !c.inexact[network], More: end < len(all)}, nil
 }
 
 func (c *fakeCatalog) loadCount(network string) int {
@@ -107,6 +109,34 @@ func TestSearchAlternatesNetworks(t *testing.T) {
 		t.Logf("input: offset=%d limit=%d; output: %s next=%d total=%d err=%v", tc.offset, tc.limit, got, resp.GetNextOffset(), resp.GetTotal(), err)
 		if err != nil || got != tc.want || resp.GetNextOffset() != tc.next || resp.GetTotal() != 7 {
 			t.Fatalf("got %s next %d total %d, want %s next %d total 7", got, resp.GetNextOffset(), resp.GetTotal(), tc.want, tc.next)
+		}
+	}
+}
+
+// TestSearchSaysWhetherTheTotalIsACount covers total_exact and window: the merged
+// total is a count only when every network's was.
+func TestSearchSaysWhetherTheTotalIsACount(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		inexact string
+		exact   bool
+	}{
+		{"every network counted", "", true},
+		{"one network bounded", networkUsenet, false},
+	} {
+		cat := newFakeCatalog()
+		cat.releases[networkTorrent] = releases("t", 5)
+		cat.releases[networkUsenet] = releases("u", 2)
+		if tc.inexact != "" {
+			cat.inexact[tc.inexact] = true
+		}
+
+		resp, err := searchService(cat).Search(context.Background(), &metav1.SearchRequest{Query: "x", Limit: 4})
+		t.Logf("%s: input inexact=%q; output total=%d exact=%t window=%d err=%v",
+			tc.name, tc.inexact, resp.GetTotal(), resp.GetTotalExact(), resp.GetWindow(), err)
+		if err != nil || resp.GetTotal() != 7 || resp.GetTotalExact() != tc.exact || resp.GetWindow() != 1000 {
+			t.Fatalf("%s: got total %d exact %t window %d, want 7 exact %t window 1000",
+				tc.name, resp.GetTotal(), resp.GetTotalExact(), resp.GetWindow(), tc.exact)
 		}
 	}
 }

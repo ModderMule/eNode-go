@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"fmt"
+	"path"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,8 @@ import (
 	"connectrpc.com/connect/v2/connectinprocess"
 	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
 	"github.com/ModderMule/enodemeta/gen/enode/meta/v1/metav1connect"
+	"github.com/ModderMule/enodemeta/metahash"
+	"google.golang.org/protobuf/proto"
 )
 
 // fakeDaemon is an in-process MetaIngest server: the real generated handler and
@@ -110,6 +113,26 @@ func torrentEntry(name string, seeders uint32) *metav1.MetaEntry {
 		Identity:  id[:],
 		FileCount: 1,
 	}
+}
+
+// packEntries is a multi-file release as a daemon sends it: the whole-set row named
+// after the release, then one row per file carrying its path inside the release.
+func packEntries(base *metav1.MetaEntry, paths ...string) []*metav1.MetaEntry {
+	whole := proto.Clone(base).(*metav1.MetaEntry)
+	whole.FileIndex = metahash.FileIndexWholeSet32
+	whole.FileCount = uint32(len(paths))
+	whole.Size = whole.GetTotalSize()
+	whole.Magnet = ""
+	out := []*metav1.MetaEntry{whole}
+	for i, p := range paths {
+		file := proto.Clone(whole).(*metav1.MetaEntry)
+		file.FileIndex = uint32(i)
+		file.FilePath = p
+		file.Name = path.Base(p)
+		file.Size = whole.GetTotalSize() / uint64(len(paths))
+		out = append(out, file)
+	}
+	return out
 }
 
 // nzbEntry is a valid single-file Usenet row.

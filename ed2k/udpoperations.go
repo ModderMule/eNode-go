@@ -131,17 +131,20 @@ func buildGlobFoundSources(fileHash []byte, sources []storage.Source, format Sou
 // channel. eserver answers a plain 0x96 with the short 32-byte form and only gives ports
 // and ServerKey over the obfuscated one; being more generous breaks nothing and saves a
 // client the extra round trip.
+//
+// The counts are written as given. Any statsBoost offset is applied by the caller
+// (ServerRuntime.buildStatRes), the same way OP_SERVERSTATUS gets it.
 func BuildGlobServStatResPacket(challenge uint32, cfg UDPConfig, clientsCount int, filesCount int, lowIDCount int) (*Buffer, error) {
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpGlobServStatRes},
 		{Type: TypeUint32, Value: challenge},
-		{Type: TypeUint32, Value: uint32(clientsCount + 2000)},
+		{Type: TypeUint32, Value: uint32(clientsCount)},
 		{Type: TypeUint32, Value: uint32(filesCount)},
 		{Type: TypeUint32, Value: cfg.MaxConnections},
 		{Type: TypeUint32, Value: cfg.SoftFiles},
 		{Type: TypeUint32, Value: cfg.HardFiles},
 		{Type: TypeUint32, Value: cfg.UDPFlags},
-		{Type: TypeUint32, Value: uint32(lowIDCount + 1000)},
+		{Type: TypeUint32, Value: uint32(lowIDCount)},
 		{Type: TypeUint16, Value: cfg.UDPPortObf},
 		{Type: TypeUint16, Value: cfg.TCPPortObf},
 		{Type: TypeUint32, Value: cfg.UDPServerKey},

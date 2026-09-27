@@ -218,12 +218,12 @@ func (src *source) search(ctx context.Context, expr *storage.SearchExpr, q Query
 	var out []storage.File
 	seen := map[string]struct{}{}
 	add := func(rows []storage.File, filter bool) {
+		if filter {
+			rows = matchReleases(expr, rows)
+		}
 		for _, row := range rows {
 			if len(out) >= limit {
 				return
-			}
-			if filter && !storage.MatchSearchExpr(expr, row) {
-				continue
 			}
 			if _, dup := seen[string(row.Hash)]; dup {
 				continue
@@ -289,6 +289,7 @@ func (src *source) fetch(ctx context.Context, q Query) ([]storage.File, error) {
 			}
 			rows = append(rows, file)
 		}
+		NameSubFiles(rows)
 		return rows, nil
 	}
 	if src.cache == nil {
@@ -357,4 +358,43 @@ func isTimeout(err error) bool {
 		return true
 	}
 	return false
+}
+
+// matchReleases keeps the rows of a daemon answer that match expr, release by
+// release in the daemon's ranking order; see matchRelease.
+func matchReleases(expr *storage.SearchExpr, rows []storage.File) []storage.File {
+	var order []string
+	groups := map[string][]storage.File{}
+	for _, row := range rows {
+		id := row.Meta.CatalogID
+		if _, ok := groups[id]; !ok {
+			order = append(order, id)
+		}
+		groups[id] = append(groups[id], row)
+	}
+	var out []storage.File
+	for _, id := range order {
+		out = append(out, matchRelease(expr, groups[id])...)
+	}
+	return out
+}
+
+// matchRelease keeps the rows of one release that match expr. When the whole-set
+// row matches, it alone stands for the release, so that a season pack found by its
+// own name does not fill the answer with every episode. Otherwise the file rows are
+// matched by their "Release - path" names (NameSubFiles), which is what makes a
+// file found through its path or a term of the release's name show up.
+func matchRelease(expr *storage.SearchExpr, rows []storage.File) []storage.File {
+	for _, row := range rows {
+		if isWholeSet(row) && storage.MatchSearchExpr(expr, row) {
+			return []storage.File{row}
+		}
+	}
+	var out []storage.File
+	for _, row := range rows {
+		if !isWholeSet(row) && storage.MatchSearchExpr(expr, row) {
+			out = append(out, row)
+		}
+	}
+	return out
 }

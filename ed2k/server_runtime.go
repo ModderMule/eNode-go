@@ -121,6 +121,9 @@ type ServerRuntime struct {
 	// bind, then only read. metaAdvertiseLegacy sends them to clients that did not ask.
 	meta                MetaSearcher
 	metaAdvertiseLegacy bool
+	// boost is added to the counts in both status packets. Set once by SetStatsBoost
+	// before the listeners bind, then only read. The zero value advertises real counts.
+	boost StatsBoost
 }
 
 // ipv6Enabled reports whether IPv6 is on at all (dual-stack accept, CT_MOD_IP_V6
@@ -1546,7 +1549,7 @@ func (s *ServerRuntime) advertisableServers() []storage.Server {
 
 func (c *tcpClient) sendServerStatus() {
 	clients, files := c.server.counters.Counts()
-	packet, err := BuildServerStatusPacket(clients, c.server.advertisedFiles(files))
+	packet, err := BuildServerStatusPacket(c.server.advertisedUsers(clients), c.server.advertisedFiles(files))
 	if err != nil {
 		return
 	}
@@ -2257,7 +2260,7 @@ func (s *ServerRuntime) buildStatRes(challenge uint32, udpKey uint32, remote *ne
 		SoftFiles:      s.UDP.SoftFiles,
 		HardFiles:      s.UDP.HardFiles,
 		ObservedIP:     observed,
-	}, clients, s.advertisedFiles(files), int(s.LowIDs.Count()))
+	}, s.advertisedUsers(clients), s.advertisedFiles(files), s.advertisedLowIDs(int(s.LowIDs.Count())))
 }
 
 // udpCryptPingReply answers a server-UDP crypt-ping (see the call site in

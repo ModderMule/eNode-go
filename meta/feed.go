@@ -98,12 +98,16 @@ func (f *Feed) Match(expr *storage.SearchExpr, terms []string, limit int) []stor
 
 	f.mu.RLock()
 	var out []storage.File
+	var candidates []storage.File
 	for _, rows := range f.releases {
+		candidates = candidates[:0]
 		for _, row := range rows {
-			if !containsAll(row.lname, lower) || !storage.MatchSearchExpr(expr, row.file) {
-				continue
+			if containsAll(row.lname, lower) {
+				candidates = append(candidates, row.file)
 			}
-			out = append(out, row.file)
+		}
+		if len(candidates) > 0 {
+			out = append(out, matchRelease(expr, candidates)...)
 		}
 	}
 	f.mu.RUnlock()
@@ -223,13 +227,18 @@ func (f *Feed) apply(msg *metav1.SubscribeResponse) {
 }
 
 func (f *Feed) addLocked(id string, entries []*metav1.MetaEntry) {
-	rows := make([]feedRow, 0, len(entries))
+	files := make([]storage.File, 0, len(entries))
 	for _, entry := range entries {
 		file, err := EntryToFile(entry)
 		if err != nil {
 			logging.Debugf("meta feed %s: dropped row of %s: %v", f.network, id, err)
 			continue
 		}
+		files = append(files, file)
+	}
+	NameSubFiles(files)
+	rows := make([]feedRow, 0, len(files))
+	for _, file := range files {
 		rows = append(rows, feedRow{file: file, lname: strings.ToLower(file.Name)})
 	}
 	if len(rows) == 0 {

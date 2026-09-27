@@ -35,7 +35,8 @@ func (s *ServerRuntime) SetMetaSearcher(m MetaSearcher, advertiseToLegacy bool) 
 }
 
 // AdvertisedFiles is the file total sent in OP_SERVERSTATUS and OP_GLOBSERVSTATRES:
-// the cached eD2K count plus what the meta searcher counts toward it. Counts() keeps
+// the cached eD2K count plus what the meta searcher counts toward it, plus any
+// statsBoost files offset. Counts() keeps
 // returning the eD2K figure alone, so the dashboard can show both.
 func (s *ServerRuntime) AdvertisedFiles() int {
 	_, files := s.counters.Counts()
@@ -107,7 +108,8 @@ func udpSearchFlags(tags []NamedTag) uint32 {
 	return 0
 }
 
-// advertisedFiles adds the meta file count to an eD2K file count, clamped to the
+// advertisedFiles adds the meta file count and the statsBoost files offset to an
+// eD2K file count, clamped to the
 // uint32 both status packets carry. Clients only display the figure, except that
 // eMule's automatic search type prefers the server over Kad on a large server with
 // more than 5M files (docs/meta-search.md).
@@ -116,5 +118,6 @@ func (s *ServerRuntime) advertisedFiles(ed2kFiles int) int {
 	if s.meta != nil {
 		total += uint64(max(s.meta.AdvertisedFiles(), 0))
 	}
+	total += uint64(max(s.boost.Files, 0))
 	return int(min(total, math.MaxUint32))
 }

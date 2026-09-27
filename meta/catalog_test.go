@@ -44,7 +44,7 @@ func (d *pagingDaemon) Search(_ context.Context, req *metav1.SearchRequest) (*me
 		n = min(n, d.pageCap)
 	}
 	end := min(start+n, window)
-	resp := &metav1.SearchResponse{Total: uint64(len(d.releases))}
+	resp := &metav1.SearchResponse{Total: uint64(len(d.releases)), TotalExact: true}
 	for _, rel := range d.releases[start:end] {
 		resp.Entries = append(resp.Entries, rel...)
 	}
@@ -108,8 +108,8 @@ func TestSearchCatalogChunksAndCaches(t *testing.T) {
 
 	for k, want := range []int{100, 100, 50} {
 		chunk, err := s.SearchCatalog(context.Background(), NetworkTorrent, req, k)
-		t.Logf("input: chunk %d; output: releases=%d total=%d more=%t err=%v", k, len(chunk.Releases), chunk.Total, chunk.More, err)
-		if err != nil || len(chunk.Releases) != want || chunk.Total != 250 {
+		t.Logf("input: chunk %d; output: releases=%d total=%d exact=%t more=%t err=%v", k, len(chunk.Releases), chunk.Total, chunk.TotalExact, chunk.More, err)
+		if err != nil || len(chunk.Releases) != want || chunk.Total != 250 || !chunk.TotalExact {
 			t.Fatalf("chunk %d: %d releases total %d err %v, want %d of 250", k, len(chunk.Releases), chunk.Total, err, want)
 		}
 		if first := chunk.Releases[0][0].GetName(); first != fmt.Sprintf("ubuntu-%d", k*ChunkSize) {

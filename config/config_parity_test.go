@@ -16,6 +16,24 @@ const (
 	localConfigPath   = "../enode.local.yaml"
 )
 
+// localOnlyConfigKeys are top-level sections that are real config but must never
+// appear in the published enode.config.yaml. Both parity tests ignore them and
+// everything beneath them. statsBoost inflates advertised counts; see
+// config.StatsBoostConfig.
+var localOnlyConfigKeys = []string{"statsBoost"}
+
+// dropLocalOnlyKeys removes localOnlyConfigKeys and their children from paths.
+func dropLocalOnlyKeys(paths map[string]bool) map[string]bool {
+	for p := range paths {
+		for _, k := range localOnlyConfigKeys {
+			if p == k || strings.HasPrefix(p, k+".") {
+				delete(paths, p)
+			}
+		}
+	}
+	return paths
+}
+
 // TestShippedConfigDocumentsEveryKey fails if a field exists in the config
 // structs but is absent from the tracked enode.config.yaml. A missing key is
 // silently the Go zero value at load time (a bool becomes false), so a feature an
@@ -24,6 +42,7 @@ const (
 func TestShippedConfigDocumentsEveryKey(t *testing.T) {
 	structPaths := map[string]bool{}
 	collectStructPaths(reflect.TypeOf(Config{}), "", structPaths)
+	dropLocalOnlyKeys(structPaths)
 	shipped := readYAMLKeyPaths(t, shippedConfigPath)
 
 	t.Logf("config struct declares %d key paths", len(structPaths))
@@ -51,7 +70,7 @@ func TestConfigFilesHaveMatchingKeys(t *testing.T) {
 		t.Skipf("skipping cross-file parity: %s not present (%v)", localConfigPath, err)
 	}
 	shipped := readYAMLKeyPaths(t, shippedConfigPath)
-	local := readYAMLKeyPaths(t, localConfigPath)
+	local := dropLocalOnlyKeys(readYAMLKeyPaths(t, localConfigPath))
 
 	onlyShipped := keysMissingFrom(shipped, local)
 	onlyLocal := keysMissingFrom(local, shipped)
@@ -64,6 +83,19 @@ func TestConfigFilesHaveMatchingKeys(t *testing.T) {
 	}
 	if len(onlyLocal) > 0 {
 		t.Errorf("keys in enode.local.yaml but missing from enode.config.yaml: %v", onlyLocal)
+	}
+}
+
+// TestShippedConfigOmitsLocalOnlyKeys guards the other direction of the exemption:
+// a local-only section must not leak into the published template.
+func TestShippedConfigOmitsLocalOnlyKeys(t *testing.T) {
+	shipped := readYAMLKeyPaths(t, shippedConfigPath)
+	t.Logf("input: %s, local-only keys %v", shippedConfigPath, localOnlyConfigKeys)
+	for _, k := range localOnlyConfigKeys {
+		t.Logf("output: %s present=%t", k, shipped[k])
+		if shipped[k] {
+			t.Errorf("enode.config.yaml must not carry the local-only section %q", k)
+		}
 	}
 }
 

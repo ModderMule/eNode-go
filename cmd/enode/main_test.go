@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -87,5 +88,34 @@ func TestResolveDynIPValue_Passthrough(t *testing.T) {
 	}
 	if source != "" {
 		t.Fatalf("resolveDynIPValue() source = %q, want empty", source)
+	}
+}
+
+func TestEd2kServerLinks(t *testing.T) {
+	v6 := net.ParseIP("2001:db8::1").To16()
+	tests := []struct {
+		name string
+		ip   string
+		v6   []byte
+		port uint16
+		want []string
+	}{
+		{name: "ipv4 only", ip: "203.0.113.5", port: 4661, want: []string{"ed2k://|server|203.0.113.5|4661|/"}},
+		{name: "dual stack", ip: "203.0.113.5", v6: v6, port: 4242, want: []string{
+			"ed2k://|server|203.0.113.5|4242|/",
+			"ed2k://|server|[2001:db8::1]|4242|/",
+		}},
+		{name: "ipv6 only", ip: "", v6: v6, port: 4661, want: []string{"ed2k://|server|[2001:db8::1]|4661|/"}},
+		{name: "unspecified", ip: "0.0.0.0", port: 4661, want: nil},
+		{name: "hostname ignored", ip: "example.org", port: 4661, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ed2kServerLinks(tt.ip, tt.v6, tt.port)
+			t.Logf("input ip=%q v6=%v port=%d -> %v", tt.ip, tt.v6, tt.port, got)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

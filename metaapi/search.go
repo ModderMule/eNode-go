@@ -135,7 +135,8 @@ func (c *catalogSearch) run(ctx context.Context, req *metav1.SearchRequest) (*me
 		return nil, &FetchError{Code: connect.CodeUnavailable, MsgCode: CodeSearchUnavailable, cause: streams[0].err}
 	}
 
-	resp := &metav1.SearchResponse{Total: total(streams)}
+	resp := &metav1.SearchResponse{Window: uint32(c.cfg.Window)}
+	resp.Total, resp.TotalExact = total(streams)
 	for _, release := range page {
 		resp.Entries = append(resp.Entries, release...)
 	}
@@ -261,23 +262,27 @@ func mergePage(streams []*releaseStream, offset, limit int) (page []meta.Release
 }
 
 // total adds the daemons' counts, or reports 0 ("not counted") when any stream
-// failed or returned releases without a count.
-func total(streams []*releaseStream) uint64 {
-	var sum uint64
+// failed or returned releases without a count. The sum is exact only when every
+// daemon's count was: one lower bound makes the whole sum one, and a network
+// whose first chunk was never loaded was not counted at all.
+func total(streams []*releaseStream) (sum uint64, exact bool) {
+	exact = true
 	for _, st := range streams {
 		if st.err != nil {
-			return 0
+			return 0, false
 		}
 		if len(st.chunks) == 0 {
+			exact = false
 			continue
 		}
 		first := st.chunks[0]
 		if first.Total == 0 && len(first.Releases) > 0 {
-			return 0
+			return 0, false
 		}
 		sum += first.Total
+		exact = exact && first.TotalExact
 	}
-	return sum
+	return sum, exact
 }
 
 func networkSelected(want metav1.MetaNetwork, network string) bool {

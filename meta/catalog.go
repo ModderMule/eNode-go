@@ -41,6 +41,8 @@ type Chunk struct {
 	Releases []Release
 	// Total is what the daemon reported for the whole search; 0 = not counted.
 	Total uint64
+	// TotalExact reports that Total counts every match rather than bounding it.
+	TotalExact bool
 	// More reports that the daemon has releases past this chunk.
 	More bool
 }
@@ -140,7 +142,7 @@ func (src *source) loadChunk(ctx context.Context, base *metav1.SearchRequest, k 
 			return Chunk{}, err
 		}
 		if calls == 0 {
-			out.Total = resp.GetTotal()
+			out.Total, out.TotalExact = resp.GetTotal(), resp.GetTotalExact()
 		}
 		entries = append(entries, resp.GetEntries()...)
 		next := resp.GetNextOffset()
