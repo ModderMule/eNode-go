@@ -233,9 +233,9 @@ func (s *ServerRuntime) registerSession(hash []byte, client *tcpClient) {
 // unregisterSession removes the index entry, but only when it still points at this
 // connection.
 //
-// The identity check matters: a duplicate login is rejected rather than allowed
-// (see handleLoginRequest), but a reconnect after a stale session finally times out can
-// have the two overlap briefly. Deleting unconditionally would then let the departing
+// The identity check matters: a duplicate login is rejected rather than allowed unless it
+// comes from the live session's IP (see handleLoginRequest), and a reconnect after a stale
+// session finally times out can have the two overlap briefly. Deleting unconditionally would then let the departing
 // session unregister the live one, and the live client would silently lose keepalive-based
 // liveness for the rest of its session.
 func (s *ServerRuntime) unregisterSession(hash []byte, client *tcpClient) {
@@ -291,12 +291,12 @@ func (s *ServerRuntime) AdvertisedServerCount() int {
 	return len(s.advertisableServers())
 }
 
-func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, *net.UDPConn) {
+func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, UDPReplyConn) {
 	module := "udp"
 	if enableCrypt {
 		module = "udp-obfs"
 	}
-	return func(data []byte, remote *net.UDPAddr, conn *net.UDPConn) {
+	return func(data []byte, remote *net.UDPAddr, conn UDPReplyConn) {
 		if len(data) == 0 {
 			return
 		}
@@ -547,6 +547,11 @@ type tcpClient struct {
 	// like the counters above, so it needs no lock.
 	loginGateTripped bool
 
+	// releaseOnce makes releaseSession run exactly once. It has two callers: run()'s
+	// defer, and a same-IP re-login that takes this session over (handleLoginRequest)
+	// and must finish releasing it before the new session connects to storage.
+	releaseOnce sync.Once
+
 	closeReason string
 }
 
@@ -643,23 +648,12 @@ func enableTCPKeepAlive(conn net.Conn, period time.Duration) {
 func (c *tcpClient) run() {
 	c.setCloseReason("read-loop-ended")
 	defer func() {
+		// statusStop stays here rather than in releaseSession: this goroutine is the
+		// only one that writes it, while releaseSession may run on another's.
 		if c.statusStop != nil {
 			close(c.statusStop)
 		}
-		c.infoMu.RLock()
-		hadLowID, wasLogged := c.hasLowID, c.logged
-		c.infoMu.RUnlock()
-		info := c.snapshotInfo()
-		if hadLowID {
-			c.server.LowIDs.Remove(info.ID)
-		}
-		if wasLogged {
-			c.server.unregisterSession(info.Hash, c)
-			c.server.Storage.Disconnect(info)
-		}
-		_ = c.conn.Close()
-		logging.Infof("tcp session closed remote=%s id=%d lowID=%t storeID=%d reason=%s",
-			c.remoteHost, info.ID, info.LowID, info.StoreID, c.getCloseReason())
+		c.releaseSession()
 	}()
 
 	buf := make([]byte, 4096)
@@ -862,11 +856,26 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// disconnect any user at will. The original rejects too
 	// (eNode/ed2k/tcpoperations.js:233-243), and checks before the firewall probe
 	// so a duplicate does not cost a dial-back.
+	//
+	// One exception: a re-login from the same IP as the live session replaces it.
+	// eMule's smart-LowID retry abandons its connection without closing it
+	// (srchybrid/ServerSocket.cpp:326-338) and reconnects before its own 25 s
+	// CONSERVTIMEOUT reaps the socket, so a plain reject locks it out — the client
+	// reads the close as "server full" and loops. Taking over needs the victim's
+	// source IP, which a remote attacker does not have; only hosts sharing that IP,
+	// such as CGNAT neighbours, could still use it. Lugdunum eserver 17.14 does not
+	// do this — it refuses every further LowID login from the IP instead — see
+	// docs/port-divergences.local.md, H1a.
 	if len(req.Hash) == 16 && c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}) {
-		logging.Warnf("login rejected remote=%s hash=%x: already connected", c.remoteHost, req.Hash)
-		c.sendServerMessage("Already connected from another session.")
-		c.closeWithReason("duplicate-login")
-		return
+		c.replaceSameIPSession(req.Hash)
+		// Re-checked so a row with no local session behind it — a stale row in a
+		// shared database — is still refused.
+		if c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}) {
+			logging.Warnf("login rejected remote=%s hash=%x: already connected", c.remoteHost, req.Hash)
+			c.sendServerMessage("Already connected from another session.")
+			c.closeWithReason("duplicate-login")
+			return
+		}
 	}
 
 	// Resolve the client's public IPv6 and its capability, but only when IPv6 is
@@ -2115,7 +2124,7 @@ func writeWithDeadline(conn net.Conn, data []byte, timeout time.Duration) error 
 	return err
 }
 
-func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
+func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
 	// A query that arrived over IPv6 comes from a v6-capable sender, so IPv6-only
 	// sources may ride the sentinel form. An IPv4 query gets the classic layout.
 	format := s.udpSourceFormat(remote)
@@ -2136,7 +2145,7 @@ func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn *
 	}
 }
 
-func (s *ServerRuntime) udpGlobGetSources2(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
+func (s *ServerRuntime) udpGlobGetSources2(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
 	format := s.udpSourceFormat(remote)
 	for b.Pos()+20 <= len(b.Bytes()) {
 		hash := append([]byte(nil), b.Get(16)...)
@@ -2170,7 +2179,7 @@ func (s *ServerRuntime) udpGlobGetSources2(b *Buffer, remote *net.UDPAddr, conn 
 // udpGlobGetSourcesIPv6 answers OP_GLOBGETSOURCES_IPV6 (0xa5) with the tag-block
 // format. Payload matches OP_GLOBGETSOURCES2 (repeated hash+size). Sending this
 // opcode is the opt-in, so the extended reply is safe on any arrival family.
-func (s *ServerRuntime) udpGlobGetSourcesIPv6(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
+func (s *ServerRuntime) udpGlobGetSourcesIPv6(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
 	for b.Pos()+20 <= len(b.Bytes()) {
 		hash := append([]byte(nil), b.Get(16)...)
 		if len(hash) != 16 {
@@ -2220,7 +2229,7 @@ func remoteIsIPv6(remote *net.UDPAddr) bool {
 	return ok
 }
 
-func (s *ServerRuntime) udpGlobServStatReq(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
+func (s *ServerRuntime) udpGlobServStatReq(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
 	challenge, err := b.GetUInt32LE()
 	if err != nil {
 		return
@@ -2272,7 +2281,7 @@ func (s *ServerRuntime) buildStatRes(challenge uint32, udpKey uint32, remote *ne
 // rather than through udpSend, which would re-encrypt with the per-client key.
 // udpKey is the per-client key (deriveUDPKey) the reply carries at +36 for the
 // client to adopt afterward.
-func (s *ServerRuntime) udpCryptPingReply(data []byte, remote *net.UDPAddr, conn *net.UDPConn, udpKey uint32, module string) {
+func (s *ServerRuntime) udpCryptPingReply(data []byte, remote *net.UDPAddr, conn UDPReplyConn, udpKey uint32, module string) {
 	challenge, err := NewBufferFromBytes(data).GetUInt32LE()
 	if err != nil || challenge == 0 {
 		// eMule never sends a zero challenge (srchybrid/ServerList.cpp:280-281) and
@@ -2289,7 +2298,7 @@ func (s *ServerRuntime) udpCryptPingReply(data []byte, remote *net.UDPAddr, conn
 	_, _ = conn.WriteToUDP(reply, remote)
 }
 
-func (s *ServerRuntime) udpServDescResOld(remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
+func (s *ServerRuntime) udpServDescResOld(remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
 	packet, err := BuildServerDescResOldPacket(s.UDP.Name, s.UDP.Description)
 	if err != nil {
 		return
@@ -2297,7 +2306,7 @@ func (s *ServerRuntime) udpServDescResOld(remote *net.UDPAddr, conn *net.UDPConn
 	_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
 }
 
-func (s *ServerRuntime) udpServDescRes(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
+func (s *ServerRuntime) udpServDescRes(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
 	challenge, err := b.GetUInt32LE()
 	if err != nil {
 		return
@@ -2313,7 +2322,7 @@ func (s *ServerRuntime) udpServDescRes(b *Buffer, remote *net.UDPAddr, conn *net
 	_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
 }
 
-func (s *ServerRuntime) udpGlobSearchReq(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
+func (s *ServerRuntime) udpGlobSearchReq(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
 	expr, err := ParseSearchExpr(b)
 	if err != nil {
 		return
@@ -2334,7 +2343,7 @@ func (s *ServerRuntime) udpGlobSearchReq(b *Buffer, remote *net.UDPAddr, conn *n
 	}
 }
 
-func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt, module string) {
+func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
 	// GetTags aborts mid-loop on a malformed tag and Buffer has no rewind, so
 	// discarding this error left the read pointer at an arbitrary offset inside
 	// a half-consumed tag — and ParseSearchExpr then built a query out of tag
@@ -2364,7 +2373,7 @@ func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn *
 	}
 }
 
-func udpSend(conn *net.UDPConn, remote *net.UDPAddr, data []byte, crypt *UDPCrypt, module string) error {
+func udpSend(conn UDPReplyConn, remote *net.UDPAddr, data []byte, crypt *UDPCrypt, module string) error {
 	LogUDPRaw(module, "send", remote.String(), data)
 	if crypt != nil && crypt.Status == CsEncrypting {
 		data = crypt.Encrypt(data)
@@ -2658,4 +2667,58 @@ func cryptOptionsFromLoginFlags(flags uint32) byte {
 		b |= 0x04
 	}
 	return b
+}
+
+// sessionByHash returns the logged-in connection indexed under a user hash, or nil.
+func (s *ServerRuntime) sessionByHash(hash []byte) *tcpClient {
+	if len(hash) != 16 {
+		return nil
+	}
+	var key [16]byte
+	copy(key[:], hash)
+	s.sessionsMu.RLock()
+	defer s.sessionsMu.RUnlock()
+	return s.sessionsByHash[key]
+}
+
+// replaceSameIPSession closes and releases the live session for hash when it was opened
+// from this connection's IP, so the caller's login can take its place. A session from any
+// other address is left alone. Two connections without a known address never match.
+//
+// The release runs here, synchronously, rather than being left to the old read loop:
+// MySQL keeps one clients.id per hash and MongoDB disconnects by hash, so an old
+// Storage.Disconnect landing after the new Storage.Connect would mark the new session
+// offline. releaseOnce then turns the old loop's own deferred release into a no-op.
+func (c *tcpClient) replaceSameIPSession(hash []byte) {
+	old := c.server.sessionByHash(hash)
+	if old == nil || old == c || c.peerIP == nil || !old.peerIP.Equal(c.peerIP) {
+		return
+	}
+	oldInfo := old.snapshotInfo()
+	logging.Infof("login replaces stale session remote=%s hash=%x oldID=%d oldStoreID=%d",
+		c.remoteHost, hash, oldInfo.ID, oldInfo.StoreID)
+	old.closeWithReason("replaced-by-relogin")
+	old.releaseSession()
+}
+
+// releaseSession frees everything a session holds — its LowID, its hash index entry and
+// its storage row — closes the socket and logs the close. Runs once however many callers
+// reach it; see releaseOnce.
+func (c *tcpClient) releaseSession() {
+	c.releaseOnce.Do(func() {
+		c.infoMu.RLock()
+		hadLowID, wasLogged := c.hasLowID, c.logged
+		c.infoMu.RUnlock()
+		info := c.snapshotInfo()
+		if hadLowID {
+			c.server.LowIDs.Remove(info.ID)
+		}
+		if wasLogged {
+			c.server.unregisterSession(info.Hash, c)
+			c.server.Storage.Disconnect(info)
+		}
+		_ = c.conn.Close()
+		logging.Infof("tcp session closed remote=%s id=%d lowID=%t storeID=%d reason=%s",
+			c.remoteHost, info.ID, info.LowID, info.StoreID, c.getCloseReason())
+	})
 }

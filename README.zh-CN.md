@@ -130,7 +130,7 @@ ipv6:                        # IPv6 双栈；整段省略即为仅 IPv4 行为
   dynIp6: "auto"             # 对外 IPv6，"auto" 通过 testUrls6 探测，"" 则不通告
   publishSources: true       # 发布 IPv6 源并支持 OP_*_IPV6 操作码
   probeReachability: true    # 发布前先验证客户端 IPv6 可达
-  testUrls6:                 # 仅 dynIp6=auto 时使用，取第一个可用 IPv6
+  testUrls6:                 # 仅 dynIp6=auto 时使用，取第一个可用 IPv6（临时地址会换成稳定地址）
     - "https://v6.ident.me"
     - "https://api64.ipify.org"
 

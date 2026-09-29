@@ -28,7 +28,7 @@ func TestRunUDPServerBoundsConcurrentHandlers(t *testing.T) {
 		once     sync.Once
 	)
 
-	handler := func(data []byte, remote *net.UDPAddr, conn *net.UDPConn) {
+	handler := func(data []byte, remote *net.UDPAddr, conn UDPReplyConn) {
 		n := inFlight.Add(1)
 		for {
 			old := peak.Load()
@@ -107,7 +107,7 @@ func TestRunUDPServerKeepsServingAfterOverflow(t *testing.T) {
 	blocked := make(chan struct{})
 	var unblockOnce sync.Once
 
-	handler := func(data []byte, remote *net.UDPAddr, conn *net.UDPConn) {
+	handler := func(data []byte, remote *net.UDPAddr, conn UDPReplyConn) {
 		<-blocked
 		handled.Add(1)
 	}

@@ -25,9 +25,13 @@ func resolveDynIPValue(dynIP string, testURLs []string, timeout time.Duration) (
 
 // resolveDynIP6Value resolves the server's public IPv6. An empty value means "no
 // IPv6 self-advertisement"; "auto" probes testURLs6 and, if every endpoint fails,
-// falls back to enumerating a global-scope address on a local interface (the
-// normal case for a server with a real routable v6). Any other value is used
-// verbatim.
+// falls back to a global-scope address on a local interface (the normal case for a
+// server with a real routable v6). Any other value is used verbatim.
+//
+// With "auto" the probe reports whichever source address the kernel picked for the
+// outbound connection, which on a SLAAC host with privacy extensions is a temporary
+// address that rotates away within a day. pickStableIPv6 swaps such an address for a
+// stable one on the same host, so the advertised address outlives the process start.
 func resolveDynIP6Value(dynIP6 string, testURLs6 []string, timeout time.Duration) (string, string, error) {
 	trimmed := strings.TrimSpace(dynIP6)
 	if trimmed == "" {
@@ -36,15 +40,28 @@ func resolveDynIP6Value(dynIP6 string, testURLs6 []string, timeout time.Duration
 	if !strings.EqualFold(trimmed, "auto") {
 		return trimmed, "", nil
 	}
-	ip, url, err := fetchPublicIPv6(testURLs6, timeout)
-	if err == nil {
-		return ip, url, nil
+	probed, url, probeErr := fetchPublicIPv6(testURLs6, timeout)
+	if probeErr != nil {
+		probed, url = "", ""
 	}
-	if local := localGlobalIPv6(); local != "" {
-		logging.Debugf("dynIp6 falling back to local interface address: %s", local)
-		return local, "local-interface", nil
+	choice := pickStableIPv6(probed, localIPv6Candidates())
+	if choice.IP == "" {
+		return "", "", probeErr
 	}
-	return "", "", err
+	via := url
+	if via == "" {
+		via = "local-interface"
+	}
+	if choice.Note != "" {
+		via += " (" + choice.Note + ")"
+	}
+	if choice.Unstable {
+		logging.Warnf("dynIp6 %s is a temporary/deprecated address and will stop working when it rotates; set ipv6.dynIp6 to a stable address", choice.IP)
+	}
+	if choice.StableCount > 1 {
+		logging.Infof("dynIp6: %d stable public IPv6 addresses on this host, advertising %s; set ipv6.dynIp6 to choose another", choice.StableCount, choice.IP)
+	}
+	return choice.IP, via, nil
 }
 
 func fetchPublicIPv4(testURLs []string, timeout time.Duration) (string, string, error) {
@@ -175,24 +192,133 @@ func newDynIPClientNet(timeout time.Duration, forceNetwork string) *http.Client 
 	}
 }
 
-// localGlobalIPv6 returns the first global-scope IPv6 address found on a local
-// interface, or "" if none. It skips loopback, link-local (fe80::/10) and
-// unique-local (fc00::/7) addresses — none of which a remote peer could reach.
-func localGlobalIPv6() string {
+// ipv6Candidate is one public IPv6 on a local interface. FlagsKnown is false when
+// the platform could not report address state, in which case the address is taken
+// at face value, as it was before flags were read.
+type ipv6Candidate struct {
+	IP         net.IP
+	Temporary  bool
+	Deprecated bool
+	Tentative  bool
+	FlagsKnown bool
+}
+
+// stable reports whether the address is fit to advertise: not a privacy address,
+// not past its preferred lifetime, and done with duplicate address detection.
+func (c ipv6Candidate) stable() bool {
+	return !c.FlagsKnown || (!c.Temporary && !c.Deprecated && !c.Tentative)
+}
+
+// ipv6Choice is pickStableIPv6's verdict. Note explains a substitution for the log;
+// Unstable marks a choice made only because nothing stable was available.
+type ipv6Choice struct {
+	IP          string
+	Note        string
+	Unstable    bool
+	StableCount int
+}
+
+// fallbackIPv6Candidates lists public IPv6 addresses via net.InterfaceAddrs, which
+// carries no address state, so every entry has FlagsKnown=false.
+func fallbackIPv6Candidates() []ipv6Candidate {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
-		return ""
+		return nil
 	}
+	var out []ipv6Candidate
 	for _, a := range addrs {
 		ipNet, ok := a.(*net.IPNet)
-		if !ok {
+		if !ok || !ed2k.IsPublicIPv6(ipNet.IP) {
 			continue
 		}
-		if ed2k.IsPublicIPv6(ipNet.IP) {
-			return ipNet.IP.String()
+		out = append(out, ipv6Candidate{IP: ipNet.IP})
+	}
+	return out
+}
+
+// pickStableIPv6 decides which IPv6 to advertise from the probe's answer (empty if
+// every probe failed) and the local candidates:
+//
+//  1. probed address is local and stable (or its state is unknown) -> keep it
+//  2. probed address is not local (NPTv6, NAT66, a tunnel) -> keep it; we cannot
+//     judge an address this host does not own
+//  3. probed address is local but temporary/deprecated/tentative -> the best stable
+//     local address instead, preferring the probed one's /64; kept, flagged
+//     Unstable, if there is none
+//  4. no probe answer -> the best stable local address, else any local one flagged
+//     Unstable
+func pickStableIPv6(probed string, cands []ipv6Candidate) ipv6Choice {
+	stableCount := 0
+	for _, c := range cands {
+		if c.FlagsKnown && c.stable() {
+			stableCount++
 		}
 	}
-	return ""
+	probedIP := net.ParseIP(probed)
+	if probedIP != nil {
+		for _, c := range cands {
+			if !c.IP.Equal(probedIP) {
+				continue
+			}
+			if c.stable() {
+				return ipv6Choice{IP: probedIP.String(), StableCount: stableCount}
+			}
+			if best := bestStableIPv6(cands, probedIP); best != nil {
+				return ipv6Choice{
+					IP:          best.String(),
+					Note:        fmt.Sprintf("replaced %s %s with stable %s", ipv6StateName(c), probedIP, best),
+					StableCount: stableCount,
+				}
+			}
+			return ipv6Choice{IP: probedIP.String(), Unstable: true, StableCount: stableCount}
+		}
+		return ipv6Choice{IP: probedIP.String(), StableCount: stableCount}
+	}
+	if best := bestStableIPv6(cands, nil); best != nil {
+		return ipv6Choice{IP: best.String(), StableCount: stableCount}
+	}
+	// Nothing stable. A tentative address may not even be usable yet, so prefer
+	// a temporary or deprecated one over it.
+	for _, c := range cands {
+		if !c.Tentative {
+			return ipv6Choice{IP: c.IP.String(), Unstable: true, StableCount: stableCount}
+		}
+	}
+	if len(cands) > 0 {
+		return ipv6Choice{IP: cands[0].IP.String(), Unstable: true, StableCount: stableCount}
+	}
+	return ipv6Choice{}
+}
+
+// bestStableIPv6 returns the first stable candidate in near's /64 (the same link
+// and prefix the kernel routed the probe from), else the first stable candidate at
+// all, else nil.
+func bestStableIPv6(cands []ipv6Candidate, near net.IP) net.IP {
+	if near != nil {
+		prefix := net.CIDRMask(64, 128)
+		for _, c := range cands {
+			if c.stable() && c.IP.Mask(prefix).Equal(near.Mask(prefix)) {
+				return c.IP
+			}
+		}
+	}
+	for _, c := range cands {
+		if c.stable() {
+			return c.IP
+		}
+	}
+	return nil
+}
+
+func ipv6StateName(c ipv6Candidate) string {
+	switch {
+	case c.Temporary:
+		return "temporary"
+	case c.Deprecated:
+		return "deprecated"
+	default:
+		return "tentative"
+	}
 }
 
 // parseIPResponse extracts an address from an echo-service body.

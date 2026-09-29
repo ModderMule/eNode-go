@@ -336,7 +336,9 @@ ipv6:
   probeReachability: true # verify a client's IPv6 is reachable before publishing it
   # Resolved only when dynIp6 is "auto". Literal-IP endpoints first (they pin the
   # family), then v6-only hosts, then dual-stack hosts. Falls back to a local
-  # global-scope interface address if all fail.
+  # global-scope interface address if all fail. A temporary (privacy), deprecated
+  # or tentative answer is swapped for a stable address on the same host; with
+  # several stable addresses, set dynIp6 explicitly. See docs/ipv6-multi-address.md.
   testUrls6:
     - "https://[2606:4700:4700::1111]/cdn-cgi/trace"
     - "https://v6.ident.me"

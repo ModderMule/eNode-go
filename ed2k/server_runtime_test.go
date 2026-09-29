@@ -12,6 +12,9 @@ import (
 
 type mockConn struct {
 	closed int
+	// remote overrides RemoteAddr; nil means 127.0.0.2:50000, the address every
+	// mockConn shares unless a test needs two connections from different hosts.
+	remote net.Addr
 }
 
 func (m *mockConn) Read(_ []byte) (int, error)  { return 0, net.ErrClosed }
@@ -19,6 +22,9 @@ func (m *mockConn) Write(b []byte) (int, error) { return len(b), nil }
 func (m *mockConn) Close() error                { m.closed++; return nil }
 func (m *mockConn) LocalAddr() net.Addr         { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4661} }
 func (m *mockConn) RemoteAddr() net.Addr {
+	if m.remote != nil {
+		return m.remote
+	}
 	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 50000}
 }
 func (m *mockConn) SetDeadline(_ time.Time) error      { return nil }

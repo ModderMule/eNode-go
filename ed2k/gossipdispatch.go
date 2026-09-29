@@ -58,7 +58,7 @@ func (s *ServerRuntime) decryptPeerReply(data []byte, from net.IP) []byte {
 // udpServerListReq handles OP_SERVER_LIST_REQ (0xA0): a peer registering itself. It is
 // also an implicit list request — Lugdunum falls through to the 0xA4 path — so we answer
 // with our list, but only over the obfuscated channel.
-func (s *ServerRuntime) udpServerListReq(b *Buffer, remote *net.UDPAddr, conn *net.UDPConn, obfuscated bool, module string) {
+func (s *ServerRuntime) udpServerListReq(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, obfuscated bool, module string) {
 	announcedIP, port, _, _, err := ParseServerListReq(b)
 	if err != nil {
 		logging.Debugf("[module=%s] malformed OP_SERVER_LIST_REQ from %s: %v", module, remote, err)
@@ -86,7 +86,7 @@ func (s *ServerRuntime) udpServerListReq(b *Buffer, remote *net.UDPAddr, conn *n
 // Answered only over the obfuscated channel. A plaintext request is dropped for the same
 // reason eserver drops one: serving our peer table to an unauthenticated sender hands a
 // scanner the whole mesh for the cost of one datagram.
-func (s *ServerRuntime) udpServerListReq2(remote *net.UDPAddr, conn *net.UDPConn, wantIPv6, obfuscated bool, module string) {
+func (s *ServerRuntime) udpServerListReq2(remote *net.UDPAddr, conn UDPReplyConn, wantIPv6, obfuscated bool, module string) {
 	if !obfuscated {
 		logging.Debugf("[module=%s] ignoring non-obfuscated peer-list request from %s", module, remote)
 		return
@@ -164,7 +164,7 @@ func (s *ServerRuntime) udpServerDescRes(b *Buffer, remote *net.UDPAddr, module 
 // Verified only. An unverified entry is one we have not completed a handshake with, so
 // propagating it would spread addresses we cannot vouch for — precisely the behaviour
 // that makes a stale peer list circulate around a mesh forever.
-func (s *ServerRuntime) sendPeerList(remote *net.UDPAddr, conn *net.UDPConn, wantIPv6 bool, module string) {
+func (s *ServerRuntime) sendPeerList(remote *net.UDPAddr, conn UDPReplyConn, wantIPv6 bool, module string) {
 	peers := s.Gossip.Verified()
 	var packet *Buffer
 	var err error

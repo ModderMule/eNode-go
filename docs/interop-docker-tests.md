@@ -27,10 +27,11 @@ The suite skips itself unless `ENODE_INTEGRATION=1`, matching
 `.github/workflows/linux.yml`. It skips again, with a clear message, when Docker is not
 running or when `lugdunum-eserver/` is absent — that tree is gitignored, so a fresh clone
 will not have it. See its `README.md` for where the binaries come from. Case E is the one
-exception: it drives eNode alone, so it runs on a fresh clone with nothing but Docker.
+exception: it drives eNode alone, so it runs on a fresh clone with nothing but Docker. Case
+F's `enode` subtest runs there too; its `eserver` subtest skips.
 
 The first run builds two images (~1 min); later runs reuse the layer cache. Expect around
-3 minutes for the five cases with the images cached, most of it the two-minute propagation
+4½ minutes for the six cases with the images cached, most of it the two-minute propagation
 timeout in §3; case E on its own is about 5 seconds.
 
 The Docker socket is found automatically. `dockertest` only ever looks at
@@ -91,7 +92,7 @@ the entire server-to-server trace. `sverbose=1` works. Everything in that file i
 
 ---
 
-## 3. The five cases
+## 3. The six cases
 
 ### A · `TestGossipWithLugdunumEserver` — both directions
 
@@ -193,6 +194,35 @@ container-to-container hop, so it retries three times and its failure message se
 "no datagram came back" from "the reply was wrong". Everything is decoded by hand, as in
 case A: reading a reply with the encoder under test would let a framing mistake cancel
 itself out.
+
+### F · `TestDuplicateLoginSameIP` — re-login while the old session is still open
+
+This is the smart-LowID retry shape (`srchybrid/ServerSocket.cpp:326-338`): LowID session A
+stays open, then more logins arrive from the same IP. Every host→container connection
+comes from the one gateway address, and none can get a HighID, so every login here is a
+same-IP LowID. Each server runs in its own subtest, and the two servers are pinned to
+**different** results:
+
+| Login | Hash / client port | eserver 17.14 | eNode-go |
+|---|---|---|---|
+| B | A's / same | refused, A kept | accepted, A closed |
+| C | other / same | refused | accepted |
+| D | other / other | refused | accepted |
+| E | A's / other | refused | accepted, B closed |
+
+eserver behaves as "one LowID per IP", and ours replaces a same-hash session. The reasoning
+is in `docs/port-divergences.local.md`, H1a. The different-IP case can't be built here; it
+lives in `ed2k/duplicate_login_test.go`.
+
+Two rig traps turned up writing it:
+
+- **The readiness dial lies for eserver.** Docker Desktop's port proxy accepts the TCP
+  connection before eserver, still starting under qemu, listens, then resets it. Login A is
+  therefore retried while it gets a reset with no frames.
+- **eserver needs `CT_VERSION`.** A login without it is answered with `ERROR : Your edonkey
+  client is too old` and closed. `openLogin` (in `client_test.go`) therefore sends eMule
+  0.50a's login tags and an eMule-marked user hash. It leaves out `SRVCAP_ZLIB`, because
+  `readFrame` only reads plain frames.
 
 ### What this rig cannot check — what a client *displays*
 

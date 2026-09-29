@@ -293,3 +293,107 @@ func loginAndPublish(t *testing.T, hostIP, hostPort string) func() {
 	t.Logf("input: session logged in with 1 published file (%q)", name)
 	return func() { _ = conn.Close() }
 }
+
+// loginResult is what a client sees in reply to OP_LOGINREQUEST: either an OP_IDCHANGE
+// (Accepted, with the assigned ID) or a close before one arrived (Err holds why reading
+// stopped).
+type loginResult struct {
+	Accepted bool
+	ID       uint32
+	Messages []string
+	Frames   []string
+	Err      error
+}
+
+// openLogin logs in with the given hash and reads until OP_IDCHANGE or the connection
+// ends, then returns the connection still open, so a caller can hold the session and
+// later watch whether the server drops it. Unlike fetchLoginFrames it stops at
+// OP_IDCHANGE — the frame eMule treats as "login accepted" — and a close before it is a
+// result rather than a failure, because a refused login is what some cases measure.
+func openLogin(t *testing.T, hostIP, hostPort string, hash [16]byte, clientPort uint16) (net.Conn, loginResult) {
+	t.Helper()
+	addr := net.JoinHostPort(hostIP, hostPort)
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		t.Fatalf("dial %s: %v", addr, err)
+	}
+	// eserver dial-backs the client port before answering; under qemu that can take a
+	// while, and the port is closed on the host, so allow for its full probe timeout.
+	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+
+	login := make([]byte, 0, 26)
+	login = append(login, hash[:]...)
+	login = binary.LittleEndian.AppendUint32(login, 0)
+	login = binary.LittleEndian.AppendUint16(login, clientPort)
+	// The tags eMule 0.50a sends (srchybrid/ServerSocket.cpp, SendLoginRequest). eserver
+	// refuses a login without CT_VERSION as "Your edonkey client is too old", so unlike
+	// the eNode-only helpers above this one cannot send an empty tag list.
+	login = binary.LittleEndian.AppendUint32(login, 4)
+	login = appendStringTag(login, 0x01, "interop")         // CT_NAME
+	login = appendUint32Tag(login, 0x11, 0x3C)              // CT_VERSION, EDONKEYVERSION
+	login = appendUint32Tag(login, 0x20, 0x0119)            // CT_SERVER_FLAGS: zlib, newtags, unicode, largefiles
+	login = appendUint32Tag(login, 0xFB, 0<<17|50<<10|1<<7) // CT_EMULE_VERSION 0.50a
+	if err := writeFrame(conn, ed2k.OpLoginRequest, login); err != nil {
+		t.Fatalf("write OP_LOGINREQUEST: %v", err)
+	}
+
+	var out loginResult
+	for {
+		opcode, payload, err := readFrame(conn)
+		if err != nil {
+			out.Err = err
+			break
+		}
+		out.Frames = append(out.Frames, fmt.Sprintf("0x%02x/%dB", opcode, len(payload)))
+		if opcode == ed2k.OpServerMessage && len(payload) >= 2 {
+			n := int(binary.LittleEndian.Uint16(payload[:2]))
+			if 2+n <= len(payload) {
+				out.Messages = append(out.Messages, string(payload[2:2+n]))
+			}
+		}
+		if opcode == ed2k.OpIDChange {
+			out.Accepted = true
+			if len(payload) >= 4 {
+				out.ID = binary.LittleEndian.Uint32(payload[:4])
+			}
+			break
+		}
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return conn, out
+}
+
+// closedWithin reports whether the server closes conn within d, draining anything it
+// sends meanwhile (OP_SERVERSTATUS, OP_SERVERLIST and the like follow a login).
+func closedWithin(conn net.Conn, d time.Duration) (bool, error) {
+	deadline := time.Now().Add(d)
+	_ = conn.SetReadDeadline(deadline)
+	buf := make([]byte, 4096)
+	for {
+		_, err := conn.Read(buf)
+		if err == nil {
+			continue
+		}
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			return false, nil
+		}
+		return true, err
+	}
+}
+
+// appendStringTag and appendUint32Tag lay down an old-style eD2K tag: <type:1> then a
+// one-byte name as <len:2 LE = 1><id:1>, then the value.
+func appendStringTag(b []byte, id uint8, v string) []byte {
+	b = append(b, 0x02)
+	b = binary.LittleEndian.AppendUint16(b, 1)
+	b = append(b, id)
+	b = binary.LittleEndian.AppendUint16(b, uint16(len(v)))
+	return append(b, v...)
+}
+
+func appendUint32Tag(b []byte, id uint8, v uint32) []byte {
+	b = append(b, 0x03)
+	b = binary.LittleEndian.AppendUint16(b, 1)
+	b = append(b, id)
+	return binary.LittleEndian.AppendUint32(b, v)
+}

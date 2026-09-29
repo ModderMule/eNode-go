@@ -42,7 +42,7 @@ among the lists operators actually feed a server:
 000.000.000.000 - 000.255.255.255 , 000 , Private-Use Networks
 1.2.3.4 - 1.2.3.10 , 100 , Some ISP
 
-# Lugdunum ipfilter.srv — netmask, whitespace-separated
+# Lugdunum ipfilter.srv — netmask, whitespace-separated (eserver's peer-server list)
 192.168.0.0/255.255.0.0     1       Private-Use Networks   [RFC1918]
 127.0.0.0/255.0.0.0         1       Loopback               [RFC1700, page 5]
 
@@ -67,6 +67,35 @@ Two parsing details worth knowing, both found by testing against the *real*
 
 A malformed line is counted and skipped, never treated as level 0 — level 0 is the most
 aggressive setting, so guessing would block the range.
+
+### One list here, eight in eserver
+
+eserver keeps separate range files, each for a different purpose. Its config loader
+(`0x00430bc9`, see `lugdunum-eserver/re/INDEX.txt`) reads these:
+
+| File | eserver applies it to |
+|---|---|
+| `ipfilter.srv` | **peer servers** only. Its `servers` netrange is checked at the top of add/update-server (`0x0042f7d0`), and a hit logs `Deny server %s:%d because of ipfilter.srv` |
+| `ipfilter.dat` | clients (`ERROR : Your IP is part of ipfilter.dat file`) **and** peer servers (`Deny server … because of ipfilter.dat`) |
+| `ipfilter.clnt`, `.slimit`, `.lowid`, `.perip`, `.soft`, `.ttl` | client netranges: refusal, slot limits, LowID handling, per-IP caps and similar |
+
+So `ipfilter.srv` is **not** a client blocklist. The shipped copy lists only private and
+reserved ranges, so that eserver never peers with a LAN server. It is also why the file
+makes a good parser fixture and a harmless sanity check (§5): nothing on the public
+internet matches it.
+
+eNode-go has **one** list, and that list applies to everything: clients, UDP queries and
+gossip peers alike, because the drop happens before we know which of those a packet is
+(§1). The gossip merge also rejects harvested peer entries that the list blocks
+(`server-gossip.md` §5). Choosing a list therefore means choosing it for both audiences.
+The one that matters is the emule-security `guarding.p2p`, a client list that labels
+datacenter ranges `hosting` at level 0. Almost every eD2K server runs in a datacenter, so
+loading that list here cuts us off from most of the server mesh as well as from VPN and
+seedbox users. eserver's split lets an operator avoid that; ours cannot yet.
+
+Denials are logged differently too. eserver logs `Deny server` only when `sverbose` is
+non-zero, so by default a denied peer vanishes without a trace. Our refusals always show up
+in `Filter.Stats()`.
 
 ### The level threshold is inverted
 
@@ -189,4 +218,5 @@ messages (eserver's `welcome.xx`).
 - `Filter.Stats()` exposes per-layer refusal counters for the admin surface.
 - A sanity check that needs no MaxMind account: point `filter.ipfilter.file` at
   `lugdunum-eserver/conf/ipfilter.srv` and confirm a LAN address is refused before any
-  parse on both transports.
+  parse on both transports. (That file is eserver's *peer-server* list,
+  containing only private and reserved ranges; see "One list here, eight in eserver".)

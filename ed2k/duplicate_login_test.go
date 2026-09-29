@@ -2,6 +2,7 @@ package ed2k
 
 import (
 	"bytes"
+	"net"
 	"testing"
 	"time"
 
@@ -46,7 +47,9 @@ func loginItems(hash []byte, id uint32, port uint16) []PacketItem {
 // The security case: the user hash is public — broadcast in OP_HELLO and handed
 // out in OP_FOUNDSOURCES_OBFU — so if a duplicate login evicted the existing
 // session, any peer could disconnect any user at will. The existing session must
-// survive and the newcomer must be the one to go.
+// survive and the newcomer must be the one to go. The newcomer connects from a
+// different IP: a same-IP re-login replaces the session instead (see
+// TestDuplicateLoginSameIPReplacesStaleSession).
 func TestDuplicateLoginRejectsNewSessionAndKeepsExisting(t *testing.T) {
 	engine := storage.NewMemoryEngine()
 	rt := newLoginTestRuntime(engine)
@@ -62,11 +65,11 @@ func TestDuplicateLoginRejectsNewSessionAndKeepsExisting(t *testing.T) {
 		t.Fatal("first login should have succeeded")
 	}
 
-	// A second connection presenting the same (public) hash.
-	secondConn := &mockConn{}
+	// A second connection presenting the same (public) hash, from another host.
+	secondConn := &mockConn{remote: &net.TCPAddr{IP: net.IPv4(198, 51, 100, 7), Port: 50001}}
 	second := newTCPClient(rt, secondConn, false)
 	second.handlePacket(loginPacket(t, hash, 0, 4663))
-	t.Logf("input: second login with the same hash from a different connection")
+	t.Logf("input: second login with the same hash from a different IP (%s)", secondConn.remote)
 	t.Logf("output: second logged=%t closed=%d reason=%q", second.logged, secondConn.closed, second.getCloseReason())
 	t.Logf("output: first still logged=%t closed=%d", first.logged, firstConn.closed)
 
@@ -82,6 +85,92 @@ func TestDuplicateLoginRejectsNewSessionAndKeepsExisting(t *testing.T) {
 	}
 	if !first.logged {
 		t.Fatal("existing session lost its logged state to a duplicate login")
+	}
+}
+
+// eMule's smart-LowID retry (srchybrid/ServerSocket.cpp:326-338) abandons a LowID
+// connection without closing it and logs in again from the same address before its
+// own 25 s timeout reaps the socket. Rejecting that as a duplicate locked the client
+// out — it reads the close as "server full" and loops — so a same-IP re-login takes
+// the session over.
+func TestDuplicateLoginSameIPReplacesStaleSession(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	rt := newLoginTestRuntime(engine)
+	hash := bytes.Repeat([]byte{0xa7}, 16)
+
+	firstConn := &mockConn{}
+	first := newTCPClient(rt, firstConn, false)
+	first.handlePacket(loginPacket(t, hash, 0, 4662))
+	if !first.logged || !first.hasLowID {
+		t.Fatalf("first login should have succeeded with a LowID (logged=%t lowID=%t)", first.logged, first.hasLowID)
+	}
+	firstID := first.info.ID
+	t.Logf("input: first login hash=%x remote=%s -> id=%d lowIDs=%d", hash, first.remoteHost, firstID, rt.LowIDs.Count())
+
+	secondConn := &mockConn{}
+	second := newTCPClient(rt, secondConn, false)
+	second.handlePacket(loginPacket(t, hash, 0, 4663))
+	t.Logf("input: second login, same hash, same remote=%s", second.remoteHost)
+	t.Logf("output: second logged=%t id=%d closed=%d; first closed=%d reason=%q",
+		second.logged, second.info.ID, secondConn.closed, firstConn.closed, first.getCloseReason())
+
+	if !second.logged {
+		t.Fatalf("same-IP re-login was refused (reason=%q)", second.getCloseReason())
+	}
+	if secondConn.closed != 0 {
+		t.Fatalf("the new session's connection was closed (closed=%d)", secondConn.closed)
+	}
+	if firstConn.closed == 0 {
+		t.Fatal("the stale session was not closed")
+	}
+	if got := first.getCloseReason(); got != "replaced-by-relogin" {
+		t.Fatalf("stale session close reason=%q want %q", got, "replaced-by-relogin")
+	}
+	if client, ok := rt.LowIDs.Get(firstID); ok && client == first {
+		t.Fatalf("the stale session's LowID %d is still allocated to it", firstID)
+	}
+	if got := rt.sessionByHash(hash); got != second {
+		t.Fatalf("hash index points at %p, want the new session %p", got, second)
+	}
+	if !engine.IsConnected(storage.ClientInfo{Hash: hash}) {
+		t.Fatal("the new session is not online in storage")
+	}
+	t.Logf("output: lowIDs=%d, hash index -> new session, storage online", rt.LowIDs.Count())
+}
+
+// The replaced session's read loop still runs its deferred release once its socket
+// closes. That late call must not unregister or disconnect the session that took over.
+func TestReplacedSessionLateCleanupDoesNotDisconnectNew(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	rt := newLoginTestRuntime(engine)
+	hash := bytes.Repeat([]byte{0xa8}, 16)
+
+	first := newTCPClient(rt, &mockConn{}, false)
+	first.handlePacket(loginPacket(t, hash, 0, 4662))
+	second := newTCPClient(rt, &mockConn{}, false)
+	second.handlePacket(loginPacket(t, hash, 0, 4663))
+	if !second.logged {
+		t.Fatalf("same-IP re-login was refused (reason=%q)", second.getCloseReason())
+	}
+	t.Logf("input: first replaced by second (id=%d storeID=%d)", second.info.ID, second.info.StoreID)
+
+	// What run()'s defer does when the old read loop notices its closed socket.
+	first.releaseSession()
+	t.Logf("input: replaced session's release called again")
+
+	online := engine.IsConnected(storage.ClientInfo{Hash: hash})
+	indexed := rt.sessionByHash(hash) == second
+	held, _ := rt.LowIDs.Get(second.info.ID)
+	lowID := held == second
+	t.Logf("output: online=%t indexed=%t lowID held=%t", online, indexed, lowID)
+	if !online {
+		t.Fatal("late release of the replaced session took the new one offline")
+	}
+	if !indexed {
+		t.Fatal("late release of the replaced session removed the new one from the hash index")
+	}
+	if !lowID {
+		t.Fatal("late release of the replaced session freed the new one's LowID")
 	}
 }
 

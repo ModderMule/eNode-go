@@ -225,7 +225,7 @@ func (h *NATTraversalHandler) rendezvousGate() (bool, func(hash [16]byte) bool) 
 	return h.serverIndependent, h.isLocalMember
 }
 
-func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, conn *net.UDPConn, crypt *UDPCrypt) {
+func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt) {
 	if len(data) == 0 || remote == nil || conn == nil {
 		return
 	}
@@ -236,6 +236,7 @@ func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, con
 	if localAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok && localAddr != nil && localAddr.Port > 0 {
 		localPort = uint16(localAddr.Port)
 	}
+	var forwardSrc net.IP // resolved on first use; most datagrams only answer the sender
 	for _, out := range h.processPacket(data, remote, localPort) {
 		target := ""
 		if out.to != nil {
@@ -248,7 +249,17 @@ func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, con
 		if crypt != nil && crypt.Status == CsEncrypting {
 			wire = crypt.Encrypt(out.packet)
 		}
-		_, _ = conn.WriteToUDP(wire, out.to)
+		if sameEndpoint(out.to, remote) {
+			_, _ = conn.WriteToUDP(wire, out.to)
+			continue
+		}
+		// A forward to the other peer of a pairing. The arrival address is the one
+		// the *sender* used, not the target, so send from the IPv6 we announce in the
+		// REGISTER ack — the address the target was told to keep talking to.
+		if forwardSrc == nil {
+			forwardSrc = h.announcedIPv6()
+		}
+		_, _ = WriteToUDPFrom(conn, wire, out.to, forwardSrc)
 	}
 }
 
@@ -637,6 +648,16 @@ func familySlot(entry natClientEntry, remote *net.UDPAddr) *natCandidate {
 		return entry.v6
 	}
 	return entry.v4
+}
+
+// announcedIPv6 returns the IPv6 sent in the v6 REGISTER ack, or nil when unset.
+func (h *NATTraversalHandler) announcedIPv6() net.IP {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.announceIPv6 == ([16]byte{}) {
+		return nil
+	}
+	return net.IP(append([]byte(nil), h.announceIPv6[:]...))
 }
 
 func sameEndpoint(a, b *net.UDPAddr) bool {

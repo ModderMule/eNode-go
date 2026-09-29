@@ -266,6 +266,11 @@ func (g *GossipHandler) sendPhase4(cfg GossipClientConfig, p PeerServer) {
 }
 
 // writeTo sends a plaintext frame.
+//
+// ToDo: gossip initiates these sends, so there is no arrival address to reply from and
+// an IPv6 frame leaves from the kernel's preferred source. On a multi-address host that
+// can differ from GossipConfig.SelfIPv6; pin it with WriteToUDPFrom once peers are
+// seen to key on the source.
 func (g *GossipHandler) writeTo(w UDPWriter, dst *net.UDPAddr, data []byte, what string, p PeerServer) {
 	if w == nil {
 		return
