@@ -35,6 +35,7 @@ td.v{font-variant-numeric:tabular-nums}
 .mcard td{padding:7px 14px;font-size:14px}
 .mcard tr:first-child td{border-top:1px solid var(--line)}
 .off{color:var(--muted)}
+.addr b{color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600}
 footer{margin-top:24px;color:var(--muted);font-size:12px}
 a{color:var(--accent)}
 </style>
@@ -46,7 +47,8 @@ a{color:var(--accent)}
 <span id="status" class="badge">connecting…</span>
 <span id="updated" class="desc" style="margin:0"></span>
 </header>
-<p class="desc">{{.Description}} · {{.Version}} · storage: {{.Engine}}</p>
+<p class="desc" style="margin-bottom:4px">{{.Description}} · {{.Version}} · storage: {{.Engine}}</p>
+<p class="desc addr">IPv4: {{if .AdvertisedIP}}<b>{{.AdvertisedIP}}</b>{{else}}<span class="off">unresolved</span>{{end}} · IPv6: {{if .AdvertisedIPv6}}<b>{{.AdvertisedIPv6}}</b>{{else if .IPv6}}<span class="off">unresolved</span>{{else}}<span class="off">off</span>{{end}}</p>
 
 <div class="grid">
 <div class="card"><div class="label">Clients online</div><div class="value" id="clients">…</div></div>

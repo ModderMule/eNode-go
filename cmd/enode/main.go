@@ -387,6 +387,8 @@ func run(ctx context.Context, configPath string) error {
 				Description:       cfg.Description,
 				Version:           ed2k.ENodeVersionStr,
 				Engine:            cfg.Storage.Engine,
+				AdvertisedIP:      advertisedIP,
+				AdvertisedIPv6:    ipv6String(serverIPv6),
 				TCPPort:           cfg.TCP.Port,
 				TCPPortObf:        tcpObf,
 				UDPPort:           cfg.UDP.Port,
@@ -1029,4 +1031,12 @@ func ed2kServerLinks(advertisedIP string, serverIPv6 []byte, port uint16) []stri
 		links = append(links, fmt.Sprintf("ed2k://|server|[%s]|%d|/", net.IP(serverIPv6), port))
 	}
 	return links
+}
+
+// ipv6String renders a 16-byte IPv6 address, or "" when none was resolved.
+func ipv6String(b []byte) string {
+	if len(b) != net.IPv6len {
+		return ""
+	}
+	return net.IP(b).String()
 }

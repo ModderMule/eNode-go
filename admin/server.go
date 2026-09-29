@@ -40,6 +40,11 @@ type StaticInfo struct {
 	Version     string
 	Engine      string
 
+	// AdvertisedIP and AdvertisedIPv6 are the addresses clients are told
+	// (OP_SERVERIDENT, CT_MOD_SVR_IP_V6); empty when unresolved.
+	AdvertisedIP   string
+	AdvertisedIPv6 string
+
 	TCPPort    uint16
 	TCPPortObf uint16
 	UDPPort    uint16

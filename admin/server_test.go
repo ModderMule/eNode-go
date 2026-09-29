@@ -20,6 +20,8 @@ func testServer(t *testing.T) (string, LiveStats) {
 		Description:       "unit-test server",
 		Version:           "v0.1.0",
 		Engine:            "memory",
+		AdvertisedIP:      "203.0.113.7",
+		AdvertisedIPv6:    "2001:db8::7",
 		TCPPort:           5555,
 		TCPPortObf:        5565,
 		UDPPort:           5559,
@@ -53,10 +55,16 @@ func testServer(t *testing.T) (string, LiveStats) {
 			CacheHits: 5, CacheMisses: 6, UDPSkipped: 1, Counted: 5000,
 		}},
 	}
+	return serveStatic(t, static, live), live
+}
+
+// serveStatic serves a dashboard for the given facts and snapshot, returning its URL.
+func serveStatic(t *testing.T, static StaticInfo, live LiveStats) string {
+	t.Helper()
 	s := New(Config{}, static, func() LiveStats { return live })
 	ts := httptest.NewServer(s.http.Handler)
 	t.Cleanup(ts.Close)
-	return ts.URL, live
+	return ts.URL
 }
 
 func TestStatsJSONReturnsSnapshot(t *testing.T) {
@@ -139,7 +147,7 @@ func TestIndexRendersStaticOnly(t *testing.T) {
 	}
 
 	// Static fields are rendered by the template.
-	for _, want := range []string{"(TESTING!!!) eNode", "v0.1.0", "5555", "/stats.json"} {
+	for _, want := range []string{"(TESTING!!!) eNode", "v0.1.0", "5555", "/stats.json", "203.0.113.7", "2001:db8::7"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("index HTML missing static content %q", want)
 		}
@@ -163,6 +171,35 @@ func TestIndexRendersStaticOnly(t *testing.T) {
 		}
 	}
 	t.Logf("confirmed live counts (clients=%d files=%d) absent from static HTML", live.Clients, live.Files)
+}
+
+func TestIndexRendersUnresolvedAddresses(t *testing.T) {
+	cases := []struct {
+		name   string
+		static StaticInfo
+		want   []string
+	}{
+		{"ipv6 off", StaticInfo{Name: "eNode"}, []string{"IPv4: <span class=\"off\">unresolved</span>", "IPv6: <span class=\"off\">off</span>"}},
+		{"ipv6 unresolved", StaticInfo{Name: "eNode", IPv6: true}, []string{"IPv6: <span class=\"off\">unresolved</span>"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("input: AdvertisedIP=%q AdvertisedIPv6=%q IPv6=%t", tc.static.AdvertisedIP, tc.static.AdvertisedIPv6, tc.static.IPv6)
+			resp, err := http.Get(serveStatic(t, tc.static, LiveStats{}) + "/")
+			if err != nil {
+				t.Fatalf("GET /: %v", err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			html := string(body)
+			for _, want := range tc.want {
+				if !strings.Contains(html, want) {
+					t.Errorf("index HTML missing %q", want)
+				}
+			}
+			t.Logf("output: address line rendered %v", tc.want)
+		})
+	}
 }
 
 func TestUnknownPathIs404(t *testing.T) {
