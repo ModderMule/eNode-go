@@ -385,9 +385,12 @@ func BuildCallbackFailedPacket() (*Buffer, error) {
 }
 
 func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
+	// The server-IP field is informational, and 0 when no IPv4 is known — an
+	// unconfigured address, or an IPv6 bind such as "::". Failing the build instead
+	// cost the session the whole packet: server name, IPv6 tags and ST_IPV6_STATUS.
 	ip, err := IPv4ToInt32LE(conf.Address)
 	if err != nil {
-		return nil, err
+		ip = 0
 	}
 	tags := []Tag{
 		{Type: TypeString, Code: TagName, Data: conf.Name},

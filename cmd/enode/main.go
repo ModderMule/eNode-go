@@ -851,13 +851,17 @@ func filterDaemonArgs(args []string) []string {
 	return filtered
 }
 
-// firstRoutableIP returns the first candidate that is a usable advertised
-// address, or "" when none is. The wildcard is not routable: a client that
-// receives it has been told nothing.
+// firstRoutableIP returns the first candidate that is a usable advertised IPv4
+// address, or "" when none is. The result fills the uint32 server-IP field of
+// OP_SERVERIDENT, so only a specified IPv4 literal qualifies: the wildcard tells a
+// client nothing, and an IPv6 bind such as "::" has no 32-bit form at all — it
+// used to be picked here ahead of dynIp and made every OP_SERVERIDENT fail to
+// build. The server's own IPv6 is advertised separately, via dynIp6.
 func firstRoutableIP(candidates ...string) string {
 	for _, c := range candidates {
-		if c != "" && c != "0.0.0.0" {
-			return c
+		ip := net.ParseIP(c)
+		if ip != nil && ip.To4() != nil && !ip.IsUnspecified() {
+			return ip.To4().String()
 		}
 	}
 	return ""

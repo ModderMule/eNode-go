@@ -154,10 +154,32 @@ func TestServerIdentIPv6Status(t *testing.T) {
 		wantStatus uint8 // 0 means the tag must be absent
 	}{
 		{
-			name:       "v6-connected session is reachable without a probe",
+			// Arriving over IPv6 proves only outbound reachability, so the verdict
+			// comes from a dial-back exactly as for a v4-connected session.
+			name:       "v6-connected session with a passing dial-back is verified",
 			remote:     "2001:db8::1",
 			publishV6:  true,
 			probeIPv6:  true,
+			hasV6:      true,
+			reachable:  true,
+			logged:     true,
+			wantStatus: IPv6StatusHave | IPv6StatusReachable | IPv6StatusProbed,
+		},
+		{
+			name:       "v6-connected session behind a v6 firewall is told so",
+			remote:     "2001:db8::1",
+			publishV6:  true,
+			probeIPv6:  true,
+			hasV6:      true,
+			reachable:  false,
+			logged:     true,
+			wantStatus: IPv6StatusHave | IPv6StatusProbed,
+		},
+		{
+			name:       "v6-connected session with probing off is trusted but not verified",
+			remote:     "2001:db8::1",
+			publishV6:  true,
+			probeIPv6:  false,
 			hasV6:      true,
 			reachable:  true,
 			logged:     true,
@@ -380,4 +402,46 @@ func TestReflectionTagWireTypes(t *testing.T) {
 		t.Fatalf("reflection tag at %d precedes the server name at %d", yourIP, name)
 	}
 	t.Log("output: reflection tags follow the classic server tags")
+}
+
+// TestServerIdentSentWithoutAdvertisableIPv4 guards the address: "::" regression.
+// The bind address is what advertisedAddress falls back to, and neither "::" nor
+// "" fits the uint32 server-IP field. The packet used to fail to build and was
+// dropped silently, costing the client the server name and every IPv6 tag.
+func TestServerIdentSentWithoutAdvertisableIPv4(t *testing.T) {
+	serverV6 := net.ParseIP("2001:db8::53").To16()
+
+	for _, bind := range []string{"::", "", "[::]"} {
+		t.Run("bind="+bind, func(t *testing.T) {
+			rt := NewServerRuntime(TCPRuntimeConfig{
+				Name:             "eNode",
+				Address:          bind,
+				Port:             4661,
+				Hash:             bytes.Repeat([]byte{0x01}, 16),
+				IPv6:             true,
+				PublishV6Sources: true,
+				ServerIPv6:       serverV6,
+			}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
+			c, conn := newReflectClient(t, rt, "2001:db8::1")
+			t.Logf("input: bindAddress=%q advertisedIP=%q remote=2001:db8::1", bind, rt.TCP.AdvertisedIP)
+
+			c.sendServerIdent()
+			payload := payloadOfOpcode(t, conn.written(), OpServerIdent)
+			b := NewBufferFromBytes(payload)
+			_ = b.Get(16)
+			serverIP, _ := b.GetUInt32LE()
+			tags := parseServerIdentTags(t, NewBufferFromBytes(conn.written()))
+			t.Logf("output: serverIP=0x%08x name=%v svripv6=%x yourip=%x", serverIP, tags["name"], tags["svripv6"], tags["yourip"])
+
+			if serverIP != 0 {
+				t.Fatalf("serverIP = 0x%08x, want 0 for an address with no IPv4 form", serverIP)
+			}
+			if got, ok := tags["svripv6"].([]byte); !ok || !bytes.Equal(got, serverV6) {
+				t.Fatalf("svripv6 = %v, want %s", tags["svripv6"], net.IP(serverV6))
+			}
+			if _, ok := tags["yourip"]; !ok {
+				t.Fatal("yourip missing: the v6 reflection must survive an unadvertisable IPv4")
+			}
+		})
+	}
 }

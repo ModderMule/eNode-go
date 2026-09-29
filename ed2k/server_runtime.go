@@ -116,6 +116,10 @@ type ServerRuntime struct {
 	// the decision short-circuits before dialling at all. nil selects the real
 	// probe; nothing outside tests sets it.
 	firewallProbe func(*tcpClient) bool
+	// ipv6Probe indirects the IPv6 reachability dial-back the same way, so a test
+	// can drive a v6 login to either verdict without a dialable public IPv6. nil
+	// selects the real probe; nothing outside tests sets it.
+	ipv6Probe func(*tcpClient) bool
 	// meta supplies torrent/Usenet rows merged into search answers, or nil when no
 	// catalogue daemon is configured. Set once by SetMetaSearcher before the listeners
 	// bind, then only read. metaAdvertiseLegacy sends them to clients that did not ask.
@@ -917,13 +921,13 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// so running them serially doubled worst-case login latency for a dual-stack
 	// client — the common eMuleAI case: connects over IPv4, advertises
 	// CT_MOD_IP_V6. The probe reads only already-settled info (IPv6, Port), so it
-	// races nothing. Only started when an actual dial is needed; a v6-connected or
-	// probe-disabled client trusts the address as reachable.
+	// races nothing. Only started when an actual dial is needed; with probing
+	// turned off the address is trusted as reachable.
 	needV6Probe := c.v6ProbeRequired(len(v6Bytes))
 	var v6ProbeResult chan bool
 	if needV6Probe {
 		v6ProbeResult = make(chan bool, 1)
-		go func() { v6ProbeResult <- c.server.probeIPv6Reachable(c) }()
+		go func() { v6ProbeResult <- c.server.isIPv6Reachable(c) }()
 	}
 
 	// A client whose observed IPv4 cannot be expressed as an ed2k HighID is forced
@@ -974,9 +978,9 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	}
 
 	// Record the IPv6 reachability verdict, joining the concurrent probe if one was
-	// started. A v6-connected or probe-disabled client trusts the address as
-	// reachable (reachable stays true). The verdict is independent of the IPv4
-	// firewall decision above.
+	// started. With probing turned off the address is trusted as reachable
+	// (reachable stays true). The verdict is independent of the IPv4 firewall
+	// decision above.
 	if c.server.publishV6Sources() && len(v6Bytes) == 16 {
 		reachable := true
 		if needV6Probe {
@@ -1600,6 +1604,7 @@ func (c *tcpClient) sendServerIdent() {
 		MetaAPI:          c.server.TCP.MetaAPI,
 	})
 	if err != nil {
+		logging.Warnf("tcp server ident not sent remote=%s err=%v", c.remoteHost, err)
 		return
 	}
 	_ = c.writePacket(packet)
@@ -1960,6 +1965,15 @@ func (s *ServerRuntime) probeFirewalled(client *tcpClient) bool {
 	}
 	ok, err := s.probeClient(client, false, "tcp4", client.remoteHost)
 	return err != nil || !ok
+}
+
+// isIPv6Reachable returns the IPv6 dial-back verdict, through the test hook when
+// one is set.
+func (s *ServerRuntime) isIPv6Reachable(client *tcpClient) bool {
+	if s.ipv6Probe != nil {
+		return s.ipv6Probe(client)
+	}
+	return s.probeIPv6Reachable(client)
 }
 
 // probeIPv6Reachable dials the client's advertised public IPv6 and completes a
@@ -2600,12 +2614,16 @@ func loginIPv6(tags []NamedTag) (addr []byte, present bool) {
 }
 
 // v6ProbeRequired reports whether the login path has to dial back to decide the
-// client's IPv6 reachability rather than simply trusting the address: a session
-// that arrived over IPv6 has proven the address by using it, and probing can be
-// turned off outright. Shared with ipv6Reflection so the IPv6StatusProbed bit
-// cannot drift away from what the login path actually did.
+// client's IPv6 reachability rather than simply trusting the address. This holds
+// for a session that arrived over IPv6 too: an outbound connection proves only
+// that the client can reach us. A stateful IPv6 firewall — the default on most
+// home routers — still drops the unsolicited SYN a peer sends to the eD2K port,
+// and the existing session opens no hole for it, since the dial-back targets the
+// listen port from a fresh source port and so matches no tracked connection. Only
+// turning probing off skips the dial. Shared with ipv6Reflection so the
+// IPv6StatusProbed bit cannot drift away from what the login path actually did.
 func (c *tcpClient) v6ProbeRequired(v6Len int) bool {
-	return c.server.publishV6Sources() && v6Len == 16 && !c.connectedV6 && c.server.TCP.ProbeIPv6
+	return c.server.publishV6Sources() && v6Len == 16 && c.server.TCP.ProbeIPv6
 }
 
 // ipv6Reflection returns the two per-session IPv6 fields of OP_SERVERIDENT: the

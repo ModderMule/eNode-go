@@ -287,8 +287,10 @@ const (
 	// client's advertised port, i.e. the client is published as an IPv6 source.
 	IPv6StatusReachable uint8 = 0x02
 	// IPv6StatusProbed is set when the reachability verdict came from an actual
-	// dial-back rather than a trust default (a v6-connected session, or tcp.probeIPv6
-	// turned off). Without this bit a client must not report "verified" to its user.
+	// dial-back rather than a trust default (tcp.probeIPv6 turned off). A session
+	// that arrived over IPv6 is dialled back like any other: the connection proves
+	// only outbound reachability. Without this bit a client must not report
+	// "verified" to its user.
 	IPv6StatusProbed uint8 = 0x04
 )
 

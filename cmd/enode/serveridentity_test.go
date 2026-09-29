@@ -19,6 +19,13 @@ func TestFirstRoutableIP(t *testing.T) {
 		{"an empty address falls through", []string{"", "198.51.100.4"}, "198.51.100.4"},
 		{"nothing routable", []string{"0.0.0.0", ""}, ""},
 		{"wildcard dynIp is not routable either", []string{"0.0.0.0", "0.0.0.0"}, ""},
+		// The OP_SERVERIDENT server-IP field is a uint32: an IPv6 bind address has no
+		// form there, and picking it made every ident fail to build.
+		{"the v6 wildcard falls through to dynIp", []string{"::", "198.51.100.4"}, "198.51.100.4"},
+		{"a bracketed v6 wildcard falls through", []string{"[::]", "198.51.100.4"}, "198.51.100.4"},
+		{"a global v6 bind falls through", []string{"2001:db8::1", "198.51.100.4"}, "198.51.100.4"},
+		{"v6 wildcard and no dynIp", []string{"::", ""}, ""},
+		{"a v4-mapped address is advertised as plain IPv4", []string{"::ffff:203.0.113.7", "198.51.100.4"}, "203.0.113.7"},
 	}
 
 	for _, tc := range cases {

@@ -105,7 +105,8 @@ both a **LowID** unconditionally — without even running the IPv4 dial-back, wh
 answer could not change the outcome:
 
 1. **No IPv4 at all** — an IPv6-only session. It is reached via its IPv6, published
-   as a v6 source, and can drive and receive **IPv6 LowID callbacks** (§7).
+   as a v6 source, and can drive and receive **IPv6 LowID callbacks** (§7) — once
+   the IPv6 dial-back (§3a) has shown its v6 port is reachable.
 2. **An IPv4 ending in `.0`** — `203.0.113.0` packs to `0x007100cb`, at or below
    `0x00ffffff`, which is exactly the range a client reads back as a LowID. eMule
    assumes servers behave this way; the comment above its own `IsLowID` says so
@@ -204,11 +205,19 @@ What the combinations mean:
 
 | Session | Bits | Reading |
 |---|---|---|
-| connected over IPv6 | `HAVE\|REACHABLE` | proven by the connection itself; no dial-back was needed |
-| connected over IPv4, dial-back succeeded | `HAVE\|REACHABLE\|PROBED` | verified — you are reachable as an IPv6 source |
-| connected over IPv4, dial-back failed | `HAVE\|PROBED` | verified unreachable — your v6 port is firewalled or the address is wrong, and you are **not** published as a v6 source |
+| dial-back succeeded | `HAVE\|REACHABLE\|PROBED` | verified — you are reachable as an IPv6 source |
+| dial-back failed | `HAVE\|PROBED` | verified unreachable — your v6 port is firewalled or the address is wrong, you are **not** published as a v6 source, and nobody is asked to call you back over IPv6 |
 | `tcp.probeIPv6` off on the server | `HAVE\|REACHABLE` | assumed, not tested |
 | (tag absent) | — | the server has no verdict; assume nothing |
+
+The dial-back runs whichever family your session arrived on. Being connected over
+IPv6 proves only that you can reach the server: a stateful IPv6 firewall — the
+default on most home routers — still drops the unsolicited connection a peer
+opens to your eD2K port. The existing session opens no hole for it either, because
+the dial-back targets your listen port from a fresh server-side port and so
+matches no connection the firewall tracks. The probed address is your
+`CT_MOD_IP_V6` when sent, else the address the session arrived from; your client
+must accept the server's hello on its v6 listener exactly as it would a peer's.
 
 `IPV6ST_PROBED` is the bit that keeps the signal honest. Without it,
 `REACHABLE` may be an assumption, so do not report "IPv6 verified" to a user
