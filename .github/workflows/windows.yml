@@ -61,6 +61,11 @@ jobs:
         run: |
           $out = "dist/enode-$env:APP_VERSION-win64"
           Copy-Item enode.config.yaml,README.md,MIT-LICENSE.txt $out
+          # misc/enode.sql is the MySQL DDL applied on first connect; the default
+          # storage.mysql.schemaFile is relative to the working directory, so it
+          # must sit at misc/ next to the binary.
+          New-Item -ItemType Directory -Force "$out/misc" | Out-Null
+          Copy-Item misc/enode.sql "$out/misc/"
           # -Path $out (the directory) rather than "$out/*" (its contents):
           # that keeps a top-level enode-<version>-win64/ folder inside the zip,
           # matching the layout of the Linux and macOS tarballs. With the glob

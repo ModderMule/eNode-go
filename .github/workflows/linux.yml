@@ -59,6 +59,11 @@ jobs:
         run: |
           OUT="dist/enode-${APP_VERSION}-linux-amd64"
           cp enode.config.yaml README.md MIT-LICENSE.txt "$OUT/"
+          # misc/enode.sql is the MySQL DDL applied on first connect; the default
+          # storage.mysql.schemaFile is relative to the working directory, so it
+          # must sit at misc/ next to the binary.
+          mkdir -p "$OUT/misc"
+          cp misc/enode.sql "$OUT/misc/"
           tar -C dist -czf "$OUT.tar.gz" "enode-${APP_VERSION}-linux-amd64"
 
       # `cd dist` first so the .sha256 records a bare filename -- that is what

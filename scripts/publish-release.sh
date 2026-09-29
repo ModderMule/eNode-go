@@ -17,6 +17,10 @@ set -euo pipefail
 # rather than queue behind it. Nothing in this script talks to the GitHub API;
 # write the notes on the draft and publish it by hand once all three are green.
 #
+# What goes into a bundle is decided by the workflows' `Bundle` step, not here:
+# a runtime file the binary reads from disk (not go:embed'ed), such as
+# misc/enode.sql, must be copied there in all three workflows.
+#
 # There is no combined SHA256SUMS.txt for the same reason: three independent
 # workflows cannot append to one file without racing, so each ships its own.
 #
