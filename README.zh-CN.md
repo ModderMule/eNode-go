@@ -102,6 +102,8 @@ tcp:
   maxConnections: 1000000    # 最大连接数
   connectionTimeout: 2000    # 连接建立阶段超时（毫秒）
   disconnectTimeout: 3600    # 空闲断开超时（秒）
+  loginTimeout: 60           # 从接受连接到完成登录的秒数，不因收到数据而延长
+  maxConnectionsPerIP: 32    # 每个地址（IPv6 按 /64）在两个 TCP 端口上的并发连接上限；0 = 关闭
   allowLowIDs: true          # 是否允许 LowID 客户端
   minLowID: 1                # LowID 分配最小值
   maxLowID: 16777215         # LowID 分配最大值
@@ -111,7 +113,8 @@ udp:
   portObfuscated: 5567       # UDP 混淆端口；须为 tcp.port + 12 才能完成 crypt-ping（见 docs/server-udp-crypt-ping.md）
   getSources: true           # 允许 UDP 来源查询
   getFiles: true             # 允许 UDP 文件查询
-  serverKey: 305419896       # 服务端密钥种子；每个客户端的 UDP 混淆密钥由该种子 + 客户端 IP 派生（见 docs/server-udp-crypt-ping.md）
+  serverKey: 0               # 0：客户端 UDP 混淆密钥由自动生成并保存在 data/udp.secret 的 128 位密钥派生；非 0：旧式 32 位密钥（见 docs/server-udp-crypt-ping.md）
+  rateLimitPerIPPerMinute: 120 # 每个地址（IPv6 按 /64）每分钟的 UDP 搜索和来源请求数；0 = 关闭
 
 files:                       # 每个客户端的发布上限（见 docs/server-client-communication.md）
   softLimit: 10000           # 超出部分被忽略，并向客户端发送一次警告；0 表示不限制

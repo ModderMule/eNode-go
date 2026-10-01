@@ -27,6 +27,21 @@ func BuildGlobFoundSourcesIPv6Packet(fileHash []byte, sources []storage.Source) 
 
 func buildFoundSourcesIPv6(opcode uint8, udp bool, fileHash []byte, sources []storage.Source) (*Buffer, error) {
 	sources = capWireSources(sources)
+	if udp {
+		// Up to 27 bytes a source: 255 would not fit the 5000-byte buffer clients
+		// read a datagram into (udpSourceDatagramBudget).
+		size := 1 + 1 + 16 + 1
+		for i, src := range sources {
+			size += 4 + 2 + 1
+			if sourceHasReachableIPv6(src) {
+				size += 1 + 2 + 1 + 16 // HASH tag: type, name length, id, value
+			}
+			if size > udpSourceDatagramBudget {
+				sources = sources[:i]
+				break
+			}
+		}
+	}
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: opcode},
 		{Type: TypeHash, Value: fileHash},

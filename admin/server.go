@@ -100,6 +100,10 @@ type LiveStats struct {
 
 	// MetaAPI is the client-facing Meta API; nil when it is off.
 	MetaAPI *MetaAPIStats `json:"metaApi"`
+
+	// Update is the last successful GitHub release check (updatecheck.go); nil when
+	// the check is off or has not succeeded yet.
+	Update *UpdateInfo `json:"update"`
 }
 
 // MetaAPIStats are the Meta API's figures (docs/meta-api.md). Accounts counts are

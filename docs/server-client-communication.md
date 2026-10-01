@@ -77,15 +77,13 @@ non-unique `KEY hash` (`misc/enode.sql:72-73`). MongoDB: a unique compound index
 memory engine: `storage.fileMapKey`, a 24-byte key of the hash followed by the size
 big-endian.
 
-**One memory-engine divergence is accepted here.** Its source lists stay keyed on the hash
-alone, because `OP_GLOBGETSOURCES (0x9a)` carries bare hashes with no size and has to stay
-an O(1) lookup — the same reason MySQL keeps `KEY hash` alongside the unique pair. So when
-one hash carries two sizes, the memory engine returns the union of both sizes' sources
-where MySQL and MongoDB return only the matching size's, and `CleanupStale` writes the
-union count into both records. This is harmless: a client cannot be stopped from offering a
-file it does not have at any size, so the per-size bucket buys no protection. What it does
-buy — a record that cannot be corrupted by someone else's offer — is what matters, and that
-holds on all three engines.
+**The memory engine's source lists stay keyed on the hash alone**, because
+`OP_GLOBGETSOURCES (0x9a)` carries bare hashes with no size and has to stay an O(1)
+lookup — the same reason MySQL keeps `KEY hash` alongside the unique pair. Each source
+records the size it was offered at, so `GetSources(hash, size)` and the search counters
+see only that size's sources, as MySQL and MongoDB do; the size-less 0x9a lookup gets
+them all. Sources come back newest offer first (a re-offer counts as new), matching the
+DB engines' `time_offer DESC`.
 
 **A zero-size offer is refused.** If `FT_FILESIZE` is absent, or present but not an
 integer, the parsed size is `0` and the record is dropped before it reaches storage, with

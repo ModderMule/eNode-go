@@ -38,6 +38,14 @@ type debugFileSpec struct {
 	Size      uint64 `yaml:"size"`
 	Type      string `yaml:"type"`
 	Completed bool   `yaml:"completed"`
+	// Optional media properties, for exercising the artist/album/title, bitrate,
+	// length and codec search constraints.
+	Title   string `yaml:"title"`
+	Artist  string `yaml:"artist"`
+	Album   string `yaml:"album"`
+	Bitrate uint32 `yaml:"bitrate"`
+	Length  uint32 `yaml:"length"`
+	Codec   string `yaml:"codec"`
 }
 
 // seedDebugFixtures loads the fixtures file at path and injects its peers and files
@@ -173,6 +181,12 @@ func fileFromSpec(peerIdx, fileIdx int, f debugFileSpec) (storage.File, bool) {
 		Size:      f.Size,
 		Type:      f.Type,
 		Completed: completed,
+		Title:     f.Title,
+		Artist:    f.Artist,
+		Album:     f.Album,
+		Bitrate:   f.Bitrate,
+		Runtime:   f.Length,
+		Codec:     f.Codec,
 	}, true
 }
 

@@ -54,6 +54,10 @@ func testServer(t *testing.T) (string, LiveStats) {
 			SearchesTCP: 9, SearchesUDP: 4, RowsServed: 30, LiveCalls: 6, LiveErrors: 1, LiveTimeouts: 2,
 			CacheHits: 5, CacheMisses: 6, UDPSkipped: 1, Counted: 5000,
 		}},
+		Update: &UpdateInfo{
+			Latest: "v0.2.0", URL: ReleaseRepoURL + "/releases/tag/v0.2.0",
+			Available: true, CheckedAt: "2026-07-22T09:30:00Z",
+		},
 	}
 	return serveStatic(t, static, live), live
 }
@@ -105,7 +109,7 @@ func TestStatsJSONReturnsSnapshot(t *testing.T) {
 		"clients", "files", "lowIDs", "servers", "uptimeSeconds", "time",
 		"gossipKnown", "gossipVerified", "gossipParked", "gossipAdmitted",
 		"filterBlockedIP", "filterBlockedGeo",
-		"advertisedFiles", "metaCacheEntries", "meta",
+		"advertisedFiles", "metaCacheEntries", "meta", "update",
 	} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("stats.json missing key %q", key)
@@ -125,6 +129,13 @@ func TestStatsJSONReturnsSnapshot(t *testing.T) {
 	} {
 		if _, ok := first[key]; !ok {
 			t.Errorf("stats.json meta[0] missing key %q", key)
+		}
+	}
+	// The update keys renderUpdate reads.
+	update, _ := raw["update"].(map[string]any)
+	for _, key := range []string{"latest", "url", "available", "checkedAt"} {
+		if _, ok := update[key]; !ok {
+			t.Errorf("stats.json update missing key %q", key)
 		}
 	}
 	t.Logf("output: %d keys, gossipVerified=%v servers=%v", len(raw), raw["gossipVerified"], raw["servers"])
@@ -157,6 +168,7 @@ func TestIndexRendersStaticOnly(t *testing.T) {
 		`id="clients"`, `id="files"`, `id="lowIDs"`, `id="servers"`, `id="uptime"`,
 		`id="gossip"`, `id="blocked"`, `id="blockedBreak"`,
 		`id="filesAdvertised"`, `id="metaSection"`, `id="metaSummary"`, `id="metaCards"`,
+		`id="update"`,
 	} {
 		if !strings.Contains(html, id) {
 			t.Errorf("index HTML missing placeholder element %s", id)

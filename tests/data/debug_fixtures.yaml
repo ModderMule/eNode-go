@@ -30,6 +30,10 @@
 #   size          file size in bytes (uint64).
 #   type          optional ENUM (Image/Audio/Video/Pro/Doc); derived from name if "".
 #   completed     true if THIS peer has the complete file.
+#   title, artist, album, codec
+#                 optional media strings (FT_MEDIA_TITLE / _ARTIST / _ALBUM / _CODEC).
+#   bitrate       optional kbit/s (FT_MEDIA_BITRATE).
+#   length        optional play time in seconds (FT_MEDIA_LENGTH).
 
 peers:
   - ipv4: "203.0.113.7"
@@ -48,6 +52,19 @@ peers:
         name: "big buck bunny 1080p.mkv"
         size: 355856889
         completed: true
+      # Carries every media property, for the bitrate/length/artist/album/title
+      # search constraints. The name shares no keyword with the other fixtures.
+      - hash: "33334444555566667777888899990000"
+        name: "Morgenstern - Snow Fight.mp3"
+        size: 5880000
+        type: "Audio"
+        completed: true
+        title: "Snow Fight"
+        artist: "Jan Morgenstern"
+        album: "Sintel OST"
+        bitrate: 192
+        length: 245
+        codec: "mp3"
 
   - ipv4: "198.51.100.42"
     port: 4662

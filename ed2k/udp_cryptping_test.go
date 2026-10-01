@@ -106,7 +106,7 @@ func TestUDPCryptPingRoundTrip(t *testing.T) {
 	cfg := UDPRuntimeConfig{UDPServerKey: serverKey, UDPPortObf: 5567, TCPPortObf: 5565}
 	// The reply advertises a per-client key derived from the loopback client IP,
 	// not the raw secret. cryptProbe's client binds to 127.0.0.1.
-	wantKey := deriveUDPKey(serverKey, net.IPv4(127, 0, 0, 1))
+	wantKey := deriveUDPKey(LegacyUDPSecret(serverKey), net.IPv4(127, 0, 0, 1))
 
 	for _, pad := range []int{0, 7, 15} {
 		req := NewBuffer(4 + pad)
@@ -258,7 +258,7 @@ func TestUDPObfuscatedStatReqStillDispatches(t *testing.T) {
 	cfg := UDPRuntimeConfig{UDPServerKey: serverKey, UDPPortObf: 5567, TCPPortObf: 5565}
 	// A real client obfuscates with the per-client key it was handed, keyed on its
 	// own IP — here the loopback address cryptProbe's client binds to.
-	udpKey := deriveUDPKey(serverKey, net.IPv4(127, 0, 0, 1))
+	udpKey := deriveUDPKey(LegacyUDPSecret(serverKey), net.IPv4(127, 0, 0, 1))
 
 	inner := NewBuffer(6)
 	_ = inner.PutUInt8(PrED2K)

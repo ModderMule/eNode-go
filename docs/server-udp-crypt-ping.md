@@ -32,7 +32,7 @@ Before a client holds `baseKey` it can't obfuscate anything, so it bootstraps
    random padding bytes. This is *not* an ed2k packet — just the challenge in little-endian followed
    by noise.
 2. **Server → client:** `OP_GLOBSERVSTATRES`, encrypted with `baseKey = challenge` (direction magic
-   `0xA5`), carrying the real `udp.serverKey` at offset **+36**.
+   `0xA5`), carrying the client's UDP key at offset **+36**.
 3. The client decrypts with `baseKey = challenge` (it had set `cryptPingReplyPending`), stores
    `serverKey`, and uses it for every obfuscated datagram afterward.
 4. If no reply arrives within 20 s, the client falls back to the plaintext stat on `tcp.port + 4`.
@@ -51,7 +51,7 @@ Before a client holds `baseKey` it can't obfuscate anything, so it bootstraps
 | +28 | low-ID users | `advertisedLowIDs` |
 | +32 | UDP obf port (uint16) | |
 | +34 | TCP obf port (uint16) | |
-| +36 | **per-client UDP key** (uint32) | `deriveUDPKey(udp.serverKey, clientIP)` — the key the client adopts |
+| +36 | **per-client UDP key** (uint32) | `deriveUDPKey(secret, clientIP)` — the key the client adopts |
 
 ## Why the obfuscated UDP port must be `tcp.port + 12`
 
@@ -81,8 +81,20 @@ The `+36` key is **not** the raw `udp.serverKey`. Each client gets its own key b
 udpKey = deriveUDPKey(secret, clientIP) = uint32(MD5(secret ‖ clientIP)[:4])   // never 0
 ```
 
-where `secret` is the configured `udp.serverKey` (now a server-wide seed, not the value sent
-verbatim) and `clientIP` is the datagram's source IP (`ed2k/udpcrypt.go`). This restores the
+where `clientIP` is the datagram's source IP and `secret` is the server's UDP secret
+(`ed2k/udpcrypt.go`, `ed2k/udpsecret.go`):
+
+- **Default (`udp.serverKey: 0` or absent):** 16 bytes from `crypto/rand`, generated on first
+  start and kept in `data/udp.secret` (mode 0600). Back it up with the server: clients store the
+  derived key in `server.met` (`ST_UDPKEY`), so a new secret breaks their obfuscated UDP until they
+  re-ping.
+- **Legacy (`udp.serverKey` non-zero):** the value's 4 little-endian bytes, which derive exactly the
+  keys that setting always did. Logged as a warning at startup: with only 32 secret bits, one
+  observed `(clientIP, key)` pair is enough to recover the secret offline, after which every client's
+  key can be computed. Every shipped config used to carry the same value, 305419896.
+
+The `+36` field stays 32 bits either way — eMule reads it with `PeekUInt32` and keys RC4 with exactly
+those 4 bytes (`EncryptedDatagramSocket.cpp`); only the secret behind it grew. This restores the
 handshake's anti-spoofing property that a single global key gave up: the key handed to one client no
 longer lets a *different* host obfuscate as it.
 
@@ -104,8 +116,9 @@ not invalidate the key, which is why the derivation excludes the port.
 
 **Migration note.** The `+36` value changed from the raw `udp.serverKey` to a per-IP derivation.
 A client that cached the old global key keeps using it until it re-pings (server reconnect, its
-public IP changes, or app restart), after which it adopts the per-client key. Rotating `udp.serverKey`
-has the identical effect and always did — it is server key material, not a stable client-visible id.
+public IP changes, or app restart), after which it adopts the per-client key. Rotating the secret
+(removing `udp.serverKey`, or deleting `data/udp.secret`) has the identical effect and always did — it
+is server key material, not a stable client-visible id.
 
 ## Server-side handling (`ed2k/server_runtime.go`)
 

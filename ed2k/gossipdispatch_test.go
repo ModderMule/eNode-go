@@ -54,7 +54,7 @@ func feed(t *testing.T, rt *ServerRuntime, conn *net.UDPConn, from string, packe
 	t.Helper()
 	remote := &net.UDPAddr{IP: net.ParseIP(from), Port: 4675}
 	if obfuscate {
-		crypt := NewUDPCrypt(true, deriveUDPKey(rt.UDP.UDPServerKey, remote.IP))
+		crypt := NewUDPCrypt(true, deriveUDPKey(LegacyUDPSecret(rt.UDP.UDPServerKey), remote.IP))
 		packet = crypt.EncryptAsClient(packet)
 	}
 	// enableCrypt=true models the gossip/obfuscated listener.

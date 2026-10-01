@@ -39,6 +39,15 @@ func TestBuildQuery(t *testing.T) {
 			node(storage.SearchAnd, tagString(storage.SearchFileTypeTag, "Video"),
 				node(storage.SearchAnd, tagUint(storage.SearchSizeGtTag, 100), tagUint(storage.SearchSizeLtTag, 1000)))),
 			Query{Terms: []string{"movie"}, FileType: "Video", MinSize: 101, MaxSize: 999}, true},
+		// eMule's search window sends >= and <= (ops 3 and 4), which map onto the
+		// daemon's inclusive bounds unshifted.
+		{"inclusive size bounds", node(storage.SearchAnd, text("movie"),
+			node(storage.SearchAnd, tagUint(sizeLeaf(storage.SearchOpGreaterEqual), 100), tagUint(sizeLeaf(storage.SearchOpLessEqual), 1000))),
+			Query{Terms: []string{"movie"}, MinSize: 100, MaxSize: 1000}, true},
+		{"exact size", node(storage.SearchAnd, text("movie"), tagUint(sizeLeaf(storage.SearchOpEqual), 500)),
+			Query{Terms: []string{"movie"}, MinSize: 500, MaxSize: 500}, true},
+		{"not-equal size left to post-filter", node(storage.SearchAnd, text("movie"), tagUint(sizeLeaf(storage.SearchOpNotEqual), 500)),
+			Query{Terms: []string{"movie"}}, true},
 		{"not single word excluded", node(storage.SearchAndNot, text("linux"), text("beta")),
 			Query{Terms: []string{"linux"}, Exclude: []string{"beta"}}, true},
 		{"not of or excluded", node(storage.SearchAndNot, text("linux"), node(storage.SearchOr, text("beta"), text("rc"))),
@@ -86,4 +95,10 @@ func TestQueryRequestAndKey(t *testing.T) {
 			t.Fatalf("a different query %+v shares the cache key", other)
 		}
 	}
+}
+
+// sizeLeaf is the TagType of an FT_FILESIZE leaf with operator op: op, a tag-name
+// length of 1, and the tag id, as one little-endian uint32.
+func sizeLeaf(op uint8) uint32 {
+	return uint32(op) | 1<<8 | uint32(storage.SearchTagSize)<<24
 }

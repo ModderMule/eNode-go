@@ -470,11 +470,22 @@ func BuildServerMessagePacket(message string) (*Buffer, error) {
 	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
-func BuildCallbackRequestedPacket(ipv4 uint32, port uint16) (*Buffer, error) {
+// BuildCallbackRequestedPacket builds the OP_CALLBACKREQUESTED (0x35) a firewalled
+// target gets when someone asks to reach it: the requester's IPv4 and port, then the
+// requester's crypt options and user hash. Clients read the trailer when the payload
+// is at least 23 bytes (MFC ServerSocket.cpp, eMuleQt ServerConnect.cpp): without it
+// the target calls back in plaintext with no hash to key obfuscation, which a
+// requester that requires obfuscation refuses. Legacy clients only need the first 6.
+func BuildCallbackRequestedPacket(ipv4 uint32, port uint16, cryptOptions byte, userHash []byte) (*Buffer, error) {
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpCallbackReqd},
 		{Type: TypeUint32, Value: ipv4},
 		{Type: TypeUint16, Value: port},
+	}
+	if len(userHash) == 16 {
+		pack = append(pack,
+			PacketItem{Type: TypeUint8, Value: cryptOptions & 0x07},
+			PacketItem{Type: TypeHash, Value: userHash})
 	}
 	packet, err := MakePacket(PrED2K, pack)
 	if err != nil {
@@ -487,8 +498,8 @@ func BuildCallbackRequestedPacket(ipv4 uint32, port uint16) (*Buffer, error) {
 // packet the server sends to a firewalled callback target so it can call back to a
 // requester over IPv6. It mirrors BuildCallbackRequestedPacket, replacing the
 // uint32 IPv4 with the requester's 16-byte in6_addr (network byte order, emitted
-// as a HASH just like the sentinel / CT_MOD_SVR_IP_V6 paths); no crypt trailer,
-// matching the classic emitter above.
+// as a HASH just like the sentinel / CT_MOD_SVR_IP_V6 paths). It carries no crypt
+// trailer: the IPv6 spec defines none, and clients ignore bytes after the port.
 func BuildCallbackRequestedIPv6Packet(ipv6 []byte, port uint16) (*Buffer, error) {
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpCallbackReqdIPv6},

@@ -20,9 +20,20 @@ type Tag struct {
 	Data any
 }
 
+const (
+	// maxTagPrealloc and maxFileRecordPrealloc cap what a declared count reserves
+	// up front; longer lists grow by append as their entries decode.
+	maxTagPrealloc        = 64
+	maxFileRecordPrealloc = 256
+)
+
 type NamedTag struct {
 	Name  string
 	Value any
+	// Type is the wire tag type with the short-name flag cleared; STR1-16 report
+	// TypeString. Integers of every width decode to uint64, so a reader that needs
+	// one particular form (e.g. a HASH, not a 16-byte BLOB) checks this.
+	Type uint8
 }
 
 type FileRecord struct {
@@ -432,7 +443,23 @@ func (b *Buffer) GetTagValue(typ uint8) (any, error) {
 			return nil, ErrOutOfBounds
 		}
 		return append([]byte(nil), b.Get(int(n))...), nil
+	case TypeBoolArray:
+		// uint16 bit count, then the bits; MFC skips count/8+1 bytes and so do we.
+		n, err := b.GetUInt16LE()
+		if err != nil {
+			return nil, err
+		}
+		skip := int(n)/8 + 1
+		if b.Remaining() < skip {
+			return nil, ErrOutOfBounds
+		}
+		b.Get(skip)
+		return nil, nil
 	default:
+		if typ >= 0x11 && typ <= 0x20 {
+			// STR1-16 with a long-form name: MFC accepts it in either form.
+			return b.GetString(int(typ - 0x10))
+		}
 		return nil, fmt.Errorf("%w: 0x%x", ErrUnsupportedTag, typ)
 	}
 }
@@ -576,7 +603,10 @@ func (b *Buffer) GetTag() (NamedTag, error) {
 	if !haveName {
 		name = tagName(code)
 	}
-	return NamedTag{Name: name, Value: value}, nil
+	if tagType >= 0x11 && tagType <= 0x20 {
+		tagType = TypeString
+	}
+	return NamedTag{Name: name, Value: value, Type: tagType}, nil
 }
 
 func (b *Buffer) GetTags() ([]NamedTag, error) {
@@ -588,7 +618,9 @@ func (b *Buffer) GetTags() ([]NamedTag, error) {
 	if err := checkWireCount(count, b.Remaining(), minTagBytes, "tags"); err != nil {
 		return nil, err
 	}
-	tags := make([]NamedTag, 0, count)
+	// count is bounded by the bytes left, not by what they will decode to: a 2 MB
+	// packet may declare a million two-byte tags. Grow as tags actually decode.
+	tags := make([]NamedTag, 0, min(count, maxTagPrealloc))
 	for i := uint32(0); i < count; i++ {
 		tag, err := b.GetTag()
 		if err != nil {
@@ -607,7 +639,7 @@ func (b *Buffer) GetFileList() ([]FileRecord, error) {
 	if err := checkWireCount(count, b.Remaining(), minFileRecordBytes, "file records"); err != nil {
 		return nil, err
 	}
-	files := make([]FileRecord, 0, count)
+	files := make([]FileRecord, 0, min(count, maxFileRecordPrealloc))
 	for i := uint32(0); i < count; i++ {
 		hash := append([]byte(nil), b.Get(16)...)
 		if len(hash) != 16 {

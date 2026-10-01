@@ -1,6 +1,7 @@
 package ed2k
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"enode/internal/ratelimit"
 	"enode/logging"
 	"enode/storage"
 
@@ -25,14 +27,19 @@ type TCPRuntimeConfig struct {
 	// AdvertisedIP is the address published to clients in OP_SERVERIDENT. It is
 	// separate from Address because the wildcard is a valid thing to bind but
 	// encodes as IP 0, which tells a client nothing. Empty falls back to Address.
-	AdvertisedIP         string
-	Port                 uint16
-	Flags                uint32
-	Hash                 []byte
-	MessageLogin         string
-	MessageLowID         string
-	ConnectionTimeout    time.Duration
-	DisconnectTimeout    time.Duration
+	AdvertisedIP      string
+	Port              uint16
+	Flags             uint32
+	Hash              []byte
+	MessageLogin      string
+	MessageLowID      string
+	ConnectionTimeout time.Duration
+	DisconnectTimeout time.Duration
+	// LoginTimeout bounds the time from accept to a completed login, however the
+	// bytes trickle in; zero leaves only DisconnectTimeout. MaxConnsPerIP caps
+	// concurrent connections per address (IPv6 per /64); zero is unlimited.
+	LoginTimeout         time.Duration
+	MaxConnsPerIP        int
 	ServerStatusInterval time.Duration
 	// CounterCacheTTL bounds how stale the advertised client/file counts may be.
 	// Zero uses defaultCounterCacheTTL.
@@ -78,10 +85,13 @@ type UDPRuntimeConfig struct {
 	// support — so a server with getSources disabled cleared the flag and then
 	// answered anyway. Conforming clients respect the advertised flag, so the
 	// exposure was precisely to the abusive ones the option exists to stop.
-	GetSources     bool
-	GetFiles       bool
-	UDPPortObf     uint16
-	TCPPortObf     uint16
+	GetSources bool
+	GetFiles   bool
+	UDPPortObf uint16
+	TCPPortObf uint16
+	// UDPSecret derives each client's UDP obfuscation key (deriveUDPKey). When empty,
+	// UDPServerKey stands in as a legacy 4-byte secret.
+	UDPSecret      []byte
 	UDPServerKey   uint32
 	MaxConnections uint32
 	// SoftFiles and HardFiles are the advertised halves of TCPRuntimeConfig's
@@ -90,6 +100,9 @@ type UDPRuntimeConfig struct {
 	// drift apart.
 	SoftFiles uint32
 	HardFiles uint32
+	// RateLimitPerIPPerMinute caps UDP searches and source requests per address
+	// (IPv6 per /64); 0 is off. See config udp.rateLimitPerIPPerMinute.
+	RateLimitPerIPPerMinute int
 }
 
 type ServerRuntime struct {
@@ -105,6 +118,11 @@ type ServerRuntime struct {
 	// Filter refuses blocked addresses before any parsing, or nil to filter nothing.
 	Filter   AccessFilter
 	counters *counterCache
+	// udpLimiter applies UDPRuntimeConfig.RateLimitPerIPPerMinute.
+	udpLimiter *ratelimit.Limiter
+	// connsPerIP counts open TCP connections per addressKey, for MaxConnsPerIP.
+	connsMu    sync.Mutex
+	connsPerIP map[string]int
 	// sessionsMu guards sessionsByHash, which indexes logged-in connections by user hash
 	// so a PR_NAT keepalive can extend the matching eD2K session's idle deadline. Keyed on
 	// hash rather than ID because that is what the NAT registry knows; the LowIDs table is
@@ -147,6 +165,8 @@ func NewServerRuntime(tcp TCPRuntimeConfig, udp UDPRuntimeConfig, store storage.
 		Storage:  store,
 		LowIDs:   NewLowIDClients(tcp.AllowLowIDs, tcp.MinLowID, tcp.MaxLowID),
 		counters: newCounterCache(store, tcp.CounterCacheTTL),
+		// A disabled limiter allows everything, so a zero config costs one branch.
+		udpLimiter: ratelimit.New(udp.RateLimitPerIPPerMinute),
 	}
 }
 
@@ -196,9 +216,49 @@ func (s *ServerRuntime) TCPHandler(enableCrypt bool) func(net.Conn) {
 				s.Gossip.NoteClient(tcpAddr.IP)
 			}
 		}
+		if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+			key := addressKey(NormalizeIP(tcpAddr.IP))
+			if !s.acquireConnSlot(key) {
+				logging.Debugf("tcp connection refused remote=%s reason=per-ip-limit(%d)", tcpAddr.IP, s.TCP.MaxConnsPerIP)
+				_ = conn.Close()
+				return
+			}
+			defer s.releaseConnSlot(key)
+		}
 		client := newTCPClient(s, conn, enableCrypt)
 		client.run()
 	}
+}
+
+// acquireConnSlot counts a new connection from key, refusing it past MaxConnsPerIP.
+func (s *ServerRuntime) acquireConnSlot(key string) bool {
+	if s.TCP.MaxConnsPerIP <= 0 {
+		return true
+	}
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+	if s.connsPerIP[key] >= s.TCP.MaxConnsPerIP {
+		return false
+	}
+	if s.connsPerIP == nil {
+		s.connsPerIP = map[string]int{}
+	}
+	s.connsPerIP[key]++
+	return true
+}
+
+// releaseConnSlot undoes acquireConnSlot when the connection ends.
+func (s *ServerRuntime) releaseConnSlot(key string) {
+	if s.TCP.MaxConnsPerIP <= 0 {
+		return
+	}
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+	if s.connsPerIP[key] <= 1 {
+		delete(s.connsPerIP, key)
+		return
+	}
+	s.connsPerIP[key]--
 }
 
 // advertisedAddress is the address published to clients, falling back to the
@@ -216,6 +276,23 @@ func (s *ServerRuntime) SetNATHandler(handler *NATTraversalHandler) {
 	// Bridge PR_NAT keepalives to eD2K session liveness. Registered here rather than in
 	// main.go so the wiring cannot be forgotten when a NAT handler is attached.
 	handler.SetSessionTouch(s.TouchSessionByHash)
+	handler.SetSessionAddrs(s.sessionAddrs)
+}
+
+// sessionAddrs reports the addresses of the session logged in under hash: the
+// address it connected from, plus the IPv6 it announced when it connected over IPv4.
+func (s *ServerRuntime) sessionAddrs(hash [16]byte) (v4, v6 net.IP, local bool) {
+	c := s.sessionByHash(hash[:])
+	if c == nil {
+		return nil, nil, false
+	}
+	if c.connectedV6 {
+		return nil, c.peerIP, true
+	}
+	if info := c.snapshotInfo(); len(info.IPv6) == 16 {
+		v6 = net.IP(info.IPv6)
+	}
+	return c.peerIP.To4(), v6, true
 }
 
 // registerSession indexes a logged-in connection by user hash. Called from handShake, so
@@ -318,7 +395,7 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 		// also advertise to this client at reply offset +36, so both directions
 		// agree. On the plaintext listener the crypt does no crypto but still
 		// carries the derived key for the stat reply to advertise.
-		crypt := NewUDPCrypt(enableCrypt, deriveUDPKey(s.UDP.UDPServerKey, remote.IP))
+		crypt := NewUDPCrypt(enableCrypt, deriveUDPKey(s.udpSecret(), remote.IP))
 		// Whether the datagram genuinely arrived obfuscated, recorded before Decrypt
 		// replaces the buffer. This is not the same question as "which listener is this":
 		// Decrypt deliberately passes a plaintext PR_ED2K frame straight through (so a
@@ -388,7 +465,7 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 			}
 			s.udpGlobGetSources2(b, remote, conn, crypt, module)
 		case OpGlobGetSourcesIPv6:
-			if !s.publishV6Sources() || !s.udpOpcodeEnabled(s.UDP.GetSources, code, remote) {
+			if !s.TCP.IPv6 || !s.udpOpcodeEnabled(s.UDP.GetSources, code, remote) {
 				return
 			}
 			s.udpGlobGetSourcesIPv6(b, remote, conn, crypt, module)
@@ -528,6 +605,13 @@ type tcpClient struct {
 	// bounded too.
 	pendingResults []storage.File
 
+	// headerBuf holds the start of a packet header that arrived without the rest of
+	// its six bytes. TCP owes us no alignment between reads and packet boundaries, so
+	// a burst of small pipelined packets crossing a read or MSS boundary splits a
+	// header; dropping the fragment desynced the stream. Only this connection's own
+	// goroutine touches it, so it needs no lock.
+	headerBuf []byte
+
 	// offeredFiles counts the OP_OFFERFILES *records* this session has sent, across
 	// every packet; softLimitWarned keeps the soft-limit warning to one per session,
 	// and hardLimitHit makes the handler inert once the session has been dropped.
@@ -555,6 +639,13 @@ type tcpClient struct {
 	// defer, and a same-IP re-login that takes this session over (handleLoginRequest)
 	// and must finish releasing it before the new session connects to storage.
 	releaseOnce sync.Once
+	// storeMu orders this session's storage writes against its release. A same-IP
+	// re-login releases the session from the new session's goroutine, possibly
+	// while this one is still inside handleOfferFiles; an AddFiles landing after
+	// Storage.Disconnect would publish sources for a session that is gone.
+	// released is set under storeMu, before Disconnect, and checked by addFiles.
+	storeMu  sync.Mutex
+	released bool
 
 	closeReason string
 }
@@ -634,6 +725,26 @@ func newTCPClient(server *ServerRuntime, conn net.Conn, enableCrypt bool) *tcpCl
 }
 
 const defaultTCPKeepAlivePeriod = 2 * time.Minute
+
+// tcpWriteTimeout bounds one write to a client socket. A healthy client drains even
+// a full 255-result search page in well under a second; one that has stopped reading
+// for this long is not coming back. A variable only so tests can shorten it.
+var tcpWriteTimeout = 30 * time.Second
+
+const (
+	// maxUDPGetSourcesHashes is how many files one UDP source request is answered
+	// for. eMule packs at most 35 (DownloadQueue.cpp MAX_REQUESTS_PER_SERVER, and
+	// fewer by its 510-byte payload limit); a 64 KB datagram holds ~4000, each
+	// answered with up to 1.5 KB.
+	maxUDPGetSourcesHashes = 35
+	// maxUDPSearchResults caps a UDP search's answer. A one-letter query is ten
+	// bytes and matched MaxSearchResults (1000) files, each its own datagram.
+	maxUDPSearchResults = 100
+)
+
+// errHelloHashMismatch is a dial-back answered by a client other than the one probed.
+var errHelloHashMismatch = errors.New("hello answer from another user hash")
+
 const defaultServerStatusInterval = 5 * time.Minute
 
 func enableTCPKeepAlive(conn net.Conn, period time.Duration) {
@@ -660,15 +771,32 @@ func (c *tcpClient) run() {
 		c.releaseSession()
 	}()
 
+	// The idle deadline below is pushed out by every read, so on its own a socket
+	// that trickles a byte at a time never completes a login and is never reaped.
+	// Until login, the deadline is also capped at accept + LoginTimeout.
+	var loginDeadline time.Time
+	if c.server.TCP.LoginTimeout > 0 {
+		loginDeadline = time.Now().Add(c.server.TCP.LoginTimeout)
+	}
 	buf := make([]byte, 4096)
 	for {
+		var deadline time.Time
 		if c.server.TCP.DisconnectTimeout > 0 {
-			_ = c.conn.SetReadDeadline(time.Now().Add(c.server.TCP.DisconnectTimeout))
+			deadline = time.Now().Add(c.server.TCP.DisconnectTimeout)
+		}
+		preLogin := !loginDeadline.IsZero() && !c.isLogged()
+		if preLogin && (deadline.IsZero() || loginDeadline.Before(deadline)) {
+			deadline = loginDeadline
+		}
+		if !deadline.IsZero() {
+			_ = c.conn.SetReadDeadline(deadline)
 		}
 		n, err := c.conn.Read(buf)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				c.setCloseReason("peer-closed")
+			} else if ne, ok := err.(net.Error); ok && ne.Timeout() && preLogin {
+				c.setCloseReason(fmt.Sprintf("login-timeout(%s)", c.server.TCP.LoginTimeout))
 			} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				c.setCloseReason(fmt.Sprintf("read-timeout(%s)", c.server.TCP.DisconnectTimeout))
 			} else {
@@ -695,7 +823,9 @@ func (c *tcpClient) handleBytes(data []byte) {
 			// [marker][96-byte DH A][pad], derive keys from it, and wedge the
 			// session. The original checks the protocol byte first for this
 			// reason (eNode/ed2k/packet.js:105-129).
-			if state == CsUnknown && len(data) > 0 && IsProtocol(data[0]) {
+			// Only the stream's first byte decides: a later piece of a split key
+			// exchange may start with any value.
+			if state == CsUnknown && len(data) > 0 && IsProtocol(data[0]) && c.crypt.Buffered() == 0 {
 				logging.Debugf("tcp plaintext on obfuscated port remote=%s proto=0x%x", c.remoteHost, data[0])
 				c.crypt.SetState(CsNone)
 				break
@@ -727,16 +857,41 @@ func (c *tcpClient) handleBytes(data []byte) {
 }
 
 func (c *tcpClient) processPacketData(data []byte) {
+	if c.packet.Status == PsNew && len(c.headerBuf) > 0 {
+		data = append(c.headerBuf, data...)
+		c.headerBuf = nil
+	}
 	buf := NewBufferFromBytes(data)
 	switch c.packet.Status {
 	case PsNew:
+		if len(data) == 0 {
+			return
+		}
+		// Reject a bad protocol byte before waiting for the rest of the header:
+		// the stream has lost its framing and nothing later can resync it.
+		if !IsProtocol(data[0]) {
+			logging.Warnf("tcp unknown protocol remote=%s proto=0x%x", c.remoteHost, data[0])
+			c.closeWithReason("unknown-protocol")
+			return
+		}
+		if len(data) < PacketHeaderSize {
+			c.headerBuf = append([]byte(nil), data...)
+			return
+		}
+		if !c.preLoginHeaderAllowed(data) {
+			return
+		}
 		if err := c.packet.Init(buf); err != nil {
-			// An oversized declaration is never legitimate and would otherwise
-			// allocate the declared size, so drop the peer rather than resync.
+			// With a full header in hand every Init error is fatal: an oversized
+			// declaration would allocate the declared size, and a zero size leaves
+			// no way to find the next packet boundary.
 			if errors.Is(err, ErrPacketTooLarge) {
 				logging.Warnf("tcp packet too large remote=%s err=%v", c.remoteHost, err)
 				c.closeWithReason("packet-too-large")
+				return
 			}
+			logging.Warnf("tcp bad packet header remote=%s err=%v", c.remoteHost, err)
+			c.closeWithReason(fmt.Sprintf("bad-packet-header: %v", err))
 			return
 		}
 	case PsWaitingData:
@@ -811,12 +966,13 @@ func (c *tcpClient) handleED2K(opcode uint8, data *Buffer) {
 	case OpGetSourcesObfu:
 		c.handleGetSources(data, true)
 	case OpGetSourcesIPv6:
-		// Unhandled (falls to the default log) unless we publish v6 sources, so a
-		// disabled server behaves exactly as before for this opcode too.
-		if c.server.publishV6Sources() {
+		// SRVCAP_IPV6 is advertised whenever the server is dual-stack, so the request
+		// is answered even with ipv6.publishSources off — in the IPv6 form, carrying
+		// no addresses — rather than leaving the client waiting on silence.
+		if c.server.TCP.IPv6 {
 			c.handleGetSourcesIPv6(data)
 		} else {
-			logging.Debugf("tcp unhandled opcode remote=%s opcode=0x%x (ipv6 publish off)", c.remoteHost, opcode)
+			logging.Debugf("tcp unhandled opcode remote=%s opcode=0x%x (ipv6 off)", c.remoteHost, opcode)
 		}
 	case OpSearchRequest:
 		c.handleSearchRequest(data)
@@ -1028,17 +1184,15 @@ func (c *tcpClient) handShake() {
 // touchDeadline pushes the read deadline out by DisconnectTimeout, treating out-of-band
 // activity (a PR_NAT keepalive) as if a byte had arrived on the socket.
 //
-// Called from the NAT UDP worker pool, not this connection's own goroutine, so it takes
-// writeMu. That mutex already serialises socket operations against the status ticker and
-// peer callbacks, and SetReadDeadline is exactly such an operation — the read loop's own
-// SetReadDeadline is the one place it is touched without the lock, and that is safe
-// because a deadline set slightly early only costs one extra loop iteration.
+// Called from the NAT UDP worker pool, not this connection's own goroutine. It takes no
+// lock: net.Conn deadline methods are safe for concurrent use, and taking writeMu here
+// let a peer that stopped reading park a UDP worker behind its blocked write for every
+// keepalive, until the pool ran dry. A race with the read loop's own SetReadDeadline
+// only moves the deadline by the time between the two calls.
 func (c *tcpClient) touchDeadline() {
 	if c.server.TCP.DisconnectTimeout <= 0 {
 		return
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 	_ = c.conn.SetReadDeadline(time.Now().Add(c.server.TCP.DisconnectTimeout))
 }
 
@@ -1139,6 +1293,31 @@ func (c *tcpClient) requireLogin(opcode uint8) bool {
 	c.sendServerMessage(msgNotLoggedIn)
 	c.closeWithReason("not-logged-in")
 	return false
+}
+
+// maxPreLoginPacket is the largest payload accepted before login. A login request is
+// a few hundred bytes.
+const maxPreLoginPacket = 64 << 10
+
+// preLoginHeaderAllowed judges a packet from its header alone before login, before
+// anything is buffered for it: only a login or disconnect of plausible size may
+// follow. requireLogin applies the same opcode rule after the fact; this spares
+// buffering (up to MaxTCPPacketSize) and inflating what it would refuse anyway.
+func (c *tcpClient) preLoginHeaderAllowed(header []byte) bool {
+	if c.isLogged() {
+		return true
+	}
+	if size := binary.LittleEndian.Uint32(header[1:5]); size > maxPreLoginPacket+1 {
+		logging.Warnf("tcp oversized packet before login remote=%s size=%d: closing", c.remoteHost, size)
+		c.closeWithReason("prelogin-packet-too-large")
+		return false
+	}
+	if header[0] != PrEMule {
+		if code := header[5]; code != OpLoginRequest && code != OpDisconnect {
+			return c.requireLogin(code)
+		}
+	}
+	return true
 }
 
 func (c *tcpClient) startPeriodicServerStatus() {
@@ -1265,7 +1444,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 			// Flushed before the drop: the records up to the cap were accepted, and
 			// were stored when this loop wrote each one as it went.
 			if len(batch) > 0 {
-				c.server.Storage.AddFiles(batch, info)
+				c.addFiles(batch, info)
 			}
 			c.hardLimitHit = true
 			logging.Warnf("offer files hard limit remote=%s id=%d offered=%d hardLimit=%d: closing",
@@ -1298,7 +1477,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 		}
 	}
 	if len(batch) > 0 {
-		c.server.Storage.AddFiles(batch, info)
+		c.addFiles(batch, info)
 	}
 	// One line for the packet, never one per record: a client at the hard limit can
 	// put 20,000 records in a single offer.
@@ -1344,7 +1523,7 @@ func (c *tcpClient) handleGetSourcesIPv6(data *Buffer) {
 	if !ok {
 		return
 	}
-	sources := c.server.Storage.GetSources(hash, fileSize)
+	sources := c.server.v6PublishableSources(c.server.Storage.GetSources(hash, fileSize))
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_GETSOURCES_IPV6 sourcesFound=%d", c.remoteHost, len(sources))
 	packet, err := BuildFoundSourcesIPv6Packet(hash, sources)
 	if err != nil {
@@ -1383,6 +1562,9 @@ func (c *tcpClient) handleSearchRequest(data *Buffer) {
 	expr, err := ParseSearchExpr(data)
 	if err != nil {
 		logging.Warnf("search request parse failed remote=%s err=%v", c.remoteHost, err)
+		// Answered with an empty page for the same reason a zero-result search is
+		// (see below): silence leaves the client "Searching…" until its timeout.
+		c.sendSearchPage(nil)
 		return
 	}
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST expr=%s", c.remoteHost, formatSearchExpr(expr))
@@ -1445,6 +1627,14 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 		c.sendCallbackFailed()
 		return
 	}
+	// The LowID is registered before the target's login completes (the IPv6 probe and
+	// storage connect come after), so a target can be found here before it is a
+	// session anyone may reach.
+	if !target.isLogged() {
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=target-not-logged-in", c.remoteHost, lowID)
+		c.sendCallbackFailed()
+		return
+	}
 	// target belongs to another connection's goroutine, so its identity is read
 	// through the snapshot accessor rather than directly.
 	targetInfo := target.snapshotInfo()
@@ -1462,8 +1652,11 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 	case !self.LowID && self.IPv4 != 0:
 		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d family=ipv4 callbackIPv4=%d callbackPort=%d",
 			c.remoteHost, lowID, self.IPv4, self.Port)
-		err = target.sendCallbackRequested(self.IPv4, self.Port)
-	case c.server.publishV6Sources() && len(self.IPv6) == 16 && self.IPv6Reachable && target.isV6Capable():
+		err = target.sendCallbackRequested(self.IPv4, self.Port, self.CryptOptions, self.Hash)
+	case c.server.publishV6Sources() && len(self.IPv6) == 16 && self.IPv6Reachable && target.isV6Capable() &&
+		(len(targetInfo.IPv6) == 16 || target.connectedV6):
+		// The target must have IPv6 itself to dial the requester: being able to parse
+		// the opcode is not enough, and a v6 callback it cannot place fails silently.
 		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d family=ipv6 callbackIPv6=%s callbackPort=%d",
 			c.remoteHost, lowID, net.IP(self.IPv6).String(), self.Port)
 		err = target.sendCallbackRequestedIPv6(self.IPv6, self.Port)
@@ -1572,8 +1765,15 @@ func (c *tcpClient) sendServerStatus() {
 func (c *tcpClient) sendIDChange(id uint32) {
 	// The observed IPv4 is taken from the accepted socket, never from anything the
 	// client claimed in OP_LOGINREQUEST. It is what lets a LowID client learn its
-	// own public IPv4 — see BuildIDChangePacket.
-	packet, err := BuildIDChangePacket(id, c.server.TCP.Flags, c.server.TCP.Port, c.snapshotInfo().IPv4)
+	// own public IPv4 — see BuildIDChangePacket. A private or loopback address
+	// (LAN, hairpin NAT, docker bridge) is not that: eMule would adopt it as its
+	// public IP, so a LowID gets 0, which clients skip. A HighID keeps it: there
+	// it equals the ID, clients ignore it, and MFC debug builds assert on 0.
+	observed := c.snapshotInfo().IPv4
+	if IsLANIP(c.peerIP) && !HasHighID(id) {
+		observed = 0
+	}
+	packet, err := BuildIDChangePacket(id, c.server.TCP.Flags, c.server.TCP.Port, observed)
 	if err != nil {
 		return
 	}
@@ -1621,8 +1821,8 @@ func (c *tcpClient) sendServerMessage(message string) {
 	_ = c.writePacket(packet)
 }
 
-func (c *tcpClient) sendCallbackRequested(ipv4 uint32, port uint16) error {
-	packet, err := BuildCallbackRequestedPacket(ipv4, port)
+func (c *tcpClient) sendCallbackRequested(ipv4 uint32, port uint16, cryptOptions byte, userHash []byte) error {
+	packet, err := BuildCallbackRequestedPacket(ipv4, port, cryptOptions, userHash)
 	if err != nil {
 		return err
 	}
@@ -1657,7 +1857,21 @@ func (c *tcpClient) writeRaw(data []byte) error {
 			data = RC4Crypt(data, len(data), key)
 		}
 	}
+	// Bounded, because writeMu is held across the write and other goroutines take it
+	// too: without a deadline a peer that stops reading blocks its own session forever
+	// and every peer that sends it OP_CALLBACKREQUESTED along with it.
+	_ = c.conn.SetWriteDeadline(time.Now().Add(tcpWriteTimeout))
 	_, err := c.conn.Write(data)
+	if err != nil {
+		// A partial write leaves the peer mid-packet, and on an obfuscated session the
+		// RC4 keystream has already advanced past bytes it never received. Neither can
+		// be recovered, so drop the session; the read loop then releases it.
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			c.closeWithReason(fmt.Sprintf("write-timeout(%s)", tcpWriteTimeout))
+		} else {
+			c.closeWithReason(fmt.Sprintf("write-error: %v", err))
+		}
+	}
 	return err
 }
 
@@ -2027,6 +2241,7 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network
 	})
 	cli.Hash = client.snapshotInfo().Hash
 
+	var leftover []byte
 	if enableCrypt {
 		pad, err := RandBuf(Rand(0xff))
 		if err != nil {
@@ -2039,7 +2254,7 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network
 		if err := writeWithDeadline(conn, handshake, s.TCP.ConnectionTimeout); err != nil {
 			return false, err
 		}
-		if _, err := readHandshake(cli, conn, s.TCP.ConnectionTimeout); err != nil {
+		if leftover, err = readHandshake(cli, conn, s.TCP.ConnectionTimeout); err != nil {
 			return false, err
 		}
 	}
@@ -2055,45 +2270,54 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network
 	if err := writeWithDeadline(conn, helloBytes, s.TCP.ConnectionTimeout); err != nil {
 		return false, err
 	}
-	return readHelloAnswer(cli, conn, s.TCP.ConnectionTimeout)
+	return readHelloAnswer(cli, conn, s.TCP.ConnectionTimeout, cli.Hash, leftover)
 }
 
+// readHandshake reads the obfuscation handshake answer, however TCP splits it, and
+// returns what followed it, decrypted.
 func readHandshake(cli *Client, conn net.Conn, timeout time.Duration) ([]byte, error) {
-	buf := make([]byte, 4096)
-	_ = conn.SetReadDeadline(time.Now().Add(timeout))
-	n, err := conn.Read(buf)
-	if err != nil {
-		return nil, err
-	}
-	data, done, err := cli.Decrypt(buf[:n])
-	if err != nil {
-		return nil, err
-	}
-	if !done {
-		return nil, errors.New("handshake incomplete")
-	}
-	return data, nil
-}
-
-func readHelloAnswer(cli *Client, conn net.Conn, timeout time.Duration) (bool, error) {
 	deadline := time.Now().Add(timeout)
-	var buffer []byte
 	buf := make([]byte, 4096)
-
 	for {
 		_ = conn.SetReadDeadline(deadline)
 		n, err := conn.Read(buf)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		data := buf[:n]
-		if cli.CryptStatus == CsEncrypting {
-			data, _, err = cli.Decrypt(data)
+		data, done, err := cli.Decrypt(buf[:n])
+		if err != nil {
+			return nil, err
+		}
+		if done {
+			return data, nil
+		}
+	}
+}
+
+// readHelloAnswer waits for the probed client's OP_HELLOANSWER. It counts only when
+// the answer carries wantHash, the user hash the client logged in with: another
+// client on the same (CGNAT) IP answering that port must not earn this one a HighID.
+// buffer holds bytes already read past the crypt handshake.
+func readHelloAnswer(cli *Client, conn net.Conn, timeout time.Duration, wantHash, buffer []byte) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	buf := make([]byte, 4096)
+
+	for first := true; ; first = false {
+		if !first || len(buffer) == 0 {
+			_ = conn.SetReadDeadline(deadline)
+			n, err := conn.Read(buf)
 			if err != nil {
 				return false, err
 			}
+			data := buf[:n]
+			if cli.CryptStatus == CsEncrypting {
+				data, _, err = cli.Decrypt(data)
+				if err != nil {
+					return false, err
+				}
+			}
+			buffer = append(buffer, data...)
 		}
-		buffer = append(buffer, data...)
 		// The peer here is the client being probed: it chose the address we
 		// dialed and it controls every byte coming back. Without this ceiling it
 		// can declare a huge size, then dribble bytes until the deadline while
@@ -2121,8 +2345,12 @@ func readHelloAnswer(cli *Client, conn net.Conn, timeout time.Duration) (bool, e
 			payload := buffer[5 : 5+size]
 			opcode := payload[0]
 			if opcode == OpHelloAnswer {
-				p := NewBufferFromBytes(payload[1:])
-				_, _ = ReadOpHelloAnswer(p)
+				// Only the hash matters here; a tag this parser rejects further on
+				// does not make the peer any less reachable.
+				answer, _ := ReadOpHelloAnswer(NewBufferFromBytes(payload[1:]))
+				if !bytes.Equal(answer.Hash, wantHash) {
+					return false, errHelloHashMismatch
+				}
 				return true, nil
 			}
 			buffer = buffer[5+size:]
@@ -2142,7 +2370,7 @@ func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn U
 	// A query that arrived over IPv6 comes from a v6-capable sender, so IPv6-only
 	// sources may ride the sentinel form. An IPv4 query gets the classic layout.
 	format := s.udpSourceFormat(remote)
-	for b.Pos()+16 <= len(b.Bytes()) {
+	for n := 0; n < maxUDPGetSourcesHashes && b.Pos()+16 <= len(b.Bytes()); n++ {
 		hash := append([]byte(nil), b.Get(16)...)
 		if len(hash) != 16 {
 			return
@@ -2161,7 +2389,7 @@ func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn U
 
 func (s *ServerRuntime) udpGlobGetSources2(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
 	format := s.udpSourceFormat(remote)
-	for b.Pos()+20 <= len(b.Bytes()) {
+	for n := 0; n < maxUDPGetSourcesHashes && b.Pos()+20 <= len(b.Bytes()); n++ {
 		hash := append([]byte(nil), b.Get(16)...)
 		if len(hash) != 16 {
 			return
@@ -2194,7 +2422,7 @@ func (s *ServerRuntime) udpGlobGetSources2(b *Buffer, remote *net.UDPAddr, conn 
 // format. Payload matches OP_GLOBGETSOURCES2 (repeated hash+size). Sending this
 // opcode is the opt-in, so the extended reply is safe on any arrival family.
 func (s *ServerRuntime) udpGlobGetSourcesIPv6(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
-	for b.Pos()+20 <= len(b.Bytes()) {
+	for n := 0; n < maxUDPGetSourcesHashes && b.Pos()+20 <= len(b.Bytes()); n++ {
 		hash := append([]byte(nil), b.Get(16)...)
 		if len(hash) != 16 {
 			return
@@ -2211,7 +2439,7 @@ func (s *ServerRuntime) udpGlobGetSourcesIPv6(b *Buffer, remote *net.UDPAddr, co
 			}
 			fileSize = v
 		}
-		sources := s.Storage.GetSources(hash, fileSize)
+		sources := s.v6PublishableSources(s.Storage.GetSources(hash, fileSize))
 		if len(sources) == 0 {
 			continue
 		}
@@ -2344,7 +2572,7 @@ func (s *ServerRuntime) udpGlobSearchReq(b *Buffer, remote *net.UDPAddr, conn UD
 	// OP_GLOBSEARCHREQ and ...REQ2 carry no tag block, so the requester cannot have
 	// asked for meta rows: it gets them only when they go to every client.
 	metaCh := s.startMetaSearch(expr, false, true)
-	files := mergeMetaResults(s.Storage.FindBySearch(expr), metaCh)
+	files := capUDPSearchResults(mergeMetaResults(s.Storage.FindBySearch(expr), metaCh))
 	if len(files) == 0 {
 		return
 	}
@@ -2374,7 +2602,7 @@ func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn U
 	}
 	metaCapable := udpSearchFlags(tags)&SrvCapUDPMetaSearch != 0
 	metaCh := s.startMetaSearch(expr, metaCapable, true)
-	files := mergeMetaResults(s.Storage.FindBySearch(expr), metaCh)
+	files := capUDPSearchResults(mergeMetaResults(s.Storage.FindBySearch(expr), metaCh))
 	if len(files) == 0 {
 		return
 	}
@@ -2455,11 +2683,27 @@ func fileFromRecord(record FileRecord, info storage.ClientInfo) storage.File {
 // server has — one small datagram can trigger a source lookup per hash — so a
 // refusal is worth seeing in the log.
 func (s *ServerRuntime) udpOpcodeEnabled(enabled bool, code uint8, remote *net.UDPAddr) bool {
-	if enabled {
-		return true
+	if !enabled {
+		logging.Debugf("udp opcode disabled by config remote=%s opcode=0x%x", remote, code)
+		return false
 	}
-	logging.Debugf("udp opcode disabled by config remote=%s opcode=0x%x", remote, code)
-	return false
+	// Every opcode gated here answers one small datagram with many: the source
+	// address is spoofable, so without a per-address budget the server is an
+	// amplifier aimed wherever an attacker likes.
+	if !s.udpLimiter.Allow(addressKey(remote.IP)) {
+		logging.Debugf("udp opcode rate limited remote=%s opcode=0x%x", remote, code)
+		return false
+	}
+	return true
+}
+
+// addressKey is the per-address bucket for rate and connection limits: the IPv4
+// address, or the /64 of an IPv6 one, which one subscriber usually holds whole.
+func addressKey(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String()
 }
 
 func splitHost(addr string) string {
@@ -2601,8 +2845,9 @@ func loginIPv6(tags []NamedTag) (addr []byte, present bool) {
 			continue
 		}
 		present = true
+		// CT_MOD_IP_V6 is a HASH (ipv6-spec.md); a 16-byte BLOB or BSOB is not it.
 		b, ok := t.Value.([]byte)
-		if !ok || len(b) != 16 {
+		if !ok || len(b) != 16 || t.Type != TypeHash {
 			return nil, true
 		}
 		if !IsPublicIPv6(net.IP(b)) {
@@ -2731,12 +2976,57 @@ func (c *tcpClient) releaseSession() {
 		if hadLowID {
 			c.server.LowIDs.Remove(info.ID)
 		}
+		c.storeMu.Lock()
+		c.released = true
 		if wasLogged {
 			c.server.unregisterSession(info.Hash, c)
 			c.server.Storage.Disconnect(info)
 		}
+		c.storeMu.Unlock()
 		_ = c.conn.Close()
 		logging.Infof("tcp session closed remote=%s id=%d lowID=%t storeID=%d reason=%s",
 			c.remoteHost, info.ID, info.LowID, info.StoreID, c.getCloseReason())
 	})
+}
+
+// v6PublishableSources strips the IPv6 addresses from sources unless the server
+// publishes them (ipv6.publishSources), leaving the classic IPv4 list in the IPv6
+// reply form.
+func (s *ServerRuntime) v6PublishableSources(sources []storage.Source) []storage.Source {
+	if s.publishV6Sources() {
+		return sources
+	}
+	out := make([]storage.Source, len(sources))
+	for i, src := range sources {
+		src.IPv6, src.IPv6Reachable = nil, false
+		out[i] = src
+	}
+	return out
+}
+
+// addFiles publishes an offer batch unless the session has been released.
+func (c *tcpClient) addFiles(batch []storage.File, info storage.ClientInfo) {
+	c.storeMu.Lock()
+	defer c.storeMu.Unlock()
+	if c.released {
+		return
+	}
+	c.server.Storage.AddFiles(batch, info)
+}
+
+// capUDPSearchResults trims a UDP search answer to maxUDPSearchResults files.
+func capUDPSearchResults(files []storage.File) []storage.File {
+	if len(files) > maxUDPSearchResults {
+		return files[:maxUDPSearchResults]
+	}
+	return files
+}
+
+// udpSecret is the secret client UDP keys are derived from: UDPSecret, or the legacy
+// UDPServerKey when none was loaded.
+func (s *ServerRuntime) udpSecret() []byte {
+	if len(s.UDP.UDPSecret) > 0 {
+		return s.UDP.UDPSecret
+	}
+	return LegacyUDPSecret(s.UDP.UDPServerKey)
 }

@@ -86,6 +86,8 @@ func TestHandleCallbackRequestFamilySelection(t *testing.T) {
 		selfIPv6        []byte
 		selfV6Reachable bool
 		targetV6Capable bool
+		targetIPv6      []byte
+		targetNotLogged bool
 		wantOnTarget    byte // opcode the target should receive (0 = none)
 		wantOnRequester byte // opcode the requester should receive (0 = none)
 	}{
@@ -102,6 +104,7 @@ func TestHandleCallbackRequestFamilySelection(t *testing.T) {
 			selfIPv6:        ipv6,
 			selfV6Reachable: true,
 			targetV6Capable: true,
+			targetIPv6:      net.ParseIP("2001:db8::99").To16(),
 			wantOnTarget:    OpCallbackReqdIPv6,
 		},
 		{
@@ -111,6 +114,7 @@ func TestHandleCallbackRequestFamilySelection(t *testing.T) {
 			selfIPv6:        ipv6,
 			selfV6Reachable: true,
 			targetV6Capable: true,
+			targetIPv6:      net.ParseIP("2001:db8::99").To16(),
 			wantOnTarget:    OpCallbackReqdIPv6,
 		},
 		{
@@ -120,6 +124,22 @@ func TestHandleCallbackRequestFamilySelection(t *testing.T) {
 			selfIPv6:        ipv6,
 			selfV6Reachable: true,
 			targetV6Capable: false,
+			wantOnRequester: OpCallbackFailed,
+		},
+		{
+			name:            "v6-capable target with no ipv6 of its own fails",
+			selfIPv4:        0,
+			selfLowID:       true,
+			selfIPv6:        ipv6,
+			selfV6Reachable: true,
+			targetV6Capable: true,
+			wantOnRequester: OpCallbackFailed,
+		},
+		{
+			name:            "target still logging in fails",
+			selfIPv4:        0x0102030a,
+			selfLowID:       false,
+			targetNotLogged: true,
 			wantOnRequester: OpCallbackFailed,
 		},
 		{
@@ -148,6 +168,8 @@ func TestHandleCallbackRequestFamilySelection(t *testing.T) {
 			target := newTCPClient(rt, targetConn, false)
 			target.infoMu.Lock()
 			target.ipv6Capable = tc.targetV6Capable
+			target.info.IPv6 = tc.targetIPv6
+			target.logged = !tc.targetNotLogged
 			target.info.Port = 6000
 			target.infoMu.Unlock()
 			targetID, ok := rt.LowIDs.Add(target)
@@ -166,8 +188,8 @@ func TestHandleCallbackRequestFamilySelection(t *testing.T) {
 			requester.info.Port = 5000
 			requester.infoMu.Unlock()
 
-			t.Logf("input: requester ipv4=%d lowID=%t ipv6=%v v6reachable=%t targetV6Capable=%t targetID=%d",
-				tc.selfIPv4, tc.selfLowID, tc.selfIPv6 != nil, tc.selfV6Reachable, tc.targetV6Capable, targetID)
+			t.Logf("input: requester ipv4=%d lowID=%t ipv6=%v v6reachable=%t targetV6Capable=%t targetIPv6=%v targetLogged=%t targetID=%d",
+				tc.selfIPv4, tc.selfLowID, tc.selfIPv6 != nil, tc.selfV6Reachable, tc.targetV6Capable, tc.targetIPv6 != nil, !tc.targetNotLogged, targetID)
 
 			req := NewBuffer(4)
 			_ = req.PutUInt32LE(targetID)

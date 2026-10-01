@@ -67,15 +67,15 @@ func TestDeriveUDPKey(t *testing.T) {
 	ipB := net.IPv4(198, 51, 100, 42)
 
 	// Determinism: same (secret, IP) -> same key.
-	k1 := deriveUDPKey(secret, ipA)
-	k2 := deriveUDPKey(secret, ipA)
+	k1 := deriveUDPKey(LegacyUDPSecret(secret), ipA)
+	k2 := deriveUDPKey(LegacyUDPSecret(secret), ipA)
 	t.Logf("input: secret=0x%08x ip=%s -> key=0x%08x (repeat 0x%08x)", secret, ipA, k1, k2)
 	if k1 != k2 {
 		t.Fatalf("non-deterministic: 0x%08x != 0x%08x", k1, k2)
 	}
 
 	// Distinct IPs -> distinct keys (the anti-spoofing property).
-	kB := deriveUDPKey(secret, ipB)
+	kB := deriveUDPKey(LegacyUDPSecret(secret), ipB)
 	t.Logf("input: secret=0x%08x ip=%s -> key=0x%08x", secret, ipB, kB)
 	if k1 == kB {
 		t.Fatalf("distinct IPs collided: %s and %s both 0x%08x", ipA, ipB, k1)
@@ -83,7 +83,7 @@ func TestDeriveUDPKey(t *testing.T) {
 
 	// Distinct secrets over the same IP -> distinct keys (rotating the secret
 	// invalidates cached client keys).
-	kOther := deriveUDPKey(secret^0xFFFFFFFF, ipA)
+	kOther := deriveUDPKey(LegacyUDPSecret(secret^0xFFFFFFFF), ipA)
 	t.Logf("input: secret=0x%08x ip=%s -> key=0x%08x", secret^0xFFFFFFFF, ipA, kOther)
 	if kOther == k1 {
 		t.Fatalf("secret ignored: both secrets yield 0x%08x", k1)
@@ -91,15 +91,15 @@ func TestDeriveUDPKey(t *testing.T) {
 
 	// net.IPv4 returns a 16-byte form; its To4() 4-byte form must agree so the key
 	// does not depend on the IP's in-memory representation.
-	k16 := deriveUDPKey(secret, ipA)      // 16-byte (net.IPv4)
-	k4 := deriveUDPKey(secret, ipA.To4()) // 4-byte
+	k16 := deriveUDPKey(LegacyUDPSecret(secret), ipA)      // 16-byte (net.IPv4)
+	k4 := deriveUDPKey(LegacyUDPSecret(secret), ipA.To4()) // 4-byte
 	t.Logf("input: ip=%s 16-byte=0x%08x 4-byte=0x%08x", ipA, k16, k4)
 	if k16 != k4 {
 		t.Fatalf("v4 representation leaked into key: 0x%08x != 0x%08x", k16, k4)
 	}
 
 	// IPv6 is handled without panic and yields a usable key.
-	kV6 := deriveUDPKey(secret, net.ParseIP("2001:db8::1"))
+	kV6 := deriveUDPKey(LegacyUDPSecret(secret), net.ParseIP("2001:db8::1"))
 	t.Logf("input: ipv6=2001:db8::1 -> key=0x%08x", kV6)
 	if kV6 == 0 {
 		t.Fatalf("v6 key must be nonzero")
@@ -107,7 +107,7 @@ func TestDeriveUDPKey(t *testing.T) {
 
 	// Never returns 0 across a sweep of IPs — a zero key means "no key" to the client.
 	for i := 0; i < 256; i++ {
-		if k := deriveUDPKey(secret, net.IPv4(10, 0, 0, byte(i))); k == 0 {
+		if k := deriveUDPKey(LegacyUDPSecret(secret), net.IPv4(10, 0, 0, byte(i))); k == 0 {
 			t.Fatalf("zero key for 10.0.0.%d", i)
 		}
 	}

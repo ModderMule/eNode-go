@@ -38,6 +38,11 @@ tcp:
   maxConnections: 1000
   connectionTimeout: 2000
   disconnectTimeout: 3600
+  # Seconds from accept to a completed login, not extended by traffic.
+  loginTimeout: 60
+  # Concurrent connections per address (IPv6 /64); 0 = off. Every interop client
+  # connects from loopback, so the cap stays out of the way.
+  maxConnectionsPerIP: 0
   allowLowIDs: true
   minLowID: 1
   maxLowID: 16777215
@@ -52,6 +57,9 @@ udp:
   getSources: true
   getFiles: true
   serverKey: 305419896
+  # UDP searches and source requests one address (an IPv6 /64) may make per minute;
+  # the rest are dropped unanswered. Status pings are not counted. 0 turns it off.
+  rateLimitPerIPPerMinute: 120
 
 gossip:
   enabled: true

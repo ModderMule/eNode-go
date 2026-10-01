@@ -130,3 +130,51 @@ func TestHandshakeRecvKeyMatchesProtocolSpec(t *testing.T) {
 	}
 	t.Logf("output: handshake completed, status=%d method=%d", c.CryptStatus, c.CryptMethod)
 }
+
+// The dial-back probe's handshake answer may arrive in any number of pieces, pad
+// included, and the hello answer can follow in the same read. Decrypt used to need
+// the fixed part in one chunk and dropped both a short pad and what came after it.
+func TestDecryptNegotiationFragmented(t *testing.T) {
+	c := NewClient(ClientConfig{EnableCrypt: true})
+	c.Hash = []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	if _, err := c.BuildHandshake(0xaa, 0x11223344, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	plain := NewBuffer(4 + 1 + 1 + 5 + 3)
+	_ = plain.PutUInt32LE(MagicValueSync)
+	_ = plain.PutUInt8(uint8(EmObfuscate))
+	_ = plain.PutUInt8(5)
+	plain.PutBuffer([]byte{1, 2, 3, 4, 5})
+	plain.PutBuffer([]byte{0xe3, 0x01, 0x02}) // the start of the hello answer
+	k := *c.RecvKey
+	wire := RC4Crypt(plain.Bytes(), len(plain.Bytes()), &k)
+	t.Logf("input: %d-byte answer (pad 5, then 3 payload bytes) fed one byte per read", len(wire))
+
+	var rest []byte
+	var done bool
+	for i, b := range wire {
+		out, d, err := c.Decrypt([]byte{b})
+		if err != nil {
+			t.Fatalf("byte %d: %v", i, err)
+		}
+		if d {
+			if i != len(wire)-1-3 { // the last pad byte
+				t.Fatalf("handshake completed at byte %d, want %d", i, len(wire)-4)
+			}
+			done = true
+			rest = append(rest, out...)
+			continue
+		}
+		if done {
+			rest = append(rest, out...)
+		}
+	}
+	t.Logf("output: done=%t status=%d rest=% x", done, c.CryptStatus, rest)
+	if !done || c.CryptStatus != CsEncrypting {
+		t.Fatalf("handshake not completed")
+	}
+	if string(rest) != "\xe3\x01\x02" {
+		t.Fatalf("payload after the handshake = % x, want e3 01 02", rest)
+	}
+}

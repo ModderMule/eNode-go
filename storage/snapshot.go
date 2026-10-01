@@ -359,8 +359,15 @@ func (m *MemoryEngine) LoadSnapshot(path string) (SnapshotStats, error) {
 	}
 	stats.Files = len(files)
 
+	var recs fileSlab
+	for _, file := range files {
+		recs.push(file)
+	}
+
 	m.mu.Lock()
-	m.files = files
+	// The name index is rebuilt with the records. A load runs at startup, before any
+	// session can search, so holding the lock for it costs nobody.
+	m.setFilesLocked(recs)
 	// The source map is left empty rather than merged, matching `online = 0`, and
 	// nextClientID keeps climbing so a restored StoreID can never be reissued to a
 	// live session — the memory-engine equivalent of clients.id AUTO_INCREMENT.
@@ -401,15 +408,19 @@ func (m *MemoryEngine) batchAt(keys []byte, from, to int) SnapshotBatch {
 	defer m.mu.RUnlock()
 	for off := from; off < to; off += fileMapKeyLen {
 		key := string(keys[off : off+fileMapKeyLen])
-		file, ok := m.files[key]
+		file, ok := m.fileByKey(key)
 		if !ok {
 			// Deleted between the key sweep and now. Skipping it is what makes the
 			// chunked write safe; the snapshot is a point-in-time-ish view, not a
 			// transaction.
 			continue
 		}
-		batch.Files = append(batch.Files, cloneFile(file))
 		hk := key[:snapshotHashLen]
+		// The stored record carries no counters (the engine derives them from the
+		// live source lists), so write the counts as they stand — what a DB engine's
+		// files.sources / files.completed hold at shutdown.
+		file.Sources, file.Completed = countSources(m.sources[hk], file.Size)
+		batch.Files = append(batch.Files, cloneFile(file))
 		if _, dup := seen[hk]; dup {
 			continue
 		}

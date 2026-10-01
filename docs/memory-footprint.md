@@ -124,6 +124,67 @@ separate driver process, so the numbers below are the server side only:
   `ClientInfo` = 96 B plus hash and two map entries) — i.e. 1.3% of a session. Almost
   all of the per-user cost is the connection, not the bookkeeping.
 
+### 2.4 Why the Rust ed2k-server needs half as much
+
+On the `tests/membench` workload at 5 M files (see
+[`memory-engine-benchmark.md`](memory-engine-benchmark.md)), the Rust ed2k-server holds
+**276 B/file** live and peaks at 1.57 GB RSS. The memory engine holds 568 B/file without
+the name index and 703 B/file with it, and peaks at 3.69 and 4.47 GB. The source analysis
+is in `ed2k-server-rust-comparison.local.md` §7.5.
+
+The struct sizes below are exact (`unsafe.Sizeof`, 2026-10-01). Both structs have grown
+since §2.2: `File` from 152 to 160 B and `Source` from 72 to 88 B (crypt options, IPv6,
+store id). The other rows are arithmetic and add up to the measured 568 B.
+
+| eNode-go, per file with one source | Bytes | ed2k-server (Rust) |
+|---|---:|---|
+| `storage.File` | 160 | one `FileRecord` of ~80 B in total |
+| ↳ of which media and meta fields this workload leaves empty (`Type`, `Title`, `Artist`, `Album`, `Codec`, `Runtime`, `Bitrate`, `Meta`) | ~96 | not stored |
+| `File.Hash` backing array (plus a 24 B slice header inside `File`) | 16 | `[u8; 16]` inside the record |
+| `Name`, one copy per file | ~64 | interned `Arc<str>`: the 30% repeated names cost nothing extra |
+| `files` map: 24 B key string, slot and growth slack | ~60 | none: the slab is the hash table (intrusive chains) |
+| `sources` map: 16 B key string, slot holding a 24 B slice header | ~65 | sources inline in the record (`SmallVec<[Source; 1]>`) |
+| `[]Source` backing array (`Source` = 88 B, 96 B size class) | 96 | a 24 B `Source` |
+| `Source.UserHash`, copied for every source | 16 | IPv6 and user details in a side table per user |
+| `offered` set entry | ~25 | none |
+
+Three things make up the difference:
+
+- **Fields this workload does not use.** The engine stores every media field inline in
+  each `File`, and crypt options and an IPv6 slice in each `Source`. Rust stores no media
+  fields and keeps IPv6 in a side table. That is about 150 B/file here. This part of the
+  gap is a difference in scope: a real server needs most of those fields.
+- **Separate small allocations.** Every Go slice is a 24 B header plus its own
+  allocation, rounded up to a size class. A `[]byte` hash costs 40 B where `[16]byte`
+  costs 16.
+- **Three hash tables instead of one.** `files`, `sources` and `offered` each carry key
+  strings and growth slack. Rust has a single table built into the slab.
+
+The name index widens the gap by about 135 B/file. Rust keys its keyword index by a
+32-bit FNV hash of each word and never stores the word text. About every 10 minutes it
+packs its posting lists into delta-varint blobs of 1–2 bytes per id. The memory engine
+stores every distinct word, the byte-trigram lists that substring matching needs, and
+uncompressed 4-byte ids. Rust matches whole words only, so it cannot answer a query for
+part of a word.
+
+The RSS gap is wider than the heap gap because of the garbage collector. With the
+default `GOGC=100` the heap may grow to twice its live size before a collection (§6), so
+the peak sits well above live heap: 4.47 GB against 3.35 GB. jemalloc frees memory
+straight away, so Rust peaks at 1.57 GB on 1.32 GB live.
+
+Ways to close the gap, largest saving first. Each is an estimate, not measured:
+
+1. Move the media fields and `Meta` into a record allocated only for files that carry
+   them: about −90 B/file.
+2. Store the file hash and the user hash as `[16]byte` and put IPv6 behind a pointer:
+   about −80 B/file.
+3. Keep the first source inside the file record and drop the `sources` map key for
+   single-source files: about −60 B/file.
+4. Intern repeated names.
+
+`File` and `Source` are shared with the MySQL and MongoDB engines, so items 1 and 2
+should be a layout private to the memory engine rather than changes to those types.
+
 ---
 
 ## 3. If the live network ran eNode-go
@@ -244,11 +305,13 @@ Inverted, the same model says what a given box holds with 44,000 users connected
   user filled the default `files.softLimit` of 10,000, the same server is a 300 GiB working
   set, and a `softLimit` raised to 100,000 is 3 TiB. Those are the DB engines' territory
   (§7), where the same 44k sessions cost ~0.7 GiB of Go process.
-- **RAM is not the wall that arrives first.** `MemoryEngine.FindBySearch`
-  (`storage/storage.go:280-296`) is a full map scan under `RLock`; at 366 M entries every
-  search walks the whole table before the `MaxSearchResults` cap can stop it. That is the
-  §8 caveat restated at this scale: the index becomes a CPU and lock-hold problem an order
-  of magnitude before it becomes a memory problem.
+- **Search no longer scans the table.** `MemoryEngine.FindBySearch` used to scan the
+  whole map under `RLock`, about 3 s per selective query at 5 M files. Since 2026-09-30
+  it answers from the name index in `storage/memory_index.go`, at about 130 µs for a
+  rare word at 5 M. Only a query with no term of 3 or more bytes, or with every term in a
+  large share of the files, still scans, and a scan stops at the `MaxSearchResults` cap.
+  The index costs 35–135 B per file on top of the figures above; the high end is the
+  synthetic worst case of `docs/memory-engine-benchmark.md`.
 - **`pendingResults` scales with users, not files.** 44,000 sessions each pinning a
   1000-file search tail is ~8.6 GiB on top of the index (§8), and it is the one per-session
   cost that is not a flat 16 KiB.
@@ -432,7 +495,7 @@ active, `net.core.somaxconn` 4096, default socket buffer sizes.
   a flat 16 KiB.
 - **`MaxWireSources` (255) caps the tail, not the storage.** The engine stores every
   source; only the reply is truncated. A file with 5,000 sources costs 5,000 records.
-- **RAM is not the first wall on a large memory-engine index.** `FindBySearch` is a full
-  map scan under `RLock`. At 27M files that is a CPU and lock-hold problem long before
-  the 15 GiB is a problem — which is the actual argument for the SQL/Mongo engines at
-  that scale, not memory.
+- **RAM is now the first wall on a large memory-engine index.** Until 2026-09-30
+  `FindBySearch` was a full map scan under `RLock`, which became a CPU and lock-hold
+  problem long before memory ran out. It now answers from the name index (§4.3), and
+  §2.4 lists what would bring the per-file cost down.

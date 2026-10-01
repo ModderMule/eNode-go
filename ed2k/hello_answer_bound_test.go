@@ -35,7 +35,7 @@ func TestReadHelloAnswerRejectsHugeDeclaredSize(t *testing.T) {
 
 	start := time.Now()
 	cli := &Client{CryptStatus: CsNone}
-	ok, err := readHelloAnswer(cli, server, 5*time.Second)
+	ok, err := readHelloAnswer(cli, server, 5*time.Second, make([]byte, 16), nil)
 	elapsed := time.Since(start)
 
 	t.Logf("output: ok=%t err=%v elapsed=%s", ok, err, elapsed.Round(time.Millisecond))
@@ -83,7 +83,7 @@ func TestReadHelloAnswerAcceptsSegmentedAnswer(t *testing.T) {
 		len(packet), len(packet)-8)
 
 	cli := &Client{CryptStatus: CsNone}
-	ok, err := readHelloAnswer(cli, server, 5*time.Second)
+	ok, err := readHelloAnswer(cli, server, 5*time.Second, make([]byte, 16), nil) // the answer's hash is all zero
 	t.Logf("output: ok=%t err=%v", ok, err)
 
 	if err != nil {
@@ -91,5 +91,32 @@ func TestReadHelloAnswerAcceptsSegmentedAnswer(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("a valid hello answer was not recognised")
+	}
+}
+
+// The dial-back reaches whoever answers the client's IP and port. Behind a CGNAT that
+// can be another user; only an answer carrying the logged-in hash proves the client
+// itself is reachable.
+func TestReadHelloAnswerRejectsOtherUserHash(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+
+	payload := make([]byte, 1+16+4+2+4)
+	payload[0] = OpHelloAnswer
+	for i := 1; i <= 16; i++ {
+		payload[i] = 0xee
+	}
+	packet := append(helloAnswerHeader(uint32(len(payload))), payload...)
+	go func() {
+		defer client.Close()
+		_, _ = client.Write(packet)
+	}()
+
+	want := make([]byte, 16)
+	t.Logf("input: answer hash=% x, logged-in hash=% x", payload[1:17], want)
+	ok, err := readHelloAnswer(&Client{CryptStatus: CsNone}, server, 5*time.Second, want, nil)
+	t.Logf("output: ok=%t err=%v", ok, err)
+	if ok || !errors.Is(err, errHelloHashMismatch) {
+		t.Fatalf("want errHelloHashMismatch, got ok=%t err=%v", ok, err)
 	}
 }

@@ -501,6 +501,19 @@ family**: send `OP_NAT_REGISTER` from your IPv4 socket *and* from your IPv6 sock
 each carrying the same user hash. Each keeps its own freshness (TTL, default 30 s), so
 keepalive on every family you registered.
 
+A user hash is public, so the server does not take a REGISTER on its word:
+
+- **Hash logged in to this server:** the REGISTER must come from that eD2K session's
+  address — its IPv4 exactly, or for IPv6 the same /64 as the address it connected from
+  (or announced in `CT_MOD_IP_V6` when it connected over IPv4). Register from the host
+  that holds the session. If the session has no address in the datagram's family, the
+  next rule applies.
+- **Otherwise:** a live candidate (within the TTL) is never replaced from a *different*
+  IP; the same IP may change port, as a NAT rebinding does. Keep it alive and nobody
+  else can take it over.
+
+A refused REGISTER gets no ack.
+
 At `SYNC2` time the server picks a **common family, preferring IPv6**: v6 if both
 peers have a v6 candidate, else v4 if both have v4, else `FAILED 0x02`. So register
 every family you can offer before `SYNC2`; at minimum register on the family of the

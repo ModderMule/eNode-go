@@ -22,6 +22,7 @@ admin:
   port: 4560             # HTTP port
   username: ""           # Basic-auth credentials for non-loopback clients;
   password: ""           # set both or neither (see "Security model")
+  checkUpdates: true     # daily GitHub release check (see "Update check")
 ```
 
 Defaults: **enabled**, bound to **127.0.0.1**, port **4560** (chosen to stay clear of
@@ -87,6 +88,33 @@ The client and file totals come from the same briefly cached reading that backs 
 eD2K `OP_SERVERSTATUS` / `OP_GLOBSERVSTATRES` responses (see `ed2k/countercache.go`),
 so a dashboard left open polling every few seconds cannot turn into a flood of
 `COUNT(*)` queries against the storage backend.
+
+## Update check
+
+With `admin.checkUpdates` on (the default) the server looks up the latest published
+release once a day, starting about 30 s after startup. It sends one `HEAD` request to
+`https://github.com/ModderMule/eNode-go/releases/latest` and does not follow the
+redirect. GitHub answers with a 302 whose `Location` is the release page:
+
+```
+HTTP/2 302
+location: https://github.com/ModderMule/eNode-go/releases/tag/v0.3.3
+```
+
+The tag is the last path segment. Nothing is parsed from a body, and api.github.com
+and its rate limit are not involved. Only a `Location` of exactly
+`https://github.com/ModderMule/eNode-go/releases/tag/vX.Y.Z` is accepted, and that URL
+is the link the dashboard shows. Draft and pre-release entries never count as "latest",
+so the CI draft releases are announced only once they have been published.
+
+The result is served as `update` in `/stats.json`
+(`{"latest","url","available","checkedAt"}`, or `null` when the check is off or has not
+succeeded yet). A failed check keeps the previous result. The page shows
+`· update available: vX.Y.Z` (a link) next to the version when GitHub has a newer
+release, and a muted `(latest)` when this build is current. A newer release is also
+logged once per check at INFO.
+
+Set `checkUpdates: false` if the server must never contact github.com.
 
 ## Security model
 

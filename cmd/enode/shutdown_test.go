@@ -39,6 +39,8 @@ tcp:
 udp:
   port: %d
   portObfuscated: %d
+  # A fixed secret, so the test writes no data/udp.secret into the repo.
+  serverKey: 305419896
 natTraversal:
   enabled: false
 storage:

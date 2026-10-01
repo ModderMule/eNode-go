@@ -51,6 +51,13 @@ tcp:
   maxConnections: 1000000
   connectionTimeout: 2000
   disconnectTimeout: 3600
+  # Seconds from accept to a completed login, not extended by traffic: a socket that
+  # trickles bytes or never logs in is dropped after this. disconnectTimeout (idle)
+  # applies once logged in.
+  loginTimeout: 60
+  # Concurrent connections one address (an IPv6 /64) may hold across both TCP ports.
+  # Leaves room for a household behind one NAT; 0 turns the cap off.
+  maxConnectionsPerIP: 32
   allowLowIDs: true
   minLowID: 1
   maxLowID: 16777215
@@ -71,9 +78,18 @@ udp:
   portGossip: 5567
   getSources: true
   getFiles: true
-  # Server-wide secret: each client's UDP obfuscation key is derived from this
-  # seed + the client's IP (not sent verbatim). See docs/server-udp-crypt-ping.md.
-  serverKey: 305419896
+  # Each client's UDP obfuscation key is derived from a server secret + the client's
+  # IP (not sent verbatim). 0: a 128-bit secret is generated on first start and kept
+  # in data/udp.secret — back that file up with the server, since clients keep the
+  # derived key. A non-zero value is a legacy 32-bit secret used instead (logged as a
+  # warning): it keeps the keys clients got from it, but one observed key is enough to
+  # brute-force it. See docs/server-udp-crypt-ping.md.
+  serverKey: 0
+  # UDP searches and source requests one address (an IPv6 /64) may make per minute;
+  # the rest are dropped unanswered. Each is answered with many datagrams to an
+  # address nobody verified, so without a budget the server is an amplifier. Status
+  # pings are not counted. 0 turns it off.
+  rateLimitPerIPPerMinute: 120
 
 # How many files one client may publish to this server. Per-client publish caps, not
 # server capacity figures — the soft limit is the only lever the protocol gives a server
@@ -362,6 +378,10 @@ admin:
   # sees the status page only. Put real values in enode.local.yaml.
   username: ""
   password: ""
+  # Look up the latest published release on GitHub once a day (HEAD request to
+  # github.com/ModderMule/eNode-go/releases/latest) and link to it on the dashboard
+  # when it is newer than this build. false = never contact GitHub.
+  checkUpdates: true
 
 storage:
   engine: memory

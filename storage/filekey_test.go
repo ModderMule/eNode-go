@@ -76,16 +76,12 @@ func TestMemorySizeMismatchNoLongerBlackholesSources(t *testing.T) {
 	}
 }
 
-// TestMemorySourcesAreSharedAcrossSizesOfOneHash pins an accepted divergence so it reads
-// as a decision rather than an accident.
-//
-// Sources stay keyed on the hash alone, because the legacy UDP OP_GLOBGETSOURCES (0x9a)
-// carries bare hashes with no size and has to stay an O(1) lookup. So when one hash
-// carries two sizes, GetSources returns the union where MySQL and MongoDB — whose source
-// rows hang off the (hash,size) file row — return only the matching size's. Harmless: a
-// client cannot be stopped from offering a file it does not have at any size, so the
-// size bucket buys no protection here. What it did buy, record corruption, is fixed.
-func TestMemorySourcesAreSharedAcrossSizesOfOneHash(t *testing.T) {
+// TestMemorySourcesAreFilteredBySize: sources stay bucketed on the hash alone, because
+// the legacy UDP OP_GLOBGETSOURCES (0x9a) carries bare hashes with no size and has to
+// stay an O(1) lookup. GetSources used to return the whole bucket, so one hash at two
+// sizes handed out the other size's publishers; each source now records its size and
+// GetSources returns only the matching ones, as MySQL and MongoDB do.
+func TestMemorySourcesAreFilteredBySize(t *testing.T) {
 	m, hash, honest, liar := twoSizeEngine(t)
 
 	got := m.GetSources(hash, 100)
@@ -93,11 +89,13 @@ func TestMemorySourcesAreSharedAcrossSizesOfOneHash(t *testing.T) {
 	for _, s := range got {
 		ids = append(ids, s.ID)
 	}
-	t.Logf("output: GetSources(hash,100) ids=%v (the DB engines would return only id=%d)", ids, honest.ID)
+	t.Logf("output: GetSources(hash,100) ids=%v, by hash=%d", ids, len(m.GetSourcesByHash(hash)))
 
-	if len(got) != 2 {
-		t.Fatalf("the memory engine shares one source list per hash: got %d sources, want 2 (ids %d and %d)",
-			len(got), honest.ID, liar.ID)
+	if len(got) != 1 || got[0].ID != honest.ID {
+		t.Fatalf("want only id=%d at size 100, got %v (id=%d offered size 200)", honest.ID, ids, liar.ID)
+	}
+	if len(m.GetSourcesByHash(hash)) != 2 {
+		t.Fatal("GetSourcesByHash serves the size-less UDP lookup and must keep every size")
 	}
 }
 

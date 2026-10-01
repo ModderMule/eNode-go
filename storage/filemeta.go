@@ -33,6 +33,19 @@ var ed2kTypeAliases = map[string]string{
 	"Iso": "Pro",
 }
 
+// NormalizeSearchFileType maps a file-type search value onto the type offers are
+// stored under. MFC sends Arc and Iso searches as "Pro" already
+// (SearchResultsWnd.cpp), but eMuleQt and others send them as they are, which found
+// nothing because no stored file carries those types.
+func NormalizeSearchFileType(typ string) string {
+	for alias, mapped := range ed2kTypeAliases {
+		if strings.EqualFold(typ, alias) {
+			return mapped
+		}
+	}
+	return typ
+}
+
 // NormalizeFile clamps client-supplied metadata to what the schema accepts.
 //
 // Every string here arrives verbatim from a client tag with no validation. Under

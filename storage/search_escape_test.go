@@ -26,24 +26,39 @@ func TestEscapeLike(t *testing.T) {
 
 // TestBuildSearchWhereEscapesWildcards pins that a % inside a search term reaches
 // MySQL as an escaped literal, not a wildcard — so the three engines agree, the
-// memory and Mongo engines already treating it literally. Against the pre-fix
-// build the bound argument is the raw "%a%b%".
+// memory and Mongo engines already treating it literally. A term is matched by its
+// alphanumeric runs, so only a term with no run at all ("100%" splits into "100")
+// is bound literally; that literal must be escaped. Against the pre-fix build the
+// bound argument is the raw "%%_%".
 func TestBuildSearchWhereEscapesWildcards(t *testing.T) {
-	expr := &SearchExpr{Kind: SearchText, Text: "a%b"}
-	// "a%b" has no run the index can tokenize (a and b are single chars), so both
-	// dialects emit only the residual LIKE — the escaping path under test.
+	expr := &SearchExpr{Kind: SearchText, Text: "%_"}
 	sql, args := BuildSearchWhere(expr, DialectMariaDB)
-	t.Logf("input: text search %q", "a%b")
+	t.Logf("input: text search %q", "%_")
 	t.Logf("output: sql=%q args=%v", sql, args)
 
 	if len(args) != 1 {
 		t.Fatalf("want 1 bound arg, got %d: %v", len(args), args)
 	}
 	got, _ := args[0].(string)
-	if !strings.Contains(got, `\%`) {
-		t.Fatalf("bound arg %q does not escape the %% wildcard", got)
+	if got != `%\%\_%` {
+		t.Fatalf("bound arg = %q, want %q", got, `%\%\_%`)
 	}
-	if got != `%a\%b%` {
-		t.Fatalf("bound arg = %q, want %q", got, `%a\%b%`)
+}
+
+// A wildcard between two runs is a separator like any other: "a%b" must match
+// "a.b" on every engine, and neither LIKE argument may carry a raw wildcard.
+func TestBuildSearchWhereWildcardSeparatesRuns(t *testing.T) {
+	expr := &SearchExpr{Kind: SearchText, Text: "a%b"}
+	sql, args := BuildSearchWhere(expr, DialectMariaDB)
+	t.Logf("input: text search %q", "a%b")
+	t.Logf("output: sql=%q args=%v", sql, args)
+
+	if len(args) != 2 || args[0] != "%a%" || args[1] != "%b%" {
+		t.Fatalf("args = %v, want [%%a%% %%b%%]", args)
+	}
+	for _, a := range args {
+		if strings.Count(a.(string), "%") != 2 {
+			t.Fatalf("bound arg %q carries a wildcard from the term", a)
+		}
 	}
 }

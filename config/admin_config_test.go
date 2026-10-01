@@ -24,6 +24,28 @@ func TestAdminEnabledOrDefault(t *testing.T) {
 	}
 }
 
+// TestAdminCheckUpdatesOrDefault: an omitted checkUpdates key keeps the daily release
+// check on; an explicit false turns it off so the server never contacts GitHub.
+func TestAdminCheckUpdatesOrDefault(t *testing.T) {
+	f, tr := false, true
+	cases := []struct {
+		name string
+		in   *bool
+		want bool
+	}{
+		{"absent defaults on", nil, true},
+		{"explicit false honoured", &f, false},
+		{"explicit true honoured", &tr, true},
+	}
+	for _, c := range cases {
+		got := AdminConfig{CheckUpdates: c.in}.CheckUpdatesOrDefault()
+		t.Logf("case=%q checkUpdates=%v -> CheckUpdatesOrDefault=%v", c.name, c.in, got)
+		if got != c.want {
+			t.Errorf("%s: CheckUpdatesOrDefault()=%v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // TestAdminDefaults verifies setDefaults fills the loopback bind and the 4560 port
 // when the keys are omitted, and preserves values the operator set explicitly.
 func TestAdminDefaults(t *testing.T) {

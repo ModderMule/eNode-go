@@ -102,11 +102,13 @@ func TestSnapshotRoundTrip(t *testing.T) {
 			}
 
 			// Field-by-field on one entry, so a silently dropped column fails here.
-			want, ok := src.files[snapshotSeedKey(0)]
+			want, ok := src.fileByKey(snapshotSeedKey(0))
 			if !ok {
 				t.Fatal("fixture file missing from the source engine")
 			}
-			got, ok := dst.files[snapshotSeedKey(0)]
+			// The stored record carries no counters; the snapshot writes the live ones.
+			want.Sources, want.Completed = countSources(src.sources[hashKey(want.Hash)], want.Size)
+			got, ok := dst.fileByKey(snapshotSeedKey(0))
 			if !ok {
 				t.Fatal("file absent after load")
 			}
@@ -141,7 +143,7 @@ func TestSnapshotLoadMatchesDatabaseRestart(t *testing.T) {
 	hash := make([]byte, 16)
 	sources := dst.GetSourcesByHash(hash)
 	found := dst.FindByNameContains("Great.Release")
-	restored := dst.files[snapshotSeedKey(0)]
+	restored, _ := dst.fileByKey(snapshotSeedKey(0))
 
 	t.Logf("input:  a snapshot with %d files, %d sources, %d clients",
 		stats.Files, stats.Sources, stats.Clients)

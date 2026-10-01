@@ -182,6 +182,26 @@ func (m *MongoDBEngine) Disconnect(info ClientInfo) {
 		bson.M{"$set": bson.M{"online": false, "time_offer": now}}); err != nil {
 		logging.Errorf("mongodb disconnect sources hash=%x failed: %v", info.Hash, err)
 	}
+	// A search result names files.source_id/source_port as one source. Left on a
+	// client that is gone, it points at whoever holds that LowID next; clear it on
+	// the files this client offered.
+	if info.ID == 0 {
+		return
+	}
+	hashes, err := m.db.Collection("sources").Distinct(ctx, "file_hash", bson.M{"client_hash": info.Hash}).Raw()
+	if err != nil {
+		logging.Errorf("mongodb disconnect result source hash=%x failed: %v", info.Hash, err)
+		return
+	}
+	values, err := hashes.Values()
+	if err != nil || len(values) == 0 {
+		return
+	}
+	if _, err := m.db.Collection("files").UpdateMany(ctx,
+		bson.M{"hash": bson.M{"$in": values}, "source_id": info.ID, "source_port": info.Port},
+		bson.M{"$set": bson.M{"source_id": uint32(0), "source_port": uint16(0)}}); err != nil {
+		logging.Errorf("mongodb disconnect result source hash=%x failed: %v", info.Hash, err)
+	}
 }
 
 func (m *MongoDBEngine) FilesCount() int {
@@ -401,32 +421,27 @@ func mongoFilterNode(expr *SearchExpr) (filter bson.M, needsFile, prune bool) {
 		}
 		switch expr.TagType {
 		case searchTypeFileType:
-			return bson.M{"type": expr.ValueString}, false, false
+			return bson.M{"type": NormalizeSearchFileType(expr.ValueString)}, false, false
 		case searchTypeExt:
 			return bson.M{"ext": expr.ValueString}, false, false
 		case searchTypeCodec:
 			return bson.M{"codec": expr.ValueString}, false, false
 		default:
+			if field, ok := mediaStringField(expr.TagType); ok {
+				return bson.M{field: bson.M{"$regex": regexp.QuoteMeta(expr.ValueString), "$options": "i"}}, false, false
+			}
 			return nil, false, true
 		}
 	case SearchUInt32, SearchUInt64:
-		val := expr.ValueUint
-		switch expr.TagType {
-		case searchTypeSizeGt:
-			return bson.M{"file_size": bson.M{"$gt": val}}, false, false
-		case searchTypeSizeLt:
-			return bson.M{"file_size": bson.M{"$lt": val}}, false, false
-		case searchTypeSources:
-			return bson.M{"file.sources": bson.M{"$gt": val}}, true, false
-		case searchTypeBitrate:
-			return bson.M{"bitrate": bson.M{"$gt": val}}, false, false
-		case searchTypeDuration:
-			return bson.M{"length": bson.M{"$gt": val}}, false, false
-		case searchTypeComplete:
-			return bson.M{"file.completed": bson.M{"$gt": val}}, true, false
-		default:
+		tag, op, ok := NumericConstraint(expr)
+		if !ok {
 			return nil, false, true
 		}
+		field, needsFile, ok := mongoNumericField(tag)
+		if !ok {
+			return nil, false, true
+		}
+		return bson.M{field: bson.M{mongoOperators[op]: expr.ValueUint}}, needsFile, false
 	case SearchAnd, SearchOr, SearchAndNot:
 		l, lNeedsFile, lPrune := mongoFilterNode(expr.Left)
 		r, rNeedsFile, rPrune := mongoFilterNode(expr.Right)
@@ -620,12 +635,15 @@ func (m *MongoDBEngine) ServersAll() []Server {
 	return append([]Server(nil), m.servers...)
 }
 
-// mongoNameRegexFilter matches every term against the file name, case
-// insensitively. Terms are AND-ed, matching BuildSearchWhere and MatchSearchExpr.
+// mongoNameRegexFilter matches every term's runs (termRuns) against the file
+// name, case insensitively. They are AND-ed, matching BuildSearchWhere and
+// MatchSearchExpr.
 func mongoNameRegexFilter(terms []string) bson.M {
 	parts := make([]bson.M, 0, len(terms))
 	for _, t := range terms {
-		parts = append(parts, bson.M{"name": bson.M{"$regex": regexp.QuoteMeta(t), "$options": "i"}})
+		for _, run := range termRuns(t) {
+			parts = append(parts, bson.M{"name": bson.M{"$regex": regexp.QuoteMeta(run), "$options": "i"}})
+		}
 	}
 	if len(parts) == 1 {
 		return parts[0]
@@ -696,8 +714,16 @@ func textLeafSearch(expr *SearchExpr) (string, bool) {
 	}
 	quoted := make([]string, 0, len(terms))
 	for _, t := range terms {
-		// A stray quote would otherwise unbalance the phrase syntax.
-		quoted = append(quoted, `"`+strings.ReplaceAll(t, `"`, "")+`"`)
+		// One phrase per run: a phrase is matched literally, so `"spider-man"`
+		// would miss `Spider.Man`. A stray quote would unbalance the syntax.
+		for _, run := range termRuns(t) {
+			if run = strings.ReplaceAll(run, `"`, ""); run != "" {
+				quoted = append(quoted, `"`+run+`"`)
+			}
+		}
+	}
+	if len(quoted) == 0 {
+		return "", false
 	}
 	return strings.Join(quoted, " "), true
 }
@@ -1405,4 +1431,25 @@ func chunkAny(items []any, size int) [][]any {
 		chunks = append(chunks, items[start:min(start+size, len(items))])
 	}
 	return chunks
+}
+
+// mongoOperators maps a numeric leaf's operator to MongoDB, indexed by SearchOp*.
+var mongoOperators = [...]string{"$eq", "$gt", "$lt", "$gte", "$lte", "$ne"}
+
+// mongoNumericField is the field a numeric leaf's tag constrains, and whether it lives
+// on the joined files document (so the pipeline needs its $lookup).
+func mongoNumericField(tag uint8) (field string, needsFile, ok bool) {
+	switch tag {
+	case SearchTagSize:
+		return "file_size", false, true
+	case SearchTagSources:
+		return "file.sources", true, true
+	case SearchTagComplete:
+		return "file.completed", true, true
+	case SearchTagBitrate:
+		return "bitrate", false, true
+	case SearchTagLength:
+		return "length", false, true
+	}
+	return "", false, false
 }

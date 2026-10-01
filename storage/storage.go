@@ -77,6 +77,16 @@ type Source struct {
 	// IPv6 sentinel or tag-block form for a v6-reachable source.
 	IPv6          []byte
 	IPv6Reachable bool
+
+	// storeID, complete and size are the memory engine's own bookkeeping: the
+	// StoreID of the session that published this source, whether that session has
+	// the whole file, and the size it offered. Unexported, so the DB engines leave them zero and the gob snapshot
+	// format does not change.
+	storeID  uint64
+	complete bool
+	// size is the file size this source offered under. Sources are bucketed by hash
+	// alone (see fileMapKey), so GetSources filters on it; 0 matches any size.
+	size uint64
 }
 
 // counterSource is the offering client whose address a counter refresh stamps
@@ -135,15 +145,31 @@ type Server struct {
 type MemoryEngine struct {
 	mu           sync.RWMutex
 	nextClientID uint64
-	clients      map[uint32]ClientInfo
+	// clients is keyed by StoreID, the one identity no two live sessions share. The
+	// ed2k ID is not: a HighID is the client's IP, so two users behind one NAT with
+	// two forwarded ports both hold it, and keying on it let each overwrite, and on
+	// disconnect delete, the other's row, hash index and sources.
+	clients map[uint64]ClientInfo
 	// clientsByHash indexes clients by user hash so IsConnected can be answered
 	// on hash, as the MySQL and MongoDB engines do. The login path needs this:
 	// at the point it checks, the ed2k ID is still the untrusted value supplied
 	// by the client, so keying on ID would let a duplicate login through.
-	clientsByHash map[string]uint32
+	clientsByHash map[string]uint64
+	// offered lists, per StoreID, the source buckets (hashKey) that session has
+	// published into, so Disconnect visits only its own files instead of scanning
+	// every source under the write lock.
+	offered map[uint64]map[string]struct{}
 	// files is keyed by fileMapKey (hash+size); sources by hashKey (hash alone). The two
 	// key spaces differ deliberately — see fileMapKey.
-	files   map[string]File
+	//
+	// files holds an id into recs rather than the record itself, so the name index can
+	// list a file as a uint32. A removed file's slot has a nil Hash; its id waits in
+	// dead until CleanupStale has purged it from the index, then in free for reuse.
+	files   map[string]uint32
+	recs    fileSlab
+	dead    []uint32
+	free    []uint32
+	names   nameIndex
 	sources map[string][]Source
 	servers []Server
 
@@ -154,9 +180,11 @@ type MemoryEngine struct {
 
 func NewMemoryEngine() *MemoryEngine {
 	return &MemoryEngine{
-		clients:       map[uint32]ClientInfo{},
-		clientsByHash: map[string]uint32{},
-		files:         map[string]File{},
+		clients:       map[uint64]ClientInfo{},
+		clientsByHash: map[string]uint64{},
+		offered:       map[uint64]map[string]struct{}{},
+		files:         map[string]uint32{},
+		names:         newNameIndex(),
 		sources:       map[string][]Source{},
 	}
 }
@@ -188,8 +216,14 @@ func (m *MemoryEngine) IsConnected(info ClientInfo) bool {
 		_, ok := m.clientsByHash[hashKey(info.Hash)]
 		return ok
 	}
-	_, ok := m.clients[info.ID]
-	return ok
+	// Without a hash only the ed2k ID is left, which several sessions may share; any
+	// of them answers the question. No production caller reaches this.
+	for _, c := range m.clients {
+		if c.ID == info.ID {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *MemoryEngine) Connect(info ClientInfo) (uint64, error) {
@@ -197,28 +231,38 @@ func (m *MemoryEngine) Connect(info ClientInfo) (uint64, error) {
 	defer m.mu.Unlock()
 	m.nextClientID++
 	info.StoreID = m.nextClientID
-	m.clients[info.ID] = info
+	m.clients[info.StoreID] = info
 	if len(info.Hash) > 0 {
-		m.clientsByHash[hashKey(info.Hash)] = info.ID
+		m.clientsByHash[hashKey(info.Hash)] = info.StoreID
 	}
 	return info.StoreID, nil
 }
 
+// Disconnect removes the session info.StoreID names, and only it: its row, its hash
+// index entry if that still points at it, and the sources it published. Another
+// session with the same ed2k ID, or a newer session with the same hash, is untouched.
 func (m *MemoryEngine) Disconnect(info ClientInfo) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if existing, ok := m.clients[info.ID]; ok && len(existing.Hash) > 0 {
+	if info.StoreID == 0 {
+		info.StoreID = m.resolveStoreIDLocked(info)
+		if info.StoreID == 0 {
+			return
+		}
+	}
+	if existing, ok := m.clients[info.StoreID]; ok && len(existing.Hash) > 0 {
 		// Only drop the hash index when it still points at this session, so a
 		// late Disconnect from a replaced session cannot unregister the live one.
-		if id, ok := m.clientsByHash[hashKey(existing.Hash)]; ok && id == info.ID {
+		if id, ok := m.clientsByHash[hashKey(existing.Hash)]; ok && id == info.StoreID {
 			delete(m.clientsByHash, hashKey(existing.Hash))
 		}
 	}
-	delete(m.clients, info.ID)
-	for k, existing := range m.sources {
+	delete(m.clients, info.StoreID)
+	for k := range m.offered[info.StoreID] {
+		existing := m.sources[k]
 		kept := existing[:0]
 		for _, s := range existing {
-			if s.ID != info.ID {
+			if s.storeID != info.StoreID {
 				kept = append(kept, s)
 			}
 		}
@@ -228,6 +272,7 @@ func (m *MemoryEngine) Disconnect(info ClientInfo) {
 		}
 		m.sources[k] = kept
 	}
+	delete(m.offered, info.StoreID)
 }
 
 func (m *MemoryEngine) FilesCount() int {
@@ -244,7 +289,7 @@ func (m *MemoryEngine) FilesCount() int {
 // stays after its last source has gone, and its Sources count keeps whatever
 // value the offering client last reported.
 //
-// So this recomputes Sources from the live source lists and, when configured to,
+// So this recomputes Sources and Completed from the live source lists and, when configured to,
 // drops the files nobody serves. The recompute runs regardless, because a stale
 // count feeds the `sources > N` search filter and the totals in OP_SEARCHRESULT.
 func (m *MemoryEngine) CleanupStale(maxAge time.Duration, opts CleanupOptions) (CleanupResult, error) {
@@ -256,22 +301,24 @@ func (m *MemoryEngine) CleanupStale(maxAge time.Duration, opts CleanupOptions) (
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for key, file := range m.files {
+	for key, id := range m.files {
 		hk := key[:hashLen]
 		sources := m.sources[hk]
 		if len(sources) == 0 && !opts.KeepZeroSourceFiles {
 			delete(m.files, key)
+			m.names.removeFile(m.recs.at(id).Name)
+			*m.recs.at(id) = File{}
+			m.dead = append(m.dead, id)
 			// Safe across sizes: the bucket is already empty, so this cannot strip
 			// another size's sources. A sibling record is reaped on its own iteration.
 			delete(m.sources, hk)
 			result.Files++
 			continue
 		}
-		if file.Sources != uint32(len(sources)) {
-			file.Sources = uint32(len(sources))
-			m.files[key] = file
-		}
+		file := m.recs.at(id)
+		file.Sources, file.Completed = countSources(sources, file.Size)
 	}
+	m.maintainIndexLocked()
 	return result, nil
 }
 
@@ -300,21 +347,26 @@ func (m *MemoryEngine) GetSources(fileHash []byte, fileSize uint64) []Source {
 	if _, ok := m.files[fileMapKey(fileHash, fileSize)]; !ok {
 		return nil
 	}
-	return capSources(m.sources[hashKey(fileHash)])
+	return capSources(m.sources[hashKey(fileHash)], fileSize)
 }
 
 func (m *MemoryEngine) GetSourcesByHash(fileHash []byte) []Source {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return capSources(m.sources[hashKey(fileHash)])
+	return capSources(m.sources[hashKey(fileHash)], 0)
 }
 
 func (m *MemoryEngine) FindByNameContains(term string) []File {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var out []File
-	for _, f := range m.files {
+	for id := range m.recs.len() {
+		f := *m.recs.at(uint32(id))
+		if f.Hash == nil {
+			continue
+		}
 		if term == "" || bytes.Contains([]byte(f.Name), []byte(term)) {
+			m.liveFieldsLocked(&f)
 			out = append(out, f)
 		}
 	}
@@ -328,12 +380,22 @@ func (m *MemoryEngine) FindBySearch(expr *SearchExpr) []File {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]File, 0, 32)
-	for _, f := range m.files {
-		if MatchSearchExpr(expr, f) {
-			out = append(out, f)
-			if len(out) >= MaxSearchResults {
+	// The index narrows the search to candidates and every one is re-checked, so the
+	// answer is the one a full scan gives. A query it cannot narrow — no indexable
+	// term, or a term in too many files to be worth collecting — scans instead, which
+	// for a common term reaches the result cap early.
+	ids, all := m.names.candidates(expr, max(candidateFloor, len(m.files)/8))
+	if all {
+		for id := range m.recs.len() {
+			if out = m.matchLocked(expr, uint32(id), out); len(out) >= MaxSearchResults {
 				break
 			}
+		}
+		return out
+	}
+	for _, id := range ids {
+		if out = m.matchLocked(expr, id, out); len(out) >= MaxSearchResults {
+			break
 		}
 	}
 	return out
@@ -357,15 +419,20 @@ func (m *MemoryEngine) ServersAll() []Server {
 	return append([]Server(nil), m.servers...)
 }
 
-// capSources copies and truncates to MaxWireSources. The MySQL and MongoDB
-// engines get this from their LIMIT 255; the memory engine returned everything,
-// and it is the default engine, so a file with 256 sources produced a count byte
-// of 0 followed by 256 records.
-func capSources(sources []Source) []Source {
-	if len(sources) > MaxWireSources {
-		sources = sources[:MaxWireSources]
+// capSources returns up to MaxWireSources of a bucket's sources offered at size (0:
+// any size), newest first. The MySQL and MongoDB engines get this from their
+// ORDER BY time_offer DESC LIMIT 255. The memory engine used to return everything,
+// which overflowed the count byte at 256, and then the oldest 255, so the newer
+// sources of a popular file were never handed out. A bucket is in offer order: a new
+// source and a re-offer are appended at the end.
+func capSources(sources []Source, size uint64) []Source {
+	out := make([]Source, 0, min(len(sources), MaxWireSources))
+	for i := len(sources) - 1; i >= 0 && len(out) < MaxWireSources; i-- {
+		if size == 0 || sources[i].size == 0 || sources[i].size == size {
+			out = append(out, sources[i])
+		}
 	}
-	return append([]Source(nil), sources...)
+	return out
 }
 
 // fileMapKey identifies a file the way the protocol does — by hash *and* size together.
@@ -389,8 +456,8 @@ func capSources(sources []Source) []Source {
 //
 // sources stays keyed by hashKey, not by this: the legacy UDP OP_GLOBGETSOURCES (0x9a)
 // carries bare hashes with no size and must stay an O(1) lookup. The cost is that two
-// sizes of one hash share a source list, so GetSources returns a superset where the DB
-// engines return only the matching size's — see docs/server-client-communication.md.
+// sizes of one hash share a source list, which GetSources filters on each source's
+// size; GetSourcesByHash, the size-less lookup, returns them all.
 func fileMapKey(hash []byte, size uint64) string {
 	var buf [fileMapKeyLen]byte
 	copy(buf[:hashLen], hash)
@@ -400,11 +467,23 @@ func fileMapKey(hash []byte, size uint64) string {
 
 // addFileLocked is AddFile's body; the caller holds m.mu for writing.
 func (m *MemoryEngine) addFileLocked(file File, clientInfo ClientInfo) {
+	// An offer still in flight when its session was released (replaced by a
+	// re-login, or dropped) lands after Disconnect; storing it would leave sources
+	// that no Disconnect will ever remove.
+	if clientInfo.StoreID != 0 {
+		if _, ok := m.clients[clientInfo.StoreID]; !ok {
+			return
+		}
+	}
 	// Normalized here too, so all three engines agree on what a given offer
 	// stores. The memory engine has no schema to violate, but a search result
 	// that differs by engine is its own bug.
 	file = NormalizeFile(file)
-	m.files[fileMapKey(file.Hash, file.Size)] = file
+	// Completed arrives as this source's own 0/1 and Sources as whatever the client
+	// claimed; both are aggregates on the way out, computed from m.sources.
+	complete := file.Completed > 0
+	file.Sources, file.Completed = 0, 0
+	m.storeFileLocked(file)
 	// Sources stay keyed on the hash alone; see fileMapKey for why the two key spaces
 	// differ and what it costs.
 	k := hashKey(file.Hash)
@@ -415,19 +494,174 @@ func (m *MemoryEngine) addFileLocked(file File, clientInfo ClientInfo) {
 		CryptOptions:  clientInfo.CryptOptions,
 		IPv6:          append([]byte(nil), clientInfo.IPv6...),
 		IPv6Reachable: clientInfo.IPv6Reachable,
+		storeID:       clientInfo.StoreID,
+		complete:      complete,
+		size:          file.Size,
+	}
+	if src.storeID == 0 {
+		// Every production caller passes the StoreID Connect returned; resolve it
+		// for one that does not, so its sources still leave with its Disconnect.
+		src.storeID = m.resolveStoreIDLocked(clientInfo)
+	}
+	if src.storeID != 0 {
+		m.markOfferedLocked(src.storeID, k)
 	}
 	existing := m.sources[k]
 	for i, s := range existing {
-		if s.ID == src.ID && s.Port == src.Port {
-			// Refresh hash, crypt options and IPv6 in case the client reconnected
-			// with changed settings or a new address.
-			existing[i].UserHash = append([]byte(nil), src.UserHash...)
-			existing[i].CryptOptions = src.CryptOptions
-			existing[i].IPv6 = append([]byte(nil), src.IPv6...)
-			existing[i].IPv6Reachable = src.IPv6Reachable
-			m.sources[k] = existing
-			return
+		// The same session re-offering, or an entry left at this address by a
+		// session that has since gone: either way the new offer takes it over, with
+		// refreshed hash, crypt options and IPv6. Two live sessions behind one NAT
+		// share the ID but not the port, so they never collide here.
+		// The entry moves to the end, so the bucket stays in offer order.
+		if (src.storeID != 0 && s.storeID == src.storeID) || (s.ID == src.ID && s.Port == src.Port) {
+			existing = append(existing[:i], existing[i+1:]...)
+			break
 		}
 	}
 	m.sources[k] = append(existing, src)
+}
+
+// resolveStoreIDLocked finds the session a Disconnect without a StoreID means: by user
+// hash, else by ed2k ID when exactly one session holds it. Every production caller
+// passes the StoreID Connect returned; this keeps a bare-ClientInfo caller working
+// without guessing between two sessions that share an ID.
+func (m *MemoryEngine) resolveStoreIDLocked(info ClientInfo) uint64 {
+	if len(info.Hash) > 0 {
+		return m.clientsByHash[hashKey(info.Hash)]
+	}
+	var found uint64
+	for id, c := range m.clients {
+		if c.ID != info.ID {
+			continue
+		}
+		if found != 0 {
+			return 0
+		}
+		found = id
+	}
+	return found
+}
+
+// markOfferedLocked records that storeID published into source bucket k.
+func (m *MemoryEngine) markOfferedLocked(storeID uint64, k string) {
+	set := m.offered[storeID]
+	if set == nil {
+		set = map[string]struct{}{}
+		m.offered[storeID] = set
+	}
+	set[k] = struct{}{}
+}
+
+// countSources returns how many of a bucket's sources offer size (0: any) and how
+// many of them have the complete file — the FT_SOURCES and FT_COMPLETE_SOURCES a
+// search result reports.
+func countSources(sources []Source, size uint64) (total, complete uint32) {
+	for _, s := range sources {
+		if size != 0 && s.size != 0 && s.size != size {
+			continue
+		}
+		total++
+		if s.complete {
+			complete++
+		}
+	}
+	return total, complete
+}
+
+// liveFieldsLocked fills a search result's live fields from the file's sources: the
+// source and complete counts, and the source a result names. The stored SourceID /
+// SourcePort are the last offerer's and outlive its session, after which the ID can
+// belong to someone else; the newest live source is reported instead, or none.
+func (m *MemoryEngine) liveFieldsLocked(f *File) {
+	sources := m.sources[hashKey(f.Hash)]
+	f.Sources, f.Completed = countSources(sources, f.Size)
+	f.SourceID, f.SourcePort = 0, 0
+	for i := len(sources) - 1; i >= 0; i-- {
+		if s := sources[i]; s.size == 0 || s.size == f.Size {
+			f.SourceID, f.SourcePort = s.ID, s.Port
+			break
+		}
+	}
+}
+
+// storeFileLocked puts file in its record, indexing a new file's name, or a stored
+// file's new name.
+func (m *MemoryEngine) storeFileLocked(file File) {
+	key := fileMapKey(file.Hash, file.Size)
+	if id, ok := m.files[key]; ok {
+		m.names.renameFile(id, m.recs.at(id).Name, file.Name)
+		*m.recs.at(id) = file
+		return
+	}
+	var id uint32
+	if n := len(m.free); n > 0 {
+		id, m.free = m.free[n-1], m.free[:n-1]
+		*m.recs.at(id) = file
+	} else {
+		id = m.recs.push(file)
+	}
+	m.files[key] = id
+	m.names.indexName(id, file.Name)
+}
+
+// matchLocked appends recs[id] to out when it is live and matches expr.
+func (m *MemoryEngine) matchLocked(expr *SearchExpr, id uint32, out []File) []File {
+	f := *m.recs.at(id)
+	if f.Hash == nil {
+		return out
+	}
+	// The counters are taken from the live source list, not from the stored
+	// record: nothing else keeps them current between cleanup sweeps, and an
+	// FT_SOURCES / FT_COMPLETE_SOURCES constraint must see real values.
+	m.liveFieldsLocked(&f)
+	if MatchSearchExpr(expr, f) {
+		out = append(out, f)
+	}
+	return out
+}
+
+// maintainIndexLocked drops removed files from the name index and frees their ids,
+// or rebuilds the index outright once renames have left it mostly stale.
+func (m *MemoryEngine) maintainIndexLocked() {
+	if len(m.dead) > 0 {
+		m.names.purge(func(id uint32) bool { return m.recs.at(id).Hash == nil })
+		m.free = append(m.free, m.dead...)
+		m.dead = m.dead[:0]
+	}
+	if m.names.needsRebuild() {
+		m.rebuildIndexLocked()
+	}
+}
+
+// rebuildIndexLocked renumbers the live records densely and indexes them afresh.
+func (m *MemoryEngine) rebuildIndexLocked() {
+	var recs fileSlab
+	for id := range m.recs.len() {
+		if f := m.recs.at(uint32(id)); f.Hash != nil {
+			recs.push(*f)
+		}
+	}
+	m.setFilesLocked(recs)
+}
+
+// setFilesLocked replaces every file record with recs and rebuilds the index.
+func (m *MemoryEngine) setFilesLocked(recs fileSlab) {
+	m.files = make(map[string]uint32, recs.len())
+	m.names = newNameIndex()
+	m.dead, m.free = nil, nil
+	for id := range recs.len() {
+		f := recs.at(uint32(id))
+		m.files[fileMapKey(f.Hash, f.Size)] = uint32(id)
+		m.names.indexName(uint32(id), f.Name)
+	}
+	m.recs = recs
+}
+
+// fileByKey returns the stored record for a fileMapKey.
+func (m *MemoryEngine) fileByKey(key string) (File, bool) {
+	id, ok := m.files[key]
+	if !ok {
+		return File{}, false
+	}
+	return *m.recs.at(id), true
 }

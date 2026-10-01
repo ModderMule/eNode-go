@@ -350,7 +350,8 @@ func TestNATKeepaliveExtendsSessionDeadline(t *testing.T) {
 	rt.registerSession(hash, client)
 
 	// Register the client with the NAT handler so a keepalive from its address matches.
-	remote := &net.UDPAddr{IP: net.ParseIP("203.0.113.44"), Port: 40001}
+	// From the session's own IP: a REGISTER for a logged-in hash from elsewhere is refused.
+	remote := &net.UDPAddr{IP: client.peerIP, Port: 40001}
 	nat.processPacket(encodeNATPacket(OpNatRegister, hash), remote, 2004)
 
 	before := conn.readDeadlineCalls()

@@ -184,7 +184,7 @@ func (s *ServerRuntime) sendPeerList(remote *net.UDPAddr, conn UDPReplyConn, wan
 	// Sent through the same crypt the peer used to reach us: it holds the ServerKey we
 	// published for its address, so this is the key it will decrypt with. Direction 0xA5
 	// here, since on this frame we are the server answering.
-	crypt := NewUDPCrypt(true, deriveUDPKey(s.UDP.UDPServerKey, remote.IP))
+	crypt := NewUDPCrypt(true, deriveUDPKey(s.udpSecret(), remote.IP))
 	_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
 }
 

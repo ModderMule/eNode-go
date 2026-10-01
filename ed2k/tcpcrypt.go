@@ -1,6 +1,7 @@
 package ed2k
 
 import (
+	"encoding/binary"
 	"errors"
 	"math/big"
 	"sync"
@@ -25,7 +26,21 @@ type TCPCrypt struct {
 	state   int
 	sendKey *RC4Key
 	recvKey *RC4Key
+	// pending gathers a handshake stage until it is complete, like MFC's
+	// m_nReceiveBytesWanted: TCP may split the key exchange or the padding
+	// anywhere. In CsNegotiating it holds plaintext, each byte RC4-decrypted once
+	// on arrival because the keystream only moves forward.
+	pending []byte
 }
+
+const (
+	// cryptRequestFixed is the client's opening, before its padding: marker (1),
+	// DH public key (96), padding length (1).
+	cryptRequestFixed = 1 + CryptPrimeSize + 1
+	// cryptHandshakeFixed is the client's encrypted reply, before its padding:
+	// sync magic (4), method (1), padding length (1).
+	cryptHandshakeFixed = 4 + 1 + 1
+)
 
 func NewTCPCrypt(packet *Packet, supportCrypt bool) *TCPCrypt {
 	status := CsNone
@@ -35,32 +50,58 @@ func NewTCPCrypt(packet *Packet, supportCrypt bool) *TCPCrypt {
 	return &TCPCrypt{Packet: packet, state: status}
 }
 
+// ProcessData advances the handshake with the next chunk of the stream. It returns
+// (nil, nil) while a stage is still incomplete. Completing the key exchange returns
+// the server's answer, to be written raw; completing the client's reply returns the
+// decrypted bytes that followed it, normally its login.
 func (t *TCPCrypt) ProcessData(buffer *Buffer) ([]byte, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.Packet.Data = NewBufferFromBytes(buffer.Get())
+	data := buffer.Get()
 	switch t.state {
 	case CsNone:
 		return nil, nil
 	case CsUnknown:
-		resp, err := t.negotiate()
+		t.pending = append(t.pending, data...)
+		need := cryptRequestFixed
+		if len(t.pending) >= need {
+			need += int(t.pending[need-1])
+		}
+		if len(t.pending) < need {
+			return nil, nil
+		}
+		if len(t.pending) > need {
+			// The client waits for the server's key before it sends anything else.
+			return nil, errors.New("data before the key exchange completed")
+		}
+		resp, err := t.negotiate(t.pending[1 : 1+CryptPrimeSize])
 		if err != nil {
 			return nil, err
 		}
+		t.pending = nil
 		t.Packet.Status = PsCryptNegotiating
 		t.state = CsNegotiating
 		return resp, nil
 	case CsNegotiating:
-		rest, err := t.handshake(buffer.Bytes())
-		if err != nil {
+		t.pending = append(t.pending, RC4Crypt(data, len(data), t.recvKey)...)
+		rest, done, err := t.handshake()
+		if err != nil || !done {
 			return nil, err
 		}
+		t.pending = nil
 		t.state = CsEncrypting
 		t.Packet.Status = PsNew
 		return rest, nil
 	default:
 		return nil, errors.New("unexpected crypt status")
 	}
+}
+
+// Buffered reports how many bytes of an incomplete handshake stage are held.
+func (t *TCPCrypt) Buffered() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return len(t.pending)
 }
 
 func (t *TCPCrypt) State() int {
@@ -99,17 +140,11 @@ func (t *TCPCrypt) CryptStatus() int {
 	return t.State()
 }
 
-func (t *TCPCrypt) negotiate() ([]byte, error) {
+// negotiate answers the client's DH public key aBytes (the marker and padding around
+// it are already consumed) with the server's key and its encrypted sync block.
+func (t *TCPCrypt) negotiate(aBytes []byte) ([]byte, error) {
 	g := big.NewInt(2)
 	p := new(big.Int).SetBytes(CryptPrime)
-	// Obfuscated incoming stream starts with 1-byte non-protocol marker.
-	if _, err := t.Packet.Data.GetUInt8(); err != nil {
-		return nil, err
-	}
-	aBytes := t.Packet.Data.Get(CryptPrimeSize)
-	if len(aBytes) != CryptPrimeSize {
-		return nil, ErrOutOfBounds
-	}
 	A := new(big.Int).SetBytes(aBytes)
 	bRaw, err := RandBuf(CryptDhaSize)
 	if err != nil {
@@ -119,12 +154,6 @@ func (t *TCPCrypt) negotiate() ([]byte, error) {
 
 	B := new(big.Int).Exp(g, b, p)
 	K := new(big.Int).Exp(A, b, p)
-
-	padSize, err := t.Packet.Data.GetUInt8()
-	if err != nil {
-		return nil, err
-	}
-	_ = t.Packet.Data.Get(int(padSize))
 
 	kBuf := make([]byte, CryptPrimeSize+1)
 	kBytes := K.Bytes()
@@ -154,34 +183,27 @@ func (t *TCPCrypt) negotiate() ([]byte, error) {
 	return append(bout, enc...), nil
 }
 
-// handshake is called from ProcessData with t.mu already held, so it reads the
-// guarded fields directly rather than through the accessors.
-func (t *TCPCrypt) handshake(buffer []byte) ([]byte, error) {
-	if t.state != CsNegotiating {
-		return nil, errors.New("bad crypt status")
+// handshake checks the client's decrypted reply gathered in pending. done is false
+// until the reply and its padding are complete; rest is what followed them. It is
+// called from ProcessData with t.mu already held.
+func (t *TCPCrypt) handshake() (rest []byte, done bool, err error) {
+	if len(t.pending) < 4 {
+		return nil, false, nil
 	}
-	data := RC4Crypt(buffer, len(buffer), t.recvKey)
-	b := NewBufferFromBytes(data)
-	sync, err := b.GetUInt32LE()
-	if err != nil {
-		return nil, err
+	if binary.LittleEndian.Uint32(t.pending) != MagicValueSync {
+		return nil, false, errors.New("wrong MAGICVALUE_SYNC")
 	}
-	if sync != MagicValueSync {
-		return nil, errors.New("wrong MAGICVALUE_SYNC")
+	if len(t.pending) < cryptHandshakeFixed {
+		return nil, false, nil
 	}
-	method, err := b.GetUInt8()
-	if err != nil {
-		return nil, err
+	if t.pending[4] != uint8(EmObfuscate) {
+		return nil, false, errors.New("encryption method not supported")
 	}
-	if method != uint8(EmObfuscate) {
-		return nil, errors.New("encryption method not supported")
+	need := cryptHandshakeFixed + int(t.pending[cryptHandshakeFixed-1])
+	if len(t.pending) < need {
+		return nil, false, nil
 	}
-	padLen, err := b.GetUInt8()
-	if err != nil {
-		return nil, err
-	}
-	_ = b.Get(int(padLen))
-	return b.Get(), nil
+	return t.pending[need:], true, nil
 }
 
 func (t *TCPCrypt) Decrypt(buffer []byte) []byte {

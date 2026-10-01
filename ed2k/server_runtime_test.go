@@ -75,7 +75,7 @@ func TestUDPObfuscatedNATRegisterReplyIsEncrypted(t *testing.T) {
 	req := encodeNATPacket(OpNatRegister, hash[:])
 	// The client obfuscates with the per-client key derived from its own IP, which
 	// is what the obf listener recomputes from the datagram's source IP.
-	crypt := NewUDPCrypt(true, deriveUDPKey(serverKey, net.IPv4(127, 0, 0, 1)))
+	crypt := NewUDPCrypt(true, deriveUDPKey(LegacyUDPSecret(serverKey), net.IPv4(127, 0, 0, 1)))
 	wire := buildObfuscatedClientUDP(crypt, req, 0x3344)
 
 	remote := clientConn.LocalAddr().(*net.UDPAddr)

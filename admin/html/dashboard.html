@@ -47,7 +47,7 @@ a{color:var(--accent)}
 <span id="status" class="badge">connecting…</span>
 <span id="updated" class="desc" style="margin:0"></span>
 </header>
-<p class="desc" style="margin-bottom:4px">{{.Description}} · {{.Version}} · storage: {{.Engine}}</p>
+<p class="desc" style="margin-bottom:4px">{{.Description}} · {{.Version}}<span id="update"></span> · storage: {{.Engine}}</p>
 <p class="desc addr">IPv4: {{if .AdvertisedIP}}<b>{{.AdvertisedIP}}</b>{{else}}<span class="off">unresolved</span>{{end}} · IPv6: {{if .AdvertisedIPv6}}<b>{{.AdvertisedIPv6}}</b>{{else if .IPv6}}<span class="off">unresolved</span>{{else}}<span class="off">off</span>{{end}}</p>
 
 <div class="grid">
@@ -102,6 +102,29 @@ function fmtUptime(total){
   if(d || h || m) parts.push(m + 'm');
   parts.push(s + 's');
   return parts.join(' ');
+}
+// renderUpdate shows the release check next to the version: a link when GitHub has a
+// newer published release, a muted "(latest)" when this build is current, and
+// nothing when the check is off or has not succeeded.
+function renderUpdate(u){
+  var el = document.getElementById('update');
+  if(!el){ return; }
+  el.textContent = '';
+  if(!u){ return; }
+  if(u.available){
+    el.appendChild(document.createTextNode(' · update available: '));
+    var a = document.createElement('a');
+    a.href = u.url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = u.latest;
+    el.appendChild(a);
+  }else{
+    var s = document.createElement('span');
+    s.className = 'off';
+    s.textContent = ' (latest)';
+    el.appendChild(s);
+  }
 }
 function setText(id, val){ var el = document.getElementById(id); if(el){ el.textContent = val; } }
 function num(n){ return Number(n || 0).toLocaleString(); }
@@ -218,6 +241,7 @@ async function refresh(){
     setText('uptime', fmtUptime(d.uptimeSeconds));
     renderMeta(d);
     renderMetaAPI(d);
+    renderUpdate(d.update);
     setText('updated', 'updated ' + new Date(d.time).toLocaleTimeString());
     setStatus('live', 'ok');
   }catch(e){

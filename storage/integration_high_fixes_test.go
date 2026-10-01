@@ -207,8 +207,9 @@ func TestMySQLFindBySearch(t *testing.T) {
 
 // TestMySQLFindBySearchEscapesWildcards pins L13 end to end: a % in a search term
 // must match a literal %, the way the memory and Mongo engines already do — not act
-// as a SQL wildcard. Against the pre-fix build `LIKE '%a%b%'` matches both "a%b"
-// and "aXb"; with escaping only the literal "a%b" matches.
+// as a SQL wildcard. A word is matched by its alphanumeric runs ("a%b" is "a" and
+// "b", like "spider-man"), so the literal path is a term with no run at all: against
+// the pre-fix build `LIKE '%%%'` matches every name; with escaping only "a%b" does.
 func TestMySQLFindBySearchEscapesWildcards(t *testing.T) {
 	requireIntegration(t)
 	engine, _ := startMySQL(t, "enode")
@@ -229,12 +230,12 @@ func TestMySQLFindBySearchEscapesWildcards(t *testing.T) {
 		t.Logf("input: seeded %q", f.Name)
 	}
 
-	got := engine.FindBySearch(&SearchExpr{Kind: SearchText, Text: "a%b"})
+	got := engine.FindBySearch(&SearchExpr{Kind: SearchText, Text: "%"})
 	var names []string
 	for _, f := range got {
 		names = append(names, f.Name)
 	}
-	t.Logf("output: search %q → %d result(s) %v", "a%b", len(got), names)
+	t.Logf("output: search %q → %d result(s) %v", "%", len(got), names)
 	if len(got) != 1 || names[0] != "a%b" {
 		t.Fatalf("got %v, want exactly [\"a%%b\"] — %% must be a literal, not a wildcard", names)
 	}

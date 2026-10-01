@@ -41,3 +41,22 @@ func TestUDPObfuscatedPortDefaultsToTCPPlus12(t *testing.T) {
 		})
 	}
 }
+
+// tcp.port+12 is uint16 arithmetic: 65524 wrapped the derived port to 0 and 65530 to
+// 6. Such a tcp.port is refused unless udp.portObfuscated is set explicitly.
+func TestUDPObfuscatedPortDoesNotWrap(t *testing.T) {
+	for _, tc := range []struct {
+		body    string
+		wantErr bool
+	}{
+		{"name: t\naddress: \"127.0.0.1\"\ntcp:\n  port: 65523\n", false},
+		{"name: t\naddress: \"127.0.0.1\"\ntcp:\n  port: 65524\n", true},
+		{"name: t\naddress: \"127.0.0.1\"\ntcp:\n  port: 65530\nudp:\n  portObfuscated: 6000\n", false},
+	} {
+		cfg, err := Load(writeTempConfig(t, tc.body))
+		t.Logf("input: %q, output: udp.portObfuscated=%d err=%v", tc.body, cfg.UDP.PortObfuscated, err)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("err=%v, wantErr=%t", err, tc.wantErr)
+		}
+	}
+}

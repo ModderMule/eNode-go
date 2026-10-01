@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 
-	"enode/logging"
 	"enode/storage"
 )
 
@@ -21,6 +20,15 @@ var ErrPacketTooLarge = errors.New("packet: declared size exceeds maximum")
 // declaration, and zlib reaches roughly 1032:1, so a conforming 2 MB packet
 // still inflates to ~2 GB.
 var ErrInflatedTooLarge = errors.New("packet: inflated payload exceeds maximum")
+
+// ErrUnknownProtocol is returned by Init when the first header byte is not an
+// ed2k protocol byte. The stream has lost its framing and cannot be resynced, so
+// callers drop the connection, as eMule's CEMSocket does.
+var ErrUnknownProtocol = errors.New("packet: unknown protocol byte")
+
+// PacketHeaderSize is the fixed TCP header: protocol(1) + size(4) + opcode(1).
+// Init needs all six bytes at once, so the caller buffers a shorter chunk.
+const PacketHeaderSize = 6
 
 type PacketItem struct {
 	Type  uint8
@@ -54,7 +62,14 @@ type Packet struct {
 	Data      *Buffer
 	HasExcess bool
 	Excess    []byte
+	// recv gathers the payload as it arrives; Data is set from it once complete.
+	recv []byte
 }
+
+// packetInitialCap is what a packet's buffer starts at. It grows with the bytes that
+// actually arrive: preallocating the declared size let each 6-byte header reserve up
+// to MaxTCPPacketSize, before login and before a single payload byte.
+const packetInitialCap = 64 << 10
 
 func NewPacket() *Packet {
 	return &Packet{
@@ -314,7 +329,8 @@ func AddFile(packet *[]PacketItem, file SharedFile) {
 
 // Init parses a packet header. Obfuscation is decided before this point, by
 // tcpClient.handleBytes, which sniffs the protocol byte and routes to the crypt
-// state machine itself — so Init only ever sees plaintext framing.
+// state machine itself — so Init only ever sees plaintext framing. The caller must
+// supply at least PacketHeaderSize bytes; see tcpClient.processPacketData.
 func (p *Packet) Init(buffer *Buffer) error {
 	p.HasExcess = false
 	protocol, err := buffer.GetUInt8()
@@ -340,34 +356,31 @@ func (p *Packet) Init(buffer *Buffer) error {
 			return err
 		}
 		p.Code = code
-		p.Data = NewBuffer(int(p.Size))
+		p.recv = make([]byte, 0, min(int(p.Size), packetInitialCap))
+		p.Data = NewBuffer(0)
 		p.Append(buffer.Get())
 		return nil
 	}
 
-	logging.Warnf("packet init: unknown protocol 0x%x", p.Protocol)
-	return nil
+	return fmt.Errorf("%w: 0x%x", ErrUnknownProtocol, p.Protocol)
 }
 
+// Append adds received bytes to the payload. Once Size bytes are in, Data holds the
+// payload and Status is PsReady; bytes past it are kept in Excess (HasExcess).
 func (p *Packet) Append(chunk []byte) {
-	received := p.Data.Pos()
-	p.Data.PutBuffer(chunk)
-	received += len(chunk)
-	if uint32(received) == p.Size {
-		p.Status = PsReady
-		p.HasExcess = false
-		return
-	}
-	if received < len(p.Data.Bytes()) {
+	take := min(int(p.Size)-len(p.recv), len(chunk))
+	p.recv = append(p.recv, chunk[:take]...)
+	if len(p.recv) < int(p.Size) {
 		p.Status = PsWaitingData
 		p.HasExcess = false
 		return
 	}
+	p.Data = NewBufferFromBytes(p.recv)
+	p.recv = nil
 	p.Status = PsReady
-	p.HasExcess = true
-	excess := received - int(p.Size)
-	if excess > 0 && excess <= len(chunk) {
-		p.Excess = append([]byte(nil), chunk[len(chunk)-excess:]...)
+	p.HasExcess = take < len(chunk)
+	if p.HasExcess {
+		p.Excess = append([]byte(nil), chunk[take:]...)
 	}
 }
 

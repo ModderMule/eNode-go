@@ -236,7 +236,7 @@ func TestLoginRecordsMetaCapability(t *testing.T) {
 
 // TestUDPGlobSearchMetaGating: with advertiseToLegacyClients off, OP_GLOBSEARCHREQ
 // (no tag block) never gets meta rows, and OP_GLOBSEARCHREQ3 gets them only when its
-// CT_SERVER_UDPSEARCH_FLAGS carries SrvCapUDPMetaSearch. Each row is its own datagram.
+// CT_SERVER_UDPSEARCH_FLAGS carries SrvCapUDPMetaSearch. Each row is its own record.
 func TestUDPGlobSearchMetaGating(t *testing.T) {
 	search := []byte{0x01, 0x04, 0x00, 'f', 'o', 'o', 'd'}
 	req3 := func(flags uint32) []byte {
@@ -265,20 +265,20 @@ func TestUDPGlobSearchMetaGating(t *testing.T) {
 		} else {
 			rt.udpGlobSearchReq(NewBufferFromBytes(tc.payload), remote, server, nil, "udp")
 		}
-		datagrams := 0
-		for gotReply() != nil {
-			datagrams++
+		records := 0
+		for d := gotReply(); d != nil; d = gotReply() {
+			records += countGlobSearchRecords(t, d)
 		}
-		t.Logf("input: %s payload=% x; output: searcherCalls=%d udpArg=%v datagrams=%d",
-			tc.name, tc.payload, fake.callCount(), fake.calls, datagrams)
+		t.Logf("input: %s payload=% x; output: searcherCalls=%d udpArg=%v records=%d",
+			tc.name, tc.payload, fake.callCount(), fake.calls, records)
 		if fake.callCount() != tc.wantCalls {
 			t.Fatalf("%s: %d searcher calls, want %d", tc.name, fake.callCount(), tc.wantCalls)
 		}
 		if tc.wantCalls > 0 && !fake.calls[0] {
 			t.Fatalf("%s: searcher asked with udp=false", tc.name)
 		}
-		if want := 1 + 2*tc.wantCalls; datagrams != want {
-			t.Fatalf("%s: %d datagrams, want %d (one per row)", tc.name, datagrams, want)
+		if want := 1 + 2*tc.wantCalls; records != want {
+			t.Fatalf("%s: %d records, want %d (one per row)", tc.name, records, want)
 		}
 	}
 }
@@ -455,4 +455,33 @@ func readServerStatusFiles(t *testing.T, rt *ServerRuntime) uint32 {
 		t.Fatalf("not an OP_SERVERSTATUS: % x", raw)
 	}
 	return binary.LittleEndian.Uint32(raw[10:14])
+}
+
+// countGlobSearchRecords walks a UDP search datagram's [E3 99 record] entries the way
+// eMule's UDPSocket.cpp does and returns how many it holds.
+func countGlobSearchRecords(t *testing.T, datagram []byte) int {
+	t.Helper()
+	b := NewBufferFromBytes(datagram)
+	n := 0
+	for b.Remaining() > 0 {
+		proto, _ := b.GetUInt8()
+		op, err := b.GetUInt8()
+		if err != nil || proto != PrED2K || op != OpGlobSearchRes {
+			t.Fatalf("record %d: bad header %#x %#x in % x", n, proto, op, datagram)
+		}
+		if len(b.Get(16)) != 16 {
+			t.Fatalf("record %d: short hash", n)
+		}
+		if _, err := b.GetUInt32LE(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.GetUInt16LE(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.GetTags(); err != nil {
+			t.Fatalf("record %d: %v", n, err)
+		}
+		n++
+	}
+	return n
 }

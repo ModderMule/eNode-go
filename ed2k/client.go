@@ -6,6 +6,10 @@ import (
 )
 
 const (
+	// cryptAnswerFixed is the fixed part of an obfuscation handshake answer once
+	// decrypted: sync magic (4), method (1), padding length (1).
+	cryptAnswerFixed = 6
+
 	MagicValueSync = 0x835E6FC4
 	MagicValue203  = 203
 	MagicValue34   = 34
@@ -26,6 +30,9 @@ type Client struct {
 	Hash        []byte
 	SendKey     *RC4Key
 	RecvKey     *RC4Key
+	// negotiation holds the decrypted handshake answer while it arrives in pieces.
+	// Each received byte is RC4-decrypted exactly once, as the keystream advances.
+	negotiation []byte
 }
 
 type HelloAnswer struct {
@@ -86,33 +93,32 @@ func (c *Client) BuildHandshake(randomProtocol uint8, randomKey uint32, pad []by
 	return out.Bytes(), nil
 }
 
+// Decrypt feeds received bytes through the client's crypt state. While the
+// handshake answer is incomplete it buffers and returns (nil, false, nil); TCP may
+// split the answer anywhere, padding included. When the answer completes it returns
+// the bytes that followed it, already decrypted, and done=true.
 func (c *Client) Decrypt(data []byte) ([]byte, bool, error) {
 	switch c.CryptStatus {
 	case CsEncrypting:
 		return RC4Crypt(data, len(data), c.RecvKey), false, nil
 	case CsNegotiating:
-		dec := RC4Crypt(data, len(data), c.RecvKey)
-		b := NewBufferFromBytes(dec)
-		sync, err := b.GetUInt32LE()
-		if err != nil {
-			return nil, false, err
+		c.negotiation = append(c.negotiation, RC4Crypt(data, len(data), c.RecvKey)...)
+		if len(c.negotiation) < cryptAnswerFixed {
+			return nil, false, nil
 		}
-		if sync != MagicValueSync {
+		if binary.LittleEndian.Uint32(c.negotiation) != MagicValueSync {
 			c.CryptStatus = CsNone
 			return nil, false, errors.New("bad handshake answer received")
 		}
-		method, err := b.GetUInt8()
-		if err != nil {
-			return nil, false, err
+		need := cryptAnswerFixed + int(c.negotiation[cryptAnswerFixed-1])
+		if len(c.negotiation) < need {
+			return nil, false, nil
 		}
-		c.CryptMethod = int(method)
-		padLen, err := b.GetUInt8()
-		if err != nil {
-			return nil, false, err
-		}
-		_ = b.Get(int(padLen))
+		c.CryptMethod = int(c.negotiation[4])
+		rest := c.negotiation[need:]
+		c.negotiation = nil
 		c.CryptStatus = CsEncrypting
-		return nil, true, nil
+		return rest, true, nil
 	case CsNone:
 		return data, false, nil
 	default:

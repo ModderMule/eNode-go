@@ -109,23 +109,20 @@ func TestPacketAppendWithExcess(t *testing.T) {
 	}
 }
 
-// A non-protocol first byte is no longer Init's problem: handleBytes decides
-// whether the stream is obfuscated before Init ever sees it. Init just declines
-// to parse the frame. (The previous test here passed a mockCrypt and so only
-// exercised a branch that production never reached — the caller passed nil.)
-func TestPacketInitUnknownProtocolIsNotParsed(t *testing.T) {
-	wire := NewBufferFromBytes([]byte{0xff, 0x11, 0x22})
+// A non-protocol first byte means the stream has lost its framing. Init reports
+// it rather than returning success, so the caller can drop the connection instead
+// of silently discarding the chunk and misreading the next one.
+func TestPacketInitUnknownProtocolIsRejected(t *testing.T) {
+	wire := NewBufferFromBytes([]byte{0xff, 0x11, 0x22, 0x33, 0x44, 0x55})
 	p := NewPacket()
 	t.Logf("input: %v", wire.Bytes())
-	if err := p.Init(wire); err != nil {
-		t.Fatal(err)
+	err := p.Init(wire)
+	t.Logf("output: err=%v protocol=0x%x status=%d", err, p.Protocol, p.Status)
+	if !errors.Is(err, ErrUnknownProtocol) {
+		t.Fatalf("want ErrUnknownProtocol, got %v", err)
 	}
-	t.Logf("output: protocol=0x%x status=%d size=%d", p.Protocol, p.Status, p.Size)
 	if p.Status == PsReady {
 		t.Fatalf("unknown protocol must not produce a ready packet: status=%d", p.Status)
-	}
-	if p.Protocol != 0xff {
-		t.Fatalf("protocol mismatch: 0x%x", p.Protocol)
 	}
 }
 

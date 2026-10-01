@@ -147,12 +147,14 @@ const (
 	TypeUint32 uint8 = 0x03
 	TypeFloat  uint8 = 0x04
 	TypeBool   uint8 = 0x05
-	TypeBlob   uint8 = 0x07
-	TypeUint16 uint8 = 0x08
-	TypeUint8  uint8 = 0x09
-	TypeBsob   uint8 = 0x0a
-	TypeUint64 uint8 = 0x0b
-	TypeTags   uint8 = 0x0f
+	// TypeBoolArray is read only to be skipped (MFC CTag does the same).
+	TypeBoolArray uint8 = 0x06
+	TypeBlob      uint8 = 0x07
+	TypeUint16    uint8 = 0x08
+	TypeUint8     uint8 = 0x09
+	TypeBsob      uint8 = 0x0a
+	TypeUint64    uint8 = 0x0b
+	TypeTags      uint8 = 0x0f
 )
 
 const (

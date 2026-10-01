@@ -248,6 +248,11 @@ func run(ctx context.Context, configPath string) error {
 
 	serverHash := ed2k.MD5([]byte(fmt.Sprintf("%s%d", serverIdentitySeed(advertisedIP, cfg.Address), cfg.TCP.Port)))
 
+	udpSecret, err := loadUDPSecret(cfg)
+	if err != nil {
+		return err
+	}
+
 	runtime := ed2k.NewServerRuntime(
 		ed2k.TCPRuntimeConfig{
 			Name:        cfg.Name,
@@ -264,6 +269,8 @@ func run(ctx context.Context, configPath string) error {
 			MessageLowID:      cfg.MessageLowID,
 			ConnectionTimeout: time.Duration(cfg.TCP.ConnectionTimeout) * time.Millisecond,
 			DisconnectTimeout: time.Duration(cfg.TCP.DisconnectTimeout) * time.Second,
+			LoginTimeout:      time.Duration(cfg.TCP.LoginTimeout) * time.Second,
+			MaxConnsPerIP:     cfg.TCP.MaxConnectionsPerIPOrDefault(),
 			AllowLowIDs:       cfg.TCP.AllowLowIDs,
 			SupportCrypt:      cfg.SupportCrypt,
 			MinLowID:          cfg.TCP.MinLowID,
@@ -288,13 +295,15 @@ func run(ctx context.Context, configPath string) error {
 			GetFiles:       cfg.UDP.GetFiles,
 			UDPPortObf:     advertisedUDPObfPort(cfg),
 			TCPPortObf:     cfg.TCP.PortObfuscated,
-			UDPServerKey:   cfg.UDP.ServerKey,
+			UDPSecret:      udpSecret,
 			MaxConnections: uint32(cfg.TCP.MaxConnections),
 			// Read from the same accessors as the TCP half above. Advertising a cap we
 			// do not apply is the state this feature exists to end, so the two must
 			// come from one source or not be separate fields at all.
 			SoftFiles: uint32(cfg.Files.SoftLimitOrDefault()),
 			HardFiles: uint32(cfg.Files.HardLimitOrDefault()),
+
+			RateLimitPerIPPerMinute: cfg.UDP.RateLimitPerIPPerMinuteOrDefault(),
 		},
 		engine,
 	)
@@ -380,6 +389,13 @@ func run(ctx context.Context, configPath string) error {
 		if cfg.NAT.Enabled {
 			natPort = cfg.NAT.Port
 		}
+		// Daily GitHub release check; Info() is nil-receiver safe, so a disabled
+		// checker simply leaves the dashboard without an update hint.
+		var updateChecker *admin.UpdateChecker
+		if cfg.Admin.CheckUpdatesOrDefault() {
+			updateChecker = admin.NewUpdateChecker(ed2k.ENodeVersionStr)
+			defer updateChecker.Start(ctx)()
+		}
 		adminSrv := admin.New(
 			admin.Config{BindIP: cfg.Admin.BindIP, Port: cfg.Admin.Port, Username: cfg.Admin.Username, Password: cfg.Admin.Password},
 			admin.StaticInfo{
@@ -426,6 +442,7 @@ func run(ctx context.Context, configPath string) error {
 					MetaCacheEntries: metaCacheEntries,
 					Meta:             metaStats,
 					MetaAPI:          metaAPI.adminStats(),
+					Update:           updateChecker.Info(),
 				}
 			},
 		)
@@ -1043,4 +1060,20 @@ func ipv6String(b []byte) string {
 		return ""
 	}
 	return net.IP(b).String()
+}
+
+// loadUDPSecret returns the secret client UDP obfuscation keys are derived from. A
+// configured udp.serverKey is honoured as before, so the keys clients already hold
+// stay valid, but it is 32 bits and was shipped as the same public value everywhere.
+// Without one, a 128-bit secret is generated on first start and kept in the data dir.
+func loadUDPSecret(cfg config.Config) ([]byte, error) {
+	if cfg.UDP.ServerKey != 0 {
+		logging.Warnf("udp.serverKey is a 32-bit secret anyone can brute-force from one observed key; remove it to use a generated %s", cfg.UDPSecretPath())
+		return ed2k.LegacyUDPSecret(cfg.UDP.ServerKey), nil
+	}
+	secret, err := ed2k.LoadOrCreateUDPSecret(cfg.UDPSecretPath())
+	if err != nil {
+		return nil, fmt.Errorf("udp secret: %w", err)
+	}
+	return secret, nil
 }

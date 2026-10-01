@@ -158,14 +158,16 @@ func (u *UDPCrypt) encrypt(buffer []byte, direction byte) []byte {
 // port, so a NAT port change does not invalidate it. Never returns 0 — a zero
 // key means "no key" to the client (srchybrid/Server.cpp:281) and it would
 // refuse to obfuscate.
-func deriveUDPKey(secret uint32, ip net.IP) uint32 {
-	var seed [4]byte
-	binary.LittleEndian.PutUint32(seed[:], secret)
+//
+// secret is the server's UDP secret (LoadOrCreateUDPSecret), or the 4 bytes of a
+// legacy udp.serverKey (LegacyUDPSecret), which derive the keys that value always did.
+func deriveUDPKey(secret []byte, ip net.IP) uint32 {
 	norm := ip
 	if v4 := ip.To4(); v4 != nil {
 		norm = v4 // stable 4-byte form; v6 falls through to the 16-byte value
 	}
-	key := binary.LittleEndian.Uint32(MD5(append(seed[:], norm...)))
+	seed := make([]byte, 0, len(secret)+len(norm))
+	key := binary.LittleEndian.Uint32(MD5(append(append(seed, secret...), norm...)))
 	if key == 0 {
 		key = 1
 	}

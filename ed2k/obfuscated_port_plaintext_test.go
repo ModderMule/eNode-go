@@ -209,7 +209,9 @@ func TestObfuscatedHandshakeStillNegotiates(t *testing.T) {
 }
 
 // A malformed obfuscated handshake must close the connection rather than leave
-// it wedged in CsNegotiating until disconnectTimeout (3600s by default).
+// it wedged in CsNegotiating until disconnectTimeout (3600s by default). A short
+// chunk is no longer malformed — TCP may split the key exchange anywhere — so the
+// case here is a reply whose sync magic is wrong.
 func TestFailedCryptHandshakeClosesConnection(t *testing.T) {
 	rt := NewServerRuntime(TCPRuntimeConfig{
 		Address: "127.0.0.1",
@@ -219,13 +221,33 @@ func TestFailedCryptHandshakeClosesConnection(t *testing.T) {
 	conn := &mockConn{}
 	client := newTCPClient(rt, conn, true)
 
-	// Not a protocol byte, and too short to be a DH negotiation.
-	short := []byte{0x7a, 0x01, 0x02}
-	t.Logf("input: %d bytes, first byte=0x%x", len(short), short[0])
-	client.handleBytes(short)
+	negIn := make([]byte, cryptRequestFixed)
+	negIn[0] = 0x7a
+	negIn[1] = 0x02
+	client.handleBytes(negIn)
+
+	bad := []byte{0x01, 0x02, 0x03, 0x04, 0x02, 0x00} // not RC4(MAGICVALUE_SYNC)
+	t.Logf("input: key exchange, then %d-byte reply % x", len(bad), bad)
+	client.handleBytes(bad)
 	t.Logf("output: closed=%d reason=%q", conn.closed, client.getCloseReason())
 
 	if conn.closed == 0 {
 		t.Fatal("a failed crypt handshake must close the connection")
+	}
+}
+
+// A short first chunk is the start of a split key exchange: the session waits for
+// the rest instead of closing.
+func TestShortCryptChunkWaitsForMore(t *testing.T) {
+	rt := NewServerRuntime(TCPRuntimeConfig{Address: "127.0.0.1", Port: 4661}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
+	conn := &mockConn{}
+	client := newTCPClient(rt, conn, true)
+
+	short := []byte{0x7a, 0x01, 0x02}
+	t.Logf("input: %d bytes, first byte=0x%x", len(short), short[0])
+	client.handleBytes(short)
+	t.Logf("output: closed=%d buffered=%d state=%d", conn.closed, client.crypt.Buffered(), client.crypt.State())
+	if conn.closed != 0 || client.crypt.Buffered() != len(short) || client.crypt.State() != CsUnknown {
+		t.Fatal("a partial key exchange must be buffered, not rejected")
 	}
 }

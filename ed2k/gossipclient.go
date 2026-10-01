@@ -188,8 +188,13 @@ func (g *GossipHandler) sendPhase2(cfg GossipClientConfig, p PeerServer) {
 		logging.Debugf("gossip: cannot build a bootstrap ping for %s: %v", p.Addr, err)
 		return
 	}
+	obfPort := int(p.Addr.Port) + peerObfPingOffset
+	if obfPort > 65535 {
+		logging.Debugf("gossip: %s has no tcp+%d obfuscated port", p.Addr, peerObfPingOffset)
+		return
+	}
 	g.SetOurChallenge(p.Addr, challenge)
-	dst := &net.UDPAddr{IP: p.Addr.IP, Port: int(p.Addr.Port) + peerObfPingOffset}
+	dst := &net.UDPAddr{IP: p.Addr.IP, Port: obfPort}
 	g.writeTo(cfg.Gossip, dst, packet, "phase2 obf-ping", p)
 }
 

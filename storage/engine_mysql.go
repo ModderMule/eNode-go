@@ -252,6 +252,20 @@ func (m *MySQLEngine) Disconnect(info ClientInfo) {
 	}); err != nil {
 		logging.Errorf("mysql disconnect sources storeID=%d failed: %v", info.StoreID, err)
 	}
+	// A search result names files.source_id/source_port as one source. Left on a
+	// client that is gone, it points at whoever holds that LowID next; clear it on
+	// the files this client offered (the id_client index keeps this to its own).
+	if info.ID == 0 {
+		return
+	}
+	if err := m.execRetry("disconnect result source", func() error {
+		_, err := m.db.Exec(`UPDATE files f JOIN sources s ON s.id_file = f.id
+			SET f.source_id = 0, f.source_port = 0
+			WHERE s.id_client = ? AND f.source_id = ? AND f.source_port = ?`, info.StoreID, info.ID, info.Port)
+		return err
+	}); err != nil {
+		logging.Errorf("mysql disconnect result source storeID=%d failed: %v", info.StoreID, err)
+	}
 }
 
 func (m *MySQLEngine) FilesCount() int {

@@ -117,9 +117,25 @@ type TCPConfig struct {
 	MaxConnections    int    `yaml:"maxConnections"`
 	ConnectionTimeout int    `yaml:"connectionTimeout"`
 	DisconnectTimeout int    `yaml:"disconnectTimeout"`
-	AllowLowIDs       bool   `yaml:"allowLowIDs"`
-	MinLowID          uint32 `yaml:"minLowID"`
-	MaxLowID          uint32 `yaml:"maxLowID"`
+	// LoginTimeout (seconds) is how long a connection may take to complete its login,
+	// counted from accept, not reset by traffic. DisconnectTimeout applies after.
+	LoginTimeout int `yaml:"loginTimeout"`
+	// MaxConnectionsPerIP caps concurrent connections from one address (an IPv6 /64)
+	// across both listeners. A pointer so an explicit 0 (off) differs from absent.
+	MaxConnectionsPerIP *int   `yaml:"maxConnectionsPerIP"`
+	AllowLowIDs         bool   `yaml:"allowLowIDs"`
+	MinLowID            uint32 `yaml:"minLowID"`
+	MaxLowID            uint32 `yaml:"maxLowID"`
+}
+
+// DefaultMaxConnectionsPerIP leaves room for a household or office behind one NAT,
+// and for a re-login racing the old socket's close (replaceSameIPSession), while
+// keeping one host from holding thousands of sockets.
+const DefaultMaxConnectionsPerIP = 32
+
+// MaxConnectionsPerIPOrDefault resolves tcp.maxConnectionsPerIP; 0 is off.
+func (c TCPConfig) MaxConnectionsPerIPOrDefault() int {
+	return intOrDefault(c.MaxConnectionsPerIP, DefaultMaxConnectionsPerIP)
 }
 
 // FilesConfig caps how many files a single client may publish to this server.
@@ -176,10 +192,27 @@ type UDPConfig struct {
 	PortGossip uint16 `yaml:"portGossip"`
 	GetSources bool   `yaml:"getSources"`
 	GetFiles   bool   `yaml:"getFiles"`
-	// ServerKey is a server-wide secret seed, not the key sent to clients: each
-	// client's UDP obfuscation key is derived from it plus the client's IP
-	// (ed2k.deriveUDPKey). See docs/server-udp-crypt-ping.md.
+	// ServerKey is a legacy server-wide secret seed, not the key sent to clients: each
+	// client's UDP obfuscation key is derived from a secret plus the client's IP
+	// (ed2k.deriveUDPKey). Left unset (0), a 128-bit secret is generated on first start
+	// and kept at data/udp.secret; set, these 32 bits are used instead, which keeps the
+	// keys clients already hold but is brute-forceable. See docs/server-udp-crypt-ping.md.
 	ServerKey uint32 `yaml:"serverKey"`
+	// RateLimitPerIPPerMinute caps the UDP searches and source requests one address
+	// (an IPv6 /64) may make per minute; excess datagrams are dropped unanswered.
+	// Status pings are not counted. A pointer so an explicit 0 (off) differs from
+	// absent (DefaultUDPRateLimitPerIPPerMinute).
+	RateLimitPerIPPerMinute *int `yaml:"rateLimitPerIPPerMinute"`
+}
+
+// DefaultUDPRateLimitPerIPPerMinute leaves a real client plenty: eMule sends one
+// global search per server and at most one OP_GLOBGETSOURCES per server per
+// minute or so (DownloadQueue.cpp).
+const DefaultUDPRateLimitPerIPPerMinute = 120
+
+// RateLimitPerIPPerMinuteOrDefault resolves udp.rateLimitPerIPPerMinute; 0 is off.
+func (c UDPConfig) RateLimitPerIPPerMinuteOrDefault() int {
+	return intOrDefault(c.RateLimitPerIPPerMinute, DefaultUDPRateLimitPerIPPerMinute)
 }
 
 type NATConfig struct {
@@ -253,10 +286,16 @@ type AdminConfig struct {
 	Port     uint16 `yaml:"port"`
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
+	// CheckUpdates lets the server look up the latest published release on GitHub once
+	// a day so the dashboard can link to a newer version. Defaults on.
+	CheckUpdates *bool `yaml:"checkUpdates"`
 }
 
 // EnabledOrDefault reports whether the admin dashboard is served, defaulting to true.
 func (c AdminConfig) EnabledOrDefault() bool { return boolOrDefault(c.Enabled, true) }
+
+// CheckUpdatesOrDefault reports whether the daily release check runs, defaulting to true.
+func (c AdminConfig) CheckUpdatesOrDefault() bool { return boolOrDefault(c.CheckUpdates, true) }
 
 // GossipConfig controls server-to-server peer exchange — the Lugdunum
 // OP_SERVER_LIST_REQ/RES handshake. When enabled the server registers itself with
@@ -621,6 +660,9 @@ func setDefaults(cfg *Config) error {
 	if cfg.TCP.PortObfuscated == 0 {
 		cfg.TCP.PortObfuscated = 5565
 	}
+	if cfg.TCP.LoginTimeout <= 0 {
+		cfg.TCP.LoginTimeout = 60
+	}
 	if cfg.TCP.DisconnectTimeout <= 0 {
 		cfg.TCP.DisconnectTimeout = 3600
 	}
@@ -634,6 +676,10 @@ func setDefaults(cfg *Config) error {
 	// is unreachable and clients fall back to the plaintext stat. See
 	// docs/server-udp-crypt-ping.md.
 	if cfg.UDP.PortObfuscated == 0 {
+		// uint16: tcp.port 65524 would wrap the derived port to 0, 65530 to 6.
+		if cfg.TCP.Port > 65535-12 {
+			return fmt.Errorf("tcp.port %d leaves no room for the obfuscated UDP port at tcp.port+12; set udp.portObfuscated", cfg.TCP.Port)
+		}
 		cfg.UDP.PortObfuscated = cfg.TCP.Port + 12
 	}
 	// The obfuscated server-to-server channel shares the tcp+12 socket above, and tcp+12
@@ -800,6 +846,9 @@ func (c Config) ServerMetPath() string { return ResolveDataPath(c.Gossip.ServerM
 
 // StorageSnapshotPath is the resolved location of the memory-engine snapshot.
 func (c Config) StorageSnapshotPath() string { return ResolveDataPath(c.Storage.Snapshot.File) }
+
+// UDPSecretPath is where the generated server-UDP secret is kept (see udp.serverKey).
+func (c Config) UDPSecretPath() string { return ResolveDataPath(filepath.Join(DataDir, "udp.secret")) }
 
 // GeoIPDatabasePath is the resolved location of the MaxMind country database.
 func (c Config) GeoIPDatabasePath() string { return ResolveDataPath(c.Filter.GeoIP.Database) }

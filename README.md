@@ -140,6 +140,8 @@ tcp:
   maxConnections: 1000000    # Max concurrent connections
   connectionTimeout: 2000    # Connect-stage timeout (ms)
   disconnectTimeout: 3600    # Idle disconnect timeout (s)
+  loginTimeout: 60           # Seconds from accept to a completed login, not extended by traffic
+  maxConnectionsPerIP: 32    # Concurrent connections per address (IPv6 /64), both TCP ports; 0 = off
   allowLowIDs: true          # Allow LowID clients
   minLowID: 1                # Minimum allocated LowID
   maxLowID: 16777215         # Maximum allocated LowID
@@ -150,7 +152,8 @@ udp:
   portGossip: 5567           # Obfuscated server-to-server source port / advertised portUDPOBF; shares the socket above (see docs/server-gossip.md)
   getSources: true           # Enable UDP source queries
   getFiles: true             # Enable UDP file queries
-  serverKey: 305419896       # Server-wide secret; per-client UDP obfuscation keys are derived from it + the client IP (see docs/server-udp-crypt-ping.md)
+  serverKey: 0               # 0: per-client UDP obfuscation keys derive from a generated 128-bit secret in data/udp.secret; non-zero: a legacy 32-bit secret (see docs/server-udp-crypt-ping.md)
+  rateLimitPerIPPerMinute: 120 # UDP searches + source requests per address (IPv6 /64) per minute; 0 = off
 
 files:                       # Per-client publish caps (see docs/server-client-communication.md)
   softLimit: 10000           # Past this the excess is ignored and the client is warned once; 0 = unlimited

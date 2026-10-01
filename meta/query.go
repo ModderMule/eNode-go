@@ -86,18 +86,28 @@ func (q *Query) walk(expr *storage.SearchExpr) {
 			q.FileType = expr.ValueString
 		}
 	case storage.SearchUInt32, storage.SearchUInt64:
-		switch expr.TagType {
-		case storage.SearchSizeGtTag:
-			// eD2K sends "greater than"; the daemon's min_size is inclusive.
-			if min := expr.ValueUint + 1; min > q.MinSize {
-				q.MinSize = min
+		tag, op, ok := storage.NumericConstraint(expr)
+		if !ok || tag != storage.SearchTagSize {
+			return
+		}
+		// The daemon's min_size and max_size are inclusive, so the strict forms are
+		// shifted by one. NotEqual cannot be expressed as a range and is left to the
+		// post-filter.
+		v := expr.ValueUint
+		switch op {
+		case storage.SearchOpGreater:
+			q.raiseMin(v + 1)
+		case storage.SearchOpGreaterEqual:
+			q.raiseMin(v)
+		case storage.SearchOpLess:
+			if v > 0 {
+				q.lowerMax(v - 1)
 			}
-		case storage.SearchSizeLtTag:
-			if expr.ValueUint > 0 {
-				if max := expr.ValueUint - 1; q.MaxSize == 0 || max < q.MaxSize {
-					q.MaxSize = max
-				}
-			}
+		case storage.SearchOpLessEqual:
+			q.lowerMax(v)
+		case storage.SearchOpEqual:
+			q.raiseMin(v)
+			q.lowerMax(v)
 		}
 	case storage.SearchAnd:
 		q.walk(expr.Left)
@@ -168,4 +178,19 @@ func sortedLower(in []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// raiseMin tightens the inclusive lower size bound to min.
+func (q *Query) raiseMin(min uint64) {
+	if min > q.MinSize {
+		q.MinSize = min
+	}
+}
+
+// lowerMax tightens the inclusive upper size bound to max. 0 means "no bound", so a
+// constraint of size <= 0 is dropped rather than read as unbounded.
+func (q *Query) lowerMax(max uint64) {
+	if max > 0 && (q.MaxSize == 0 || max < q.MaxSize) {
+		q.MaxSize = max
+	}
 }

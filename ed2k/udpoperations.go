@@ -28,8 +28,22 @@ type UDPConfig struct {
 	ObservedIP net.IP
 }
 
+// udpSearchDatagramBudget is the size several OP_GLOBSEARCHRES records are packed
+// up to in one datagram: under a typical path MTU, so a reply is not fragmented.
+const udpSearchDatagramBudget = 1300
+
+// udpSourceDatagramBudget caps a UDP source reply. eMule and eMuleQt read datagrams
+// into a 5000-byte buffer (UDPSocket.cpp), and 255 sources in the IPv6 forms exceed it.
+const udpSourceDatagramBudget = 4900
+
+// BuildGlobSearchResPackets encodes a UDP search answer. Each file is an
+// [E3 99 record], and consecutive records share a datagram up to
+// udpSearchDatagramBudget bytes: eMule and eMuleQt both read records until the
+// datagram ends (UDPSocket.cpp, SearchList.cpp). One datagram per file made each
+// result its own packet, so a ten-byte query was answered with a thousand.
 func BuildGlobSearchResPackets(files []storage.File) ([]*Buffer, error) {
-	out := make([]*Buffer, 0, len(files))
+	out := make([]*Buffer, 0, len(files)/4+1)
+	var pending []byte
 	for _, file := range files {
 		pack := []PacketItem{{Type: TypeUint8, Value: OpGlobSearchRes}}
 		AddFile(&pack, SharedFile{
@@ -53,7 +67,15 @@ func BuildGlobSearchResPackets(files []storage.File) ([]*Buffer, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, b)
+		record := b.Bytes()
+		if len(pending) > 0 && len(pending)+len(record) > udpSearchDatagramBudget {
+			out = append(out, NewBufferFromBytes(pending))
+			pending = nil
+		}
+		pending = append(pending, record...)
+	}
+	if len(pending) > 0 {
+		out = append(out, NewBufferFromBytes(pending))
 	}
 	return out, nil
 }
@@ -77,6 +99,19 @@ func BuildGlobFoundSourcesSentinelPacket(fileHash []byte, sources []storage.Sour
 func buildGlobFoundSources(fileHash []byte, sources []storage.Source, format SourceFormat) (*Buffer, error) {
 	// Single-byte count: truncate the slice, not the count. See capWireSources.
 	sources = capWireSources(sources)
+	// Sentinel sources carry 16 more bytes each; keep the datagram within what
+	// clients read (udpSourceDatagramBudget).
+	size := 1 + 1 + 16 + 1
+	for i, src := range sources {
+		size += 6
+		if format == FormatSentinel && sentinelForSource(src) {
+			size += 16
+		}
+		if size > udpSourceDatagramBudget {
+			sources = sources[:i]
+			break
+		}
+	}
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpGlobFoundSources},
 		{Type: TypeHash, Value: fileHash},

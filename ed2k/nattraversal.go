@@ -71,6 +71,21 @@ type NATTraversalHandler struct {
 	// A hook rather than a direct dependency because NATTraversalHandler must stay usable
 	// without a ServerRuntime — the natsim tools and most of its tests do exactly that.
 	sessionTouch func(hash [16]byte)
+	// sessionAddrs, when set, reports the addresses of the eD2K session logged in here
+	// under a user hash (local=false when there is none). REGISTER for such a hash is
+	// accepted only from those addresses; see registerAllowed.
+	sessionAddrs func(hash [16]byte) (v4, v6 net.IP, local bool)
+}
+
+// SetSessionAddrs registers the lookup registerAllowed binds a REGISTER to. Mirrors
+// SetSessionTouch: the runtime supplies it, and it is optional.
+func (h *NATTraversalHandler) SetSessionAddrs(fn func(hash [16]byte) (v4, v6 net.IP, local bool)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.sessionAddrs = fn
 }
 
 // SetSessionTouch registers the callback invoked when a PR_NAT keepalive identifies a
@@ -365,6 +380,11 @@ func (h *NATTraversalHandler) handleRegister(remote *net.UDPAddr, payload []byte
 	if isEx && len(payload) >= 17 {
 		version = payload[16]
 	}
+	if ok, reason := h.registerAllowed(hash, remote); !ok {
+		logging.Debugf("[module=nat] dir=recv, remote=%s, opcode=%s, hash=%x, declined=%s",
+			remote.String(), natOpcodeLabel(OpNatRegister), hash[:], reason)
+		return nil
+	}
 	h.upsert(hash, remote, version)
 
 	h.mu.RLock()
@@ -413,8 +433,10 @@ func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte) [
 	// robustness. upsert with version 0 keeps any version an earlier REGISTER_EX set.
 	src, srcFound := h.get(srcHash)
 	if !srcFound || familySlot(src, remote) == nil {
-		h.upsert(srcHash, remote, 0)
-		src, _ = h.get(srcHash)
+		if ok, _ := h.registerAllowed(srcHash, remote); ok {
+			h.upsert(srcHash, remote, 0)
+			src, _ = h.get(srcHash)
+		}
 	}
 	dst, dstOK := h.get(dstHash)
 	v6Enabled := h.isIPv6Enabled()
@@ -528,6 +550,54 @@ func (h *NATTraversalHandler) natFailed(remote *net.UDPAddr, targetHash [16]byte
 		to:     cloneUDPAddr(remote),
 		packet: encodeNATPacket(OpNatFailed, failed),
 	}
+}
+
+// registerAllowed decides whether remote may become hash's candidate. A user hash is
+// public (every OP_HELLO and source list carries it), so an unchecked REGISTER let
+// anyone point a victim's candidate at themselves: SYNC2 then sent the victim's peers
+// there, and the victim's own keepalives stopped matching while the attacker's kept
+// its stale TCP session alive.
+//
+//   - Logged in here: the REGISTER must come from that session's address — the IPv4
+//     exactly, or the IPv6's /64 (privacy addresses rotate within it). A session with
+//     no address in the datagram's family falls to the next rule.
+//   - Otherwise (server-independent rendezvous): a live candidate is not replaced
+//     from a different IP until it expires; the same IP may change port, as a NAT
+//     rebinding does.
+func (h *NATTraversalHandler) registerAllowed(hash [16]byte, remote *net.UDPAddr) (bool, string) {
+	h.mu.RLock()
+	lookup := h.sessionAddrs
+	h.mu.RUnlock()
+	if lookup != nil {
+		if v4, v6, local := lookup(hash); local {
+			switch {
+			case remoteIsIPv6(remote) && v6 != nil:
+				if !sameIPv6Prefix64(v6, remote.IP) {
+					return false, "not-session-address"
+				}
+				return true, ""
+			case !remoteIsIPv6(remote) && v4 != nil:
+				if !v4.Equal(remote.IP) {
+					return false, "not-session-address"
+				}
+				return true, ""
+			}
+		}
+	}
+	entry, ok := h.get(hash)
+	if !ok {
+		return true, ""
+	}
+	if c := familySlot(entry, remote); c != nil && time.Since(c.lastSeen) < h.ttl && !c.addr.IP.Equal(remote.IP) {
+		return false, "pinned-to-other-address"
+	}
+	return true, ""
+}
+
+// sameIPv6Prefix64 reports whether two IPv6 addresses share their /64.
+func sameIPv6Prefix64(a, b net.IP) bool {
+	a16, b16 := a.To16(), b.To16()
+	return a16 != nil && b16 != nil && a.To4() == nil && b.To4() == nil && net.IP(a16[:8]).Equal(net.IP(b16[:8]))
 }
 
 func (h *NATTraversalHandler) upsert(hash [16]byte, remote *net.UDPAddr, version uint8) {
