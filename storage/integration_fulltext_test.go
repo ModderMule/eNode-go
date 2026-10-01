@@ -23,6 +23,10 @@ var ftSeedNames = []string{
 	"superstar.mp3", "rockstar.avi",
 }
 
+// ftShortRunNames separate a short-run search from its indexable part: `x-men`
+// must find X-Men but not Men.in.Black, which only contains the `men` run.
+var ftShortRunNames = []string{"X-Men.avi", "Men.in.Black.avi"}
+
 type ftDialectParams struct {
 	repo, tag, dialect string
 	env                []string
@@ -125,6 +129,33 @@ func runFTDialectTest(t *testing.T, p ftDialectParams) {
 	// No-scan proof: the generated search rides the fulltext index, not a scan.
 	where, args := BuildSearchWhere(expr, p.dialect)
 	assertFulltextPlan(t, port, where, args)
+
+	// Short runs. Neither name contains "star", so the result above is unaffected.
+	for i, name := range ftShortRunNames {
+		f := File{
+			Hash: ftSeedHash(100 + i), Name: name, Size: uint64(2000 + i), Completed: 1,
+			SourceID: client.ID, SourcePort: client.Port,
+		}
+		engine.AddFile(f, client)
+		t.Logf("input: seeded %q", name)
+	}
+
+	// The `x` of `x-men` is too short to index, so it rides on the `men` MATCH
+	// as a residual LIKE: still indexed, and it still excludes Men.in.Black.
+	xmen := &SearchExpr{Kind: SearchText, Text: "x-men"}
+	got = fileNames(engine.FindBySearch(xmen))
+	t.Logf("output: dialect=%s search=%q -> %v", p.dialect, "x-men", got)
+	assertSameSet(t, "short-run result", got, []string{"X-Men.avi"})
+	where, args = BuildSearchWhere(xmen, p.dialect)
+	assertFulltextPlan(t, port, where, args)
+
+	// A search with no indexable run at all would be a table scan: dropped.
+	only := &SearchExpr{Kind: SearchText, Text: "x"}
+	dropped := engine.FindBySearch(only)
+	t.Logf("output: dialect=%s search=%q -> %v", p.dialect, "x", fileNames(dropped))
+	if len(dropped) != 0 {
+		t.Fatalf("search %q should be dropped, got %v", "x", fileNames(dropped))
+	}
 }
 
 // assertFulltextPlan opens a raw connection and EXPLAINs a representative select

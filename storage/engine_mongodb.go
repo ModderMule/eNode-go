@@ -816,6 +816,12 @@ func (m *MongoDBEngine) lookupSources(ctx context.Context, match bson.M) []Sourc
 // first batch of 101 documents, any sweep touching more files than that needed one.
 const mongoWholeResultBatch = math.MaxInt32
 
+// mongoMinTokenSize is the shortest name run a search may rely on (see
+// SearchNeedsScan). The hoisted $text stage is word-based, but every other text
+// leaf is a regex over the whole collection, and a 1-letter run is never worth
+// that scan. It matches the mysql/ngram cutoff.
+const mongoMinTokenSize = 2
+
 // fileKey identifies a file document by its (hash, size) pair, matching the
 // unique index.
 type fileKey struct {
@@ -1259,6 +1265,12 @@ func sourceLookupPipeline(match bson.M) mongo.Pipeline {
 // files document, which cannot happen (AddFile upserts the file before the source)
 // and matches the MySQL engine's INNER JOIN files.
 func mongoSearchPipeline(expr *SearchExpr) (mongo.Pipeline, bool) {
+	// The same guard as the MySQL engine: a search with no indexable keyword
+	// would end in a regex collection scan.
+	if SearchNeedsScan(expr, mongoMinTokenSize) {
+		logging.Debugf("mongodb search: no indexable keyword, dropping query")
+		return nil, false
+	}
 	textSearch, rest, hoisted := hoistTextLeaf(expr)
 
 	filterExpr := expr

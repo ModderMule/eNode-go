@@ -432,6 +432,12 @@ func (m *MySQLEngine) FindBySearch(expr *SearchExpr) []File {
 	if err := m.ensureDB(); err != nil {
 		return nil
 	}
+	// A search whose only name runs are too short for the full-text index would
+	// be a leading-wildcard scan of the whole sources table; drop it instead.
+	if SearchNeedsScan(expr, ftMinTokenSize(m.cfg.Dialect)) {
+		logging.Debugf("mysql search: no indexable keyword (dialect=%s), dropping query", m.cfg.Dialect)
+		return nil
+	}
 	where, args := BuildSearchWhere(expr, m.cfg.Dialect)
 	if where == "" {
 		return nil

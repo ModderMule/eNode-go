@@ -60,6 +60,24 @@ func TestFtLeafDialects(t *testing.T) {
 			[]any{`+"star" +"wars"`, "%star%", "%wars%"},
 		},
 		{
+			"mariadb short run is filtered by the indexed run",
+			DialectMariaDB, "x-men",
+			"(MATCH(s.name) AGAINST (? IN BOOLEAN MODE) AND s.name LIKE ?)",
+			[]any{"+men*", "%x%"},
+		},
+		{
+			"mysql short run keeps its LIKE beside the indexed run",
+			DialectMySQL, "x-men",
+			"(MATCH(s.name) AGAINST (? IN BOOLEAN MODE) AND s.name LIKE ? AND s.name LIKE ?)",
+			[]any{`+"men"`, "%x%", "%men%"},
+		},
+		{
+			"mariadb long punctuation-only term keeps its literal LIKE",
+			DialectMariaDB, "%%%",
+			"(s.name LIKE ?)",
+			[]any{`%\%\%\%%`},
+		},
+		{
 			"mysql single char is below ngram size, LIKE only",
 			DialectMySQL, "a",
 			"(s.name LIKE ?)",
@@ -103,5 +121,27 @@ func TestFtLeafEmptyDialectIsMariaDB(t *testing.T) {
 	t.Logf("output: sql=%q args=%v", sql, args)
 	if sql != "(MATCH(s.name) AGAINST (? IN BOOLEAN MODE))" || !reflect.DeepEqual(args, []any{"+star*"}) {
 		t.Fatalf("empty dialect did not behave as mariadb: sql=%q args=%v", sql, args)
+	}
+}
+
+// TestShortRunNotDropped pins that the `x` of `x-men` still constrains the match
+// instead of being dropped for being too short to index. Dropping it used to
+// widen `x-men` to any name containing `men`.
+func TestShortRunNotDropped(t *testing.T) {
+	expr := &SearchExpr{Kind: SearchText, Text: "x-men"}
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"X-Men.avi", true},
+		{"x.men.2000.mkv", true},
+		{"Men.in.Black.avi", false},
+	}
+	for _, tc := range cases {
+		got := MatchSearchExpr(expr, File{Name: tc.name})
+		t.Logf("input: search=%q name=%q output: match=%v", "x-men", tc.name, got)
+		if got != tc.want {
+			t.Fatalf("match(%q) = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

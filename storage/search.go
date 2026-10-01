@@ -229,6 +229,20 @@ func CompareSearchValue(op uint8, have, want uint64) bool {
 	}
 }
 
+// SearchNeedsScan reports whether running expr would need a leading-wildcard
+// name scan that no full-text lookup narrows first. minTok is the shortest run
+// the engine's index can look up (ftMinTokenSize for MySQL/MariaDB). The SQL and
+// MongoDB engines drop such a search rather than scan the whole table; the
+// memory engine still answers it, its trigram index makes the scan cheap.
+//
+// The check is made on the whole tree, not leaf by leaf: eMule sends `x men` as
+// AND(x, men), and the `x` LIKE is harmless there because it only filters the
+// rows the `men` MATCH already found.
+func SearchNeedsScan(expr *SearchExpr, minTok int) bool {
+	_, scan, _ := searchAnchor(expr, minTok)
+	return scan
+}
+
 // matchSearchExpr evaluates an expression against one file, returning whether
 // it matched and whether the node should be pruned (carried no constraint).
 // lowerName is file.Name lowercased, computed once by MatchSearchExpr.
@@ -441,7 +455,7 @@ func ftLeaf(terms []string, dialect string) whereNode {
 
 	for _, t := range terms {
 		for _, run := range alnumRuns(t) {
-			if len([]rune(run)) < minTok {
+			if !ftIndexable(run, minTok) {
 				continue
 			}
 			phrases = append(phrases, ftPhrase(run, dialect))
@@ -457,8 +471,11 @@ func ftLeaf(terms []string, dialect string) whereNode {
 		// gets an exact-substring LIKE. A mariadb run is fully expressed by its
 		// `+run*` prefix; only a run too short to index needs the LIKE fallback
 		// (and that fallback is the sole sanctioned leading-`%`).
+		// A term with no alphanumeric run is matched literally and never reached
+		// the MATCH, so it always needs its LIKE — whatever its length.
+		literal := len(alnumRuns(t)) == 0
 		for _, run := range termRuns(t) {
-			if dialect == DialectMySQL || len([]rune(run)) < minTok {
+			if dialect == DialectMySQL || literal || !ftIndexable(run, minTok) {
 				parts = append(parts, "s.name LIKE ?")
 				args = append(args, "%"+escapeLike(run)+"%")
 			}
@@ -564,4 +581,99 @@ func mediaStringField(tagType uint32) (string, bool) {
 // title constraint is a substring match — a user types part of a name, not all of it.
 func containsFold(s, needle string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(needle))
+}
+
+// ftIndexable reports whether a run is long enough for the full-text index to
+// look it up. ftLeaf and searchAnchor both use it, so the SQL builder and the
+// scan guard can never disagree about which runs are indexed.
+func ftIndexable(run string, minTok int) bool {
+	return len([]rune(run)) >= minTok
+}
+
+// hasIndexableRun reports whether any term has a run the index can look up.
+func hasIndexableRun(terms []string, minTok int) bool {
+	for _, t := range terms {
+		for _, run := range alnumRuns(t) {
+			if ftIndexable(run, minTok) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// searchAnchor classifies a node for SearchNeedsScan:
+//
+//	anchored — every row the node matches is reached through a full-text lookup.
+//	scan     — the node needs a leading-wildcard name scan over rows nothing
+//	           else has narrowed.
+//	prune    — the node carries no constraint and is removed from the tree,
+//	           exactly as combineWhereNodes removes it.
+//
+// Non-name leaves (type, ext, codec, numeric, artist/album/title) are neutral:
+// neither anchored nor scanning, so their existing behaviour is unchanged.
+func searchAnchor(expr *SearchExpr, minTok int) (anchored, scan, prune bool) {
+	if expr == nil {
+		return false, false, true
+	}
+	switch expr.Kind {
+	case SearchText:
+		terms := splitTerms(expr.Text)
+		if len(terms) == 0 {
+			// A contradiction matches nothing and so never scans.
+			return true, false, false
+		}
+		if hasIndexableRun(terms, minTok) {
+			return true, false, false
+		}
+		return false, true, false
+	case SearchString:
+		if expr.TagType == searchTypeText {
+			return searchAnchor(&SearchExpr{Kind: SearchText, Text: expr.ValueString}, minTok)
+		}
+		switch expr.TagType {
+		case searchTypeFileType, searchTypeExt, searchTypeCodec:
+			return false, false, false
+		}
+		if _, ok := mediaStringField(expr.TagType); ok {
+			return false, false, false
+		}
+		return false, false, true
+	case SearchUInt32, SearchUInt64:
+		tag, _, ok := NumericConstraint(expr)
+		if !ok {
+			return false, false, true
+		}
+		if _, ok := sqlNumericColumn(tag); !ok {
+			return false, false, true
+		}
+		return false, false, false
+	case SearchAnd, SearchOr, SearchAndNot:
+		la, ls, lp := searchAnchor(expr.Left, minTok)
+		ra, rs, rp := searchAnchor(expr.Right, minTok)
+		if expr.Kind == SearchAndNot {
+			// Only the positive side narrows; the negated side is evaluated on
+			// whatever rows the left side produced.
+			if rp {
+				return la, ls, lp
+			}
+			if lp {
+				return false, false, true
+			}
+			return la, !la && (ls || rs), false
+		}
+		if lp {
+			return ra, rs, rp
+		}
+		if rp {
+			return la, ls, false
+		}
+		if expr.Kind == SearchOr {
+			return la && ra, ls || rs, false
+		}
+		anchored = la || ra
+		return anchored, !anchored && (ls || rs), false
+	default:
+		return false, false, true
+	}
 }
