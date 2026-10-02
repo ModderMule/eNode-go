@@ -21,6 +21,12 @@ set -euo pipefail
 # a runtime file the binary reads from disk (not go:embed'ed), such as
 # misc/enode.sql, must be copied there in all three workflows.
 #
+# scripts/update.sh, the operators' self-updater, is copied into every bundle by
+# those same Bundle steps, and linux.yml alone also attaches it as a standalone
+# asset (one uploader, so the three runs cannot race on the name). update.sh
+# resolves releases/latest, which ignores drafts: installs only see a release
+# once its draft is published.
+#
 # There is no combined SHA256SUMS.txt for the same reason: three independent
 # workflows cannot append to one file without racing, so each ships its own.
 #
@@ -133,6 +139,7 @@ echo "The tag push starts .github/workflows/{linux,macos,windows}.yml; each"
 echo "attaches its bundle and .sha256 to a DRAFT release for ${NEW}."
 echo
 echo "Finish with: write the notes on the draft, then publish it."
+echo "Installs running update.sh only see ${NEW} once the draft is published."
 
 # --- where to watch ---------------------------------------------------------
 # The sed strips any credentials embedded in the remote URL before printing it.

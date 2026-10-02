@@ -59,6 +59,9 @@ jobs:
         run: |
           OUT="dist/enode-${APP_VERSION}-macos-arm64"
           cp enode.config.yaml README.md MIT-LICENSE.txt "$OUT/"
+          # update.sh rides along so an install can update itself in place.
+          cp scripts/update.sh "$OUT/"
+          chmod +x "$OUT/update.sh"
           # misc/enode.sql is the MySQL DDL applied on first connect; the default
           # storage.mysql.schemaFile is relative to the working directory, so it
           # must sit at misc/ next to the binary.

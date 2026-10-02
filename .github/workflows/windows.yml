@@ -60,7 +60,8 @@ jobs:
         shell: pwsh
         run: |
           $out = "dist/enode-$env:APP_VERSION-win64"
-          Copy-Item enode.config.yaml,README.md,MIT-LICENSE.txt $out
+          # update.sh rides along so an install can update itself in place (Git Bash).
+          Copy-Item enode.config.yaml,README.md,MIT-LICENSE.txt,scripts/update.sh $out
           # misc/enode.sql is the MySQL DDL applied on first connect; the default
           # storage.mysql.schemaFile is relative to the working directory, so it
           # must sit at misc/ next to the binary.

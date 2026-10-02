@@ -239,6 +239,26 @@ storage:
     database: enode
 ```
 
+## Install & Update
+
+Release bundles for Linux (amd64), macOS (arm64) and Windows (amd64) are on the
+[releases page](https://github.com/ModderMule/eNode-go/releases). Each bundle contains
+`update.sh`, which installs the latest release in place. To bootstrap a new install
+directory, or to update an existing one:
+
+```bash
+curl -fLO https://github.com/ModderMule/eNode-go/releases/latest/download/update.sh
+bash update.sh            # or: bash update.sh -daemon
+```
+
+The script detects the OS and architecture (Windows needs Git Bash) and exits with an
+error on any platform without a release build. It downloads the matching bundle,
+checks its `.sha256` and installs into its own directory, then starts `enode`
+(`-daemon` starts it in the background). If `enode.config.yaml` already exists, it is
+kept; the release copy is written as `enode.config.yaml.new`. Stop a running `enode`
+before you update on Windows. `ENODE_VERSION=vX.Y.Z` installs a specific tag, and
+`ENODE_REPO` points the script at a fork.
+
 ## Build & Test
 
 The torrent/Usenet contract module is a git submodule, so clone with
