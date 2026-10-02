@@ -202,20 +202,9 @@ storage:
 
 ## 安装与更新
 
-Linux（amd64）、macOS（arm64）和 Windows（amd64）的发布包见
-[releases 页面](https://github.com/ModderMule/eNode-go/releases)。每个发布包都附带
-`update.sh`，可原地安装最新版本。初始化新的安装目录或更新已有目录：
-
-```bash
-curl -fLO https://github.com/ModderMule/eNode-go/releases/latest/download/update.sh
-bash update.sh            # 或：bash update.sh -daemon
-```
-
-脚本会自动检测操作系统和架构（Windows 需使用 Git Bash），没有对应发布构建的平台会直接报错退出。
-它会下载匹配的发布包，校验 `.sha256`，安装到脚本所在目录，然后启动 `enode`
-（加 `-daemon` 则在后台运行）。已存在的 `enode.config.yaml` 会被保留，发布包中的版本另存为
-`enode.config.yaml.new`。在 Windows 上更新前请先停止正在运行的 `enode`。
-`ENODE_VERSION=vX.Y.Z` 可安装指定版本，`ENODE_REPO` 可指向分叉仓库。
+将 [`update.sh`](https://github.com/ModderMule/eNode-go/releases/latest/download/update.sh)
+下载到一个空目录并运行 `bash update.sh`（加 `-daemon` 则在后台启动）。
+它会为当前平台安装最新版本，之后再次运行即可更新。
 
 ## 构建与测试
 
