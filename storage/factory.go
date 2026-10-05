@@ -28,6 +28,12 @@ type Engine interface {
 	AddFiles([]File, ClientInfo)
 	GetSources([]byte, uint64) []Source
 	GetSourcesByHash([]byte) []Source
+	// SharedFiles returns the files with one of the hashes that an online client
+	// offers now, each with its name, size and source counts. A hash held at
+	// two sizes comes back twice, and one nobody online offers not at all. It is
+	// one lookup for the whole list, for a caller with a page of hashes to ask
+	// about.
+	SharedFiles(hashes [][]byte) []File
 	FindByNameContains(string) []File
 	FindBySearch(*SearchExpr) []File
 	ServersCount() int

@@ -155,6 +155,16 @@ func WriteToUDPFrom(conn UDPReplyConn, b []byte, addr *net.UDPAddr, src net.IP) 
 	return conn.WriteToUDP(b, addr)
 }
 
+// NewUDPSourceConn wraps a listener for sends this server initiates rather than
+// replies to (the gossip loop), so their IPv6 source can be pinned the same way a
+// reply's is. A nil listener yields a nil conn.
+func NewUDPSourceConn(conn *net.UDPConn) UDPReplyConn {
+	if conn == nil {
+		return nil
+	}
+	return newUDPReplyConn(conn, nil)
+}
+
 // udpPoolSize resolves the worker and queue sizes, defaulting the worker count
 // from the CPU count. The work is largely storage I/O rather than CPU, so a
 // small multiple of NumCPU keeps the database busy without unbounded fan-out.

@@ -457,3 +457,150 @@ func TestRoundWithoutSelfIPv4SkipsRegistration(t *testing.T) {
 		t.Error("the bootstrap ping must still be sent so the peer can learn of us")
 	}
 }
+
+// pinWriter is a captureWriter that also accepts a pinned source, recording which
+// source each frame asked for. failPin makes the pinned send fail, as the kernel does
+// for an address that is not assigned locally.
+type pinWriter struct {
+	captureWriter
+	pinned  []net.IP
+	failPin bool
+}
+
+func (c *pinWriter) writeFrom(b []byte, addr *net.UDPAddr, src net.IP) (int, error) {
+	if c.failPin {
+		return 0, fmt.Errorf("can't assign requested address")
+	}
+	c.mu.Lock()
+	c.pinned = append(c.pinned, append(net.IP(nil), src...))
+	c.mu.Unlock()
+	return c.captureWriter.WriteToUDP(b, addr)
+}
+
+// TestGossipSendsPinIPv6SourceToSelfIPv6 covers the source address of frames the loop
+// initiates: an IPv6 peer is sent to from SelfIPv6, an IPv4 peer is left to the kernel,
+// and a SelfIPv6 that is not on a local interface, or that the kernel refuses, falls
+// back to an unpinned send instead of losing the frame.
+func TestGossipSendsPinIPv6SourceToSelfIPv6(t *testing.T) {
+	self6 := net.ParseIP("2001:db8::1")
+	cases := []struct {
+		name       string
+		self6      net.IP
+		peer       string
+		unassigned bool
+		failPin    bool
+		wantPinned bool
+	}{
+		{name: "ipv6 peer", self6: self6, peer: "2001:db8:ffff::5", wantPinned: true},
+		{name: "ipv4 peer", self6: self6, peer: "203.0.113.5"},
+		{name: "no SelfIPv6", peer: "2001:db8:ffff::5"},
+		{name: "SelfIPv6 not assigned", self6: self6, peer: "2001:db8:ffff::5", unassigned: true},
+		{name: "pin refused", self6: self6, peer: "2001:db8:ffff::5", failPin: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			main, gossip := &pinWriter{failPin: tc.failPin}, &pinWriter{failPin: tc.failPin}
+			g := NewGossipHandler(GossipConfig{
+				SelfIPv4: net.ParseIP("198.51.100.1"), SelfIPv6: tc.self6,
+				SelfPort: 5555, MaxServers: 10, MaxFailures: 5, AllowPrivatePeers: true,
+			}, []PeerAddr{{IP: net.ParseIP(tc.peer), Port: 4661}})
+			g.pin.addrs = func() ([]net.Addr, error) {
+				if tc.unassigned {
+					return nil, nil
+				}
+				return []net.Addr{&net.IPNet{IP: self6, Mask: net.CIDRMask(64, 128)}}, nil
+			}
+			g.RunRound(GossipClientConfig{
+				Main: main, Gossip: gossip, MainPort: 5559, GossipPort: 5569, Interval: time.Hour,
+			})
+
+			sent := len(main.frames()) + len(gossip.frames())
+			pinned := append(append([]net.IP(nil), main.pinned...), gossip.pinned...)
+			t.Logf("input: SelfIPv6=%v peer=%s unassigned=%t failPin=%t", tc.self6, tc.peer, tc.unassigned, tc.failPin)
+			t.Logf("output: frames sent=%d pinned sources=%v", sent, pinned)
+
+			if sent == 0 {
+				t.Fatal("the round sent nothing")
+			}
+			if !tc.wantPinned {
+				if len(pinned) != 0 {
+					t.Errorf("no frame should be pinned, got sources %v", pinned)
+				}
+				return
+			}
+			if len(pinned) != sent {
+				t.Errorf("every frame should be pinned: %d of %d were", len(pinned), sent)
+			}
+			for _, src := range pinned {
+				if !src.Equal(self6) {
+					t.Errorf("pinned to %s, want %s", src, self6)
+				}
+			}
+		})
+	}
+}
+
+// TestGossipSendsLeaveFromSelfIPv6OnRealSocket needs two public IPv6 addresses on this
+// host. A peer listening on address A is contacted from a wildcard listener. Unpinned,
+// the kernel would send from A (RFC 6724 rule 1 prefers the destination itself as
+// source), so a frame arriving from B proves the pinning; an unassigned SelfIPv6 must
+// still deliver the frame, from the kernel's choice.
+func TestGossipSendsLeaveFromSelfIPv6OnRealSocket(t *testing.T) {
+	var public []net.IP
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if ipNet, ok := a.(*net.IPNet); ok && IsPublicIPv6(ipNet.IP) {
+				public = append(public, ipNet.IP)
+			}
+		}
+	}
+	if len(public) < 2 {
+		t.Skipf("needs two public IPv6 addresses, host has %d", len(public))
+	}
+	peerIP, selfIP := public[0], public[1]
+
+	cases := []struct {
+		name     string
+		self6    net.IP
+		wantFrom net.IP
+	}{
+		{name: "assigned SelfIPv6", self6: selfIP, wantFrom: selfIP},
+		{name: "unassigned SelfIPv6 falls back", self6: net.ParseIP("2001:db8::1"), wantFrom: peerIP},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			peer, err := net.ListenUDP("udp6", &net.UDPAddr{IP: peerIP})
+			if err != nil {
+				t.Fatalf("bind peer to %s: %v", peerIP, err)
+			}
+			defer peer.Close()
+			listener, err := net.ListenUDP("udp", &net.UDPAddr{})
+			if err != nil {
+				t.Fatalf("bind listener: %v", err)
+			}
+			defer listener.Close()
+
+			// The bootstrap ping goes to the peer's eD2K port + 12, so that is where the
+			// peer socket has to sit.
+			peerPort := uint16(peer.LocalAddr().(*net.UDPAddr).Port) - peerObfPingOffset
+			g := NewGossipHandler(GossipConfig{
+				SelfIPv6: tc.self6, SelfPort: 5555, MaxServers: 10, MaxFailures: 5,
+			}, []PeerAddr{{IP: peerIP, Port: peerPort}})
+			g.RunRound(GossipClientConfig{
+				Gossip: NewUDPSourceConn(listener), GossipPort: 5569, Interval: time.Hour,
+			})
+
+			_ = peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+			buf := make([]byte, 64)
+			n, from, err := peer.ReadFromUDP(buf)
+			if err != nil {
+				t.Fatalf("no frame reached the peer: %v", err)
+			}
+			t.Logf("input: SelfIPv6=%s peer=%s", tc.self6, peer.LocalAddr())
+			t.Logf("output: %d byte frame from %s", n, from)
+			if !from.IP.Equal(tc.wantFrom) {
+				t.Errorf("frame came from %s, want %s", from.IP, tc.wantFrom)
+			}
+		})
+	}
+}

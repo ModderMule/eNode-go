@@ -8,6 +8,7 @@ import (
 
 	"enode/internal/ratelimit"
 	"enode/meta"
+	"enode/storage"
 
 	"connectrpc.com/connect/v2"
 	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
@@ -26,6 +27,8 @@ const (
 const (
 	defaultSearchLimit = 50
 	maxQueryBytes      = 256
+	// ed2kHashLen is the width of an MD4, which is what identifies an eD2K entry.
+	ed2kHashLen = 16
 )
 
 // CatalogSource answers MetaApi.Search from the catalogue daemons. *meta.Searcher is
@@ -35,9 +38,19 @@ type CatalogSource interface {
 	CatalogNetworks() []string
 }
 
+// OwnFiles answers which eD2K files the server's own users share now. A
+// storage.Engine is one.
+type OwnFiles interface {
+	SharedFiles(hashes [][]byte) []storage.File
+}
+
 // SearchConfig turns MetaApi.Search on.
 type SearchConfig struct {
 	Catalog CatalogSource
+	// OwnFiles is the server's file store. With it, a Kad row for a file a user
+	// shares here is answered with the server's name and source counts; without
+	// it, rows go out as the daemon sent them.
+	OwnFiles OwnFiles
 	// RequireAccount asks for an active account; it only applies with accounts on.
 	RequireAccount bool
 	// MaxLimit caps releases per page; Window is the deepest release reachable.
@@ -137,6 +150,8 @@ func (c *catalogSearch) run(ctx context.Context, req *metav1.SearchRequest) (*me
 	if failed == len(streams) && len(page) == 0 {
 		return nil, &FetchError{Code: connect.CodeUnavailable, MsgCode: CodeSearchUnavailable, cause: streams[0].err}
 	}
+
+	c.ownFilesWin(page)
 
 	resp := &metav1.SearchResponse{Window: uint32(c.cfg.Window)}
 	resp.Total, resp.TotalExact = total(streams)
@@ -355,6 +370,76 @@ func total(streams []*releaseStream) (sum uint64, exact bool) {
 		exact = exact && first.TotalExact
 	}
 	return sum, exact
+}
+
+// ownFilesWin is the eD2K search's "the server's own file wins" for the API: an
+// eD2K entry for a file a user shares on this server is answered with the
+// server's name and source counts. The eD2K search drops the Kad row because its
+// own row is in the same answer. This search has no row of the server's to send
+// instead, so the entry stays where it is and says what the server knows.
+//
+// It runs on the page, after the catalogue cache: what is answered follows the
+// file store as it is now, and one lookup covers the page. The entries are the
+// cache's, shared with every other search of the same words, so a changed one is
+// a copy. The same hash at another size is another file and is left alone.
+func (c *catalogSearch) ownFilesWin(page []meta.Release) {
+	if c.cfg.OwnFiles == nil {
+		return
+	}
+	var hashes [][]byte
+	for _, release := range page {
+		for _, entry := range release {
+			if hash := ed2kHash(entry); hash != nil {
+				hashes = append(hashes, hash)
+			}
+		}
+	}
+	if len(hashes) == 0 {
+		return
+	}
+	type fileKey struct {
+		hash string
+		size uint64
+	}
+	own := make(map[fileKey]storage.File)
+	for _, f := range c.cfg.OwnFiles.SharedFiles(hashes) {
+		own[fileKey{string(f.Hash), f.Size}] = f
+	}
+	if len(own) == 0 {
+		return
+	}
+	for i, release := range page {
+		var changed meta.Release
+		for j, entry := range release {
+			f, ok := own[fileKey{string(ed2kHash(entry)), entry.GetSize()}]
+			if !ok {
+				continue
+			}
+			if changed == nil {
+				changed = slices.Clone(release)
+			}
+			mine := proto.Clone(entry).(*metav1.MetaEntry)
+			mine.Name, mine.Peers, mine.Seeders = f.Name, f.Sources, f.Completed
+			changed[j] = mine
+		}
+		if changed != nil {
+			page[i] = changed
+		}
+	}
+}
+
+// ed2kHash is the MD4 of an eD2K entry, and nil for any other kind.
+func ed2kHash(entry *metav1.MetaEntry) []byte {
+	if entry.GetKind() != metav1.MetaKind_META_KIND_ED2K {
+		return nil
+	}
+	if id := entry.GetIdentity(); len(id) == ed2kHashLen {
+		return id
+	}
+	if hash := entry.GetMetaHash(); len(hash) == ed2kHashLen {
+		return hash
+	}
+	return nil
 }
 
 func networkSelected(want metav1.MetaNetwork, network string) bool {

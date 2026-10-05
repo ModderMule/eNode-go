@@ -390,6 +390,46 @@ func nullableIPv6(b []byte) any {
 	return b
 }
 
+func (m *MySQLEngine) SharedFiles(hashes [][]byte) []File {
+	if len(hashes) == 0 {
+		return nil
+	}
+	if err := m.ensureDB(); err != nil {
+		return nil
+	}
+	args := make([]any, len(hashes))
+	for i, hash := range hashes {
+		args[i] = hash
+	}
+	// On hash alone, which KEY hash serves (see the lookup in addFilesChunk). The
+	// join is what makes it "shared now": files.sources counts the sources of
+	// clients that have gone too, until the cleanup sweep takes them. Every f.*
+	// column is in the GROUP BY so that neither dialect has to be told they depend
+	// on f.id, and MIN picks one name where the dialects have no common "any".
+	rows, err := m.db.Query(
+		`SELECT MIN(s.name), f.completed, f.sources, f.hash, f.size, f.source_id, f.source_port
+		 FROM files f
+		 INNER JOIN sources s ON s.id_file = f.id
+		 INNER JOIN clients c ON c.id = s.id_client
+		 WHERE f.hash IN (`+sqlPlaceholders(len(args))+`) AND s.online = 1 AND c.online = 1
+		 GROUP BY f.id, f.completed, f.sources, f.hash, f.size, f.source_id, f.source_port`,
+		args...,
+	)
+	if err != nil {
+		logging.Errorf("mysql shared files lookup of %d hash(es) failed: %v", len(hashes), err)
+		return nil
+	}
+	defer rows.Close()
+	var out []File
+	for rows.Next() {
+		var f File
+		if err := rows.Scan(&f.Name, &f.Completed, &f.Sources, &f.Hash, &f.Size, &f.SourceID, &f.SourcePort); err == nil {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 func (m *MySQLEngine) FindByNameContains(term string) []File {
 	if err := m.ensureDB(); err != nil {
 		return nil

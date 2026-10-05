@@ -413,7 +413,7 @@ func (c GeoIPConfig) HasCredentials() bool {
 // exactly as before. See docs/meta-search.md.
 type MetaSearchConfig struct {
 	// AdvertiseToLegacyClients sends torrent and Usenet rows to every client. When
-	// false, only a client that announced SRVCAP_METASEARCH (0x2000) at login, or a UDP
+	// false, only a client that announced SRVCAP_METASEARCH (0x10000) at login, or a UDP
 	// OP_GLOBSEARCHREQ3 carrying SRVCAP_UDP_METASEARCH (0x02), receives them. *bool,
 	// defaults on: a stock eMule shows the rows (the name prefix marks them) but can
 	// never download one. Kad rows are real eD2K files and go to every client either way.

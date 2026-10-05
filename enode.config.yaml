@@ -186,7 +186,7 @@ filter:
 # exactly as before. See docs/meta-search.md.
 metaSearch:
   # Send torrent and Usenet rows to every client. false limits them to clients that
-  # announced SRVCAP_METASEARCH (0x2000) at login, or a UDP OP_GLOBSEARCHREQ3 with
+  # announced SRVCAP_METASEARCH (0x10000) at login, or a UDP OP_GLOBSEARCHREQ3 with
   # flag 0x02. Kad rows are not affected.
   advertiseToLegacyClients: true
   # Live Search calls allowed in flight for UDP global searches. Past it a UDP
@@ -244,7 +244,7 @@ metaSearch:
     token: ""
     # Prepended to every filename, e.g. "[kad emule-qt.org] "; "" for none. eMuleQt
     # strips a leading "[kad ...] " bracket; other clients show and keep it.
-    namePrefix: "[kad] "
+    namePrefix: "[kad emule-qt.org] "
     liveSearch: true
     searchTimeoutMs: 1500
     udpSearchTimeoutMs: 800

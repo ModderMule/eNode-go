@@ -104,6 +104,7 @@ func buildMetaAPI(ctx context.Context, cfg config.Config, engine storage.Engine,
 		})
 		svcCfg.Search = &metaapi.SearchConfig{
 			Catalog:             searcher,
+			OwnFiles:            engine,
 			RequireAccount:      c.SearchRequiresAccount(),
 			MaxLimit:            s.MaxLimit,
 			Window:              s.Window,

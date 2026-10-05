@@ -145,7 +145,7 @@ When no slot is free, the search is answered from the feed and cache only.
 `metaSearch.advertiseToLegacyClients` defaults to **true**, so every client receives
 meta rows. When it is `false`, only these requesters do:
 
-- a TCP client whose login `CT_SERVER_FLAGS` includes `SRVCAP_METASEARCH` (`0x2000`);
+- a TCP client whose login `CT_SERVER_FLAGS` includes `SRVCAP_METASEARCH` (`0x10000`);
 - a UDP `OP_GLOBSEARCHREQ3` whose `CT_SERVER_UDPSEARCH_FLAGS` includes
   `SRVCAP_UDP_METASEARCH` (`0x02`).
 
@@ -334,7 +334,10 @@ search for a new term is therefore sparse and a later one fuller. With
 
 `MetaApi.Search` serves Kad rows too, as a third network beside torrent and Usenet
 (see [meta-api.md](meta-api.md#searching-the-catalogues)). There is no metafile to
-fetch for one: the client builds the eD2K link from the row.
+fetch for one: the client builds the eD2K link from the row. The server's own file
+wins there as well, in another form: the entry stays and takes the server's name and
+source counts (`ownFilesWin`), found by hash in the file store
+(`Engine.SharedFiles`).
 
 ## By design / deferred
 

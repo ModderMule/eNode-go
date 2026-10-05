@@ -30,6 +30,12 @@ type UDPWriter interface {
 	WriteToUDP(b []byte, addr *net.UDPAddr) (int, error)
 }
 
+// udpSourcePinner is a UDPWriter that can also choose the IPv6 source of a send. The
+// listeners wrapped by NewUDPSourceConn implement it; a test's capture writer need not.
+type udpSourcePinner interface {
+	writeFrom(b []byte, addr *net.UDPAddr, src net.IP) (int, error)
+}
+
 // GossipClientConfig wires the loop to its two sockets and its cadence.
 type GossipClientConfig struct {
 	// Main is the plaintext eD2K UDP listener (P+4). Phase 1 leaves from here so the
@@ -274,16 +280,11 @@ func (g *GossipHandler) sendPhase4(cfg GossipClientConfig, p PeerServer) {
 }
 
 // writeTo sends a plaintext frame.
-//
-// ToDo: gossip initiates these sends, so there is no arrival address to reply from and
-// an IPv6 frame leaves from the kernel's preferred source. On a multi-address host that
-// can differ from GossipConfig.SelfIPv6; pin it with WriteToUDPFrom once peers are
-// seen to key on the source.
 func (g *GossipHandler) writeTo(w UDPWriter, dst *net.UDPAddr, data []byte, what string, p PeerServer) {
 	if w == nil {
 		return
 	}
-	if _, err := w.WriteToUDP(data, dst); err != nil {
+	if err := g.sendFromSelf(w, dst, data); err != nil {
 		logging.Debugf("gossip: %s to %s failed: %v", what, dst, err)
 		return
 	}
@@ -321,4 +322,88 @@ func gossipDestPort(p PeerServer) uint16 {
 		return p.UDPPortObf
 	}
 	return p.Addr.Port + peerGossipOffset
+}
+
+// sendFromSelf writes a frame the gossip loop initiates, pinning an IPv6 one to
+// GossipConfig.SelfIPv6.
+//
+// Gossip starts these exchanges, so there is no arrival address to reply from and an
+// unpinned IPv6 frame leaves from the kernel's preferred source. On a multi-address
+// host that can differ from the address we advertise, and peers key on what they
+// observe: NoteRegistration lets the source IP win over the announced one, inbound
+// frames are matched by source IP alone, and the ServerKey a peer issues us is derived
+// from it.
+func (g *GossipHandler) sendFromSelf(w UDPWriter, dst *net.UDPAddr, data []byte) error {
+	if pin, ok := w.(udpSourcePinner); ok && dst != nil && nativeIPv6(dst.IP) != nil {
+		if src := g.pinnableSelfIPv6(); src != nil {
+			_, err := pin.writeFrom(data, dst, src)
+			if err == nil {
+				return nil
+			}
+			logging.Debugf("gossip: send from %s refused, using the kernel's source choice: %v", src, err)
+		}
+	}
+	_, err := w.WriteToUDP(data, dst)
+	return err
+}
+
+// gossipSourcePin remembers whether SelfIPv6 is assigned to a local interface.
+//
+// SelfIPv6 comes from dynIp6 resolution, so it need not be ours to send from (a
+// prefix-translating gateway, a stale config). Asking the kernel is not a usable test:
+// Linux refuses such a source, but macOS accepts the send and the frame never arrives —
+// measured. So the interface list decides, rechecked because addresses come and go.
+type gossipSourcePin struct {
+	mu      sync.Mutex
+	ip      string
+	usable  bool
+	checked time.Time
+	// addrs replaces net.InterfaceAddrs in tests.
+	addrs func() ([]net.Addr, error)
+}
+
+// pinRecheckEvery is how long an interface-list answer is trusted. Shorter than a
+// gossip round, so every round sees a fresh one.
+const pinRecheckEvery = time.Minute
+
+// pinnableSelfIPv6 returns SelfIPv6 when it can be used as a source, else nil.
+func (g *GossipHandler) pinnableSelfIPv6() net.IP {
+	src := nativeIPv6(g.Config().SelfIPv6)
+	if src == nil {
+		return nil
+	}
+	pin := &g.pin
+	pin.mu.Lock()
+	defer pin.mu.Unlock()
+	key := src.String()
+	if pin.ip != key || time.Since(pin.checked) >= pinRecheckEvery {
+		usable := pin.assigned(src)
+		// Logged on the change only, like parking.
+		if !usable && (pin.ip != key || pin.usable) {
+			logging.Warnf("gossip: advertised IPv6 %s is not assigned to a local interface, IPv6 frames use the kernel's source choice", src)
+		}
+		pin.ip, pin.usable, pin.checked = key, usable, time.Now()
+	}
+	if !pin.usable {
+		return nil
+	}
+	return src
+}
+
+// assigned reports whether ip is on a local interface.
+func (pin *gossipSourcePin) assigned(ip net.IP) bool {
+	list := pin.addrs
+	if list == nil {
+		list = net.InterfaceAddrs
+	}
+	addrs, err := list()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }

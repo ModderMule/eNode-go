@@ -23,7 +23,6 @@ to the pre-IPv6 server. IPv6 is entirely additive and opt-in.
 | `IPV6ST_PROBED` | `0x04` | `ST_IPV6_STATUS` bit: the verdict came from a real dial-back, not a trust default |
 | `SRV_TCPFLG_IPV6` | `0x00004000` | `OP_IDCHANGE` / `OP_SERVERIDENT` flags word |
 | `SRV_UDPFLG_IPV6` | `0x00004000` | `OP_GLOBSERVSTATRES` UDP flags word |
-| `SRVCAP_IPV6` (optional) | `0x1000` | `CT_SERVER_FLAGS` (0x20) login tag |
 | IPv6 source sentinel | ClientID `0xFFFFFFFF` | `OP_FOUNDSOURCES(_OBFU)`, `OP_GLOBFOUNDSOURCES` |
 | `OP_GETSOURCES_IPV6` | `0x24` | client→server, TCP |
 | `OP_FOUNDSOURCES_IPV6` | `0x25` | server→client, TCP |
@@ -87,9 +86,12 @@ Only send it for a **genuinely public** IPv6 (global unicast, not loopback,
 link-local `fe80::/10`, or ULA `fc00::/7`). The server validates and drops a
 non-public value, but still treats the tag's presence as the capability signal.
 
-Optionally also set `SRVCAP_IPV6 (0x1000)` in the `CT_SERVER_FLAGS (0x20)` login
-tag. This lets you announce "I speak the extension" even before you have a public
-IPv6 to put in `0xAE`. The server reads `CT_SERVER_FLAGS` as a uint32.
+Do **not** set a `CT_SERVER_FLAGS (0x20)` login bit for IPv6. Earlier revisions of
+this spec offered an optional `SRVCAP_IPV6 (0x1000)`; it is withdrawn. Lugdunum
+eserver reads login bit `0x1000` as support for its NAT callback, so a client that
+sets it is given an odd LowID, a longer `OP_IDCHANGE` and callback notices. This
+server never read the bit: the `CT_MOD_IP_V6` tag, or a session that arrived over
+IPv6, is the capability signal.
 
 > **Hard coordination rule.** Do **not** advertise v6 capability (connect over
 > IPv6, or send `CT_MOD_IP_V6`) unless your client also implements the sentinel

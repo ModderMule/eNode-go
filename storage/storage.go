@@ -367,6 +367,33 @@ func (m *MemoryEngine) GetSourcesByHash(fileHash []byte) []Source {
 	return capSources(m.sources[hashKey(fileHash)], 0)
 }
 
+func (m *MemoryEngine) SharedFiles(hashes [][]byte) []File {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []File
+	seen := make(map[string]struct{}, len(hashes))
+	for _, hash := range hashes {
+		// A source says which size it offered, and that is the only way from a
+		// bare hash to its file records: files is keyed by hash and size.
+		for _, s := range m.sources[hashKey(hash)] {
+			key := fileMapKey(hash, s.size)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			f, ok := m.fileByKey(key)
+			if !ok {
+				continue
+			}
+			m.liveFieldsLocked(&f)
+			if f.Sources > 0 {
+				out = append(out, f)
+			}
+		}
+	}
+	return out
+}
+
 func (m *MemoryEngine) FindByNameContains(term string) []File {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

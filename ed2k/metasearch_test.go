@@ -243,9 +243,10 @@ func TestMetaRowsGatedOnLoginCapability(t *testing.T) {
 }
 
 // TestLoginRecordsMetaCapability: the SrvCapMetaSearch bit of CT_SERVER_FLAGS is what
-// sets metaCapable, and its absence leaves it clear.
+// sets metaCapable, and its absence leaves it clear. 0x1000|0x2000 is what a NeoLoader
+// login carries (NAT traversal and IPv6), and must not be read as a meta request.
 func TestLoginRecordsMetaCapability(t *testing.T) {
-	for _, flags := range []uint32{0, SrvCapMetaSearch} {
+	for _, flags := range []uint32{0, SrvCapMetaSearch, 0x1000 | 0x2000} {
 		client, _ := searchPagingClient(t, 0)
 		client.metaCapable = false
 		items := loginItems(bytes.Repeat([]byte{0x6c}, 16), 0, 4662)

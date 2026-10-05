@@ -193,6 +193,9 @@ type GossipHandler struct {
 	// round counts outbound rounds, so every parkedRetryRounds-th one can include the
 	// parked peers.
 	round uint64
+
+	// pin caches whether SelfIPv6 can be used as a source; see sendFromSelf.
+	pin gossipSourcePin
 }
 
 // GossipStats is a snapshot of what gossip has done. Counters only ever increase.

@@ -340,9 +340,11 @@ const (
 	FlagUdpObfusc     uint32 = 0x0200
 	FlagTcpObfusc     uint32 = 0x0400
 	// FlagIPv6 advertises IPv6 support in the SRV_TCPFLG_* / SRV_UDPFLG_* word.
-	// No eMule tree defines any server flag >= 0x1000; the only occupants are
-	// ed2kNET's unofficial 0x1000/0x2000 (chacha20/aes256), so 0x4000 is the first
-	// clean bit. Clients ignore unknown bits, so this is display/verify metadata.
+	// No MFC eMule tree defines any server flag >= 0x1000, but two others do:
+	// Lugdunum eserver advertises 0x1000 for its NAT callback (its TCP word is
+	// 0x17f9), which NeoLoader reads along with 0x2000 for IPv6, and ed2kNET uses
+	// 0x1000/0x2000 unofficially (chacha20/aes256). 0x4000 is the first clean bit.
+	// Clients ignore unknown bits, so this is display/verify metadata.
 	FlagIPv6 uint32 = 0x4000
 	// FlagNatRendezvous advertises that this server offers server-independent
 	// (cross-server / serverless) PR_NAT hole-punch rendezvous — it will pair two
@@ -361,7 +363,10 @@ const (
 	// SrvCapUDPMetaSearch is the same request in OP_GLOBSEARCHREQ3's
 	// CT_SERVER_UDPSEARCH_FLAGS tag (0x0e, decoded under TagSearchTree's name).
 	// Both only matter when metaSearch.advertiseToLegacyClients is off.
-	SrvCapMetaSearch    uint32 = 0x2000
+	// The login bit has the same value as FlagMetaSearch. It was 0x2000 until
+	// 2026-10; 0x1000 and 0x2000 belong to Lugdunum's NAT callback and NeoLoader's
+	// IPv6 bit (docs/lugdunum-nat-callback.local.md), so neither is read here.
+	SrvCapMetaSearch    uint32 = 0x10000
 	SrvCapUDPMetaSearch uint32 = 0x02
 )
 

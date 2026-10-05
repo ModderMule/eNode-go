@@ -43,9 +43,14 @@ udp:
   serverKey: 305419896
 natTraversal:
   enabled: false
+# A free port, so the test does not collide with a dashboard (or a tunnel to one)
+# already holding the default 4560.
+admin:
+  bindIP: "127.0.0.1"
+  port: %d
 storage:
   engine: memory
-`, filepath.Join(dir, "enode.log"), tcpPort, tcpPort+1, udpPort, udpPort+1)
+`, filepath.Join(dir, "enode.log"), tcpPort, tcpPort+1, udpPort, udpPort+1, freePort(t))
 
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)

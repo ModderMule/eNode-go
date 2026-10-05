@@ -282,6 +282,35 @@ func (m *MongoDBEngine) getSourcesByFile(ctx context.Context, fileHash []byte, f
 	return m.lookupSources(ctx, bson.M{"file_hash": fileHash, "file_size": fileSize, "online": true})
 }
 
+func (m *MongoDBEngine) SharedFiles(hashes [][]byte) []File {
+	if len(hashes) == 0 {
+		return nil
+	}
+	if err := m.ensureDB(); err != nil {
+		return nil
+	}
+	in := make([]any, len(hashes))
+	for i, hash := range hashes {
+		in[i] = hash
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
+	defer cancel()
+	// From the sources, as the searches are: an online source is what makes a file
+	// shared now, and file_hash leads the {file_hash, file_size} index.
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{"file_hash": bson.M{"$in": in}, "online": true}}},
+		{{Key: "$group", Value: mongoSearchGroup(false, false)}},
+	}
+	pipeline = append(pipeline, mongoFileCounterStages()...)
+	cur, err := m.db.Collection("sources").Aggregate(ctx, pipeline)
+	if err != nil {
+		logging.Errorf("mongodb shared files lookup of %d hash(es) failed: %v", len(hashes), err)
+		return nil
+	}
+	defer cur.Close(ctx)
+	return decodeMongoSearchFiles(ctx, cur)
+}
+
 func (m *MongoDBEngine) FindByNameContains(term string) []File {
 	if err := m.ensureDB(); err != nil {
 		return nil

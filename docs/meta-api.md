@@ -193,9 +193,20 @@ ways:
   `file_index` 0, `file_count` 1.
 
 `seeders` is the complete sources and `peers` every source Kad reported. The name
-comes without the `metaSearch.kad.namePrefix` that the eD2K search adds. A file the
-eD2K server also holds can come back from both searches; the API does not merge
-them.
+comes without the `metaSearch.kad.namePrefix` that the eD2K search adds.
+
+**The server's own file wins.** When a user who is connected to this server shares a
+file with the same hash and size, the entry carries the server's `name`, and its own
+source counts as `peers` and `seeders`. Everything else is the Kad row's: the entry
+keeps its place, so paging and `total` do not change. The eD2K search drops the Kad
+row instead, because the server's own row is in the same answer; this search has no
+row of the server's to send in its place.
+
+- The check is one lookup in the file store for each page, made after the search
+  cache, so it follows who is connected now and not who was `ttlSeconds` ago.
+- The daemon sorted the row and applied `min_seeders` with Kad's figures. A
+  rewritten entry is where those put it.
+- The same hash shared at another size is a different file and changes nothing.
 
 The Kad daemon answers from its index and queues the words of a first page for a
 Kad lookup of its own, so the first search of a new term is sparse. That answer is

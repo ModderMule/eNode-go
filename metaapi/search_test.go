@@ -2,6 +2,7 @@ package metaapi
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"enode/meta"
+	"enode/storage"
 
 	"connectrpc.com/connect/v2"
 	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
@@ -565,5 +567,130 @@ func TestSearchKadOverConnectJSON(t *testing.T) {
 	t.Logf("input: POST %s; output: %d %+v err=%v", body, res.StatusCode, out, err)
 	if res.StatusCode != http.StatusOK || len(out.Entries) != 2 || out.Entries[0].Name != "k0" || out.Entries[1].Name != "k1" {
 		t.Fatalf("connect JSON kad search: %d %+v", res.StatusCode, out)
+	}
+}
+
+// fakeOwnFiles is the server's file store as ownFilesWin asks it: the files it is
+// told are shared, and how often it was asked.
+type fakeOwnFiles struct {
+	files []storage.File
+	asked [][][]byte
+}
+
+func (f *fakeOwnFiles) SharedFiles(hashes [][]byte) []storage.File {
+	f.asked = append(f.asked, hashes)
+	var out []storage.File
+	for _, file := range f.files {
+		for _, hash := range hashes {
+			if string(hash) == string(file.Hash) {
+				out = append(out, file)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// kadHash is the MD4 a Kad row named name stands for in these tests.
+func kadHash(name string) []byte {
+	sum := md5.Sum([]byte(name))
+	return sum[:]
+}
+
+// kadRows returns one-row eD2K releases as kademlia-crawler sends them: the file's
+// MD4 as both meta_hash and identity, peers the sources Kad reported and seeders the
+// complete ones.
+func kadRows(prefix string, n int) []meta.Release {
+	out := make([]meta.Release, n)
+	for i := range out {
+		name := fmt.Sprintf("%s%d", prefix, i)
+		hash := kadHash(name)
+		out[i] = meta.Release{{
+			Kind: metav1.MetaKind_META_KIND_ED2K, MetaHash: hash, Identity: hash,
+			Name: name, CatalogId: fmt.Sprintf("ed2k:%X", hash), Size: uint64(1000 + i), Peers: 40, Seeders: 4,
+		}}
+	}
+	return out
+}
+
+// describe lists a response's entries as name/peers/seeders.
+func describe(resp *metav1.SearchResponse) []string {
+	var out []string
+	for _, e := range resp.GetEntries() {
+		out = append(out, fmt.Sprintf("%s/%d/%d", e.GetName(), e.GetPeers(), e.GetSeeders()))
+	}
+	return out
+}
+
+// TestSearchAnswersWithTheServersOwnFile: a Kad row for a file a user shares on this
+// server comes back once, where it was, with the server's name and source counts. The
+// same hash at another size is another file, and a row nobody here shares is the
+// daemon's.
+func TestSearchAnswersWithTheServersOwnFile(t *testing.T) {
+	cat := newFakeCatalog()
+	cat.releases[networkTorrent] = releases("t", 2)
+	cat.releases[networkKad] = kadRows("k", 3)
+	own := &fakeOwnFiles{files: []storage.File{
+		{Hash: kadHash("k0"), Name: "own name.iso", Size: 1000, Sources: 2, Completed: 1},
+		{Hash: kadHash("k1"), Name: "another size.iso", Size: 9999, Sources: 7, Completed: 7},
+	}}
+	cfg := searchConfig(cat)
+	cfg.OwnFiles = own
+	svc := NewService(ServiceConfig{MaxMetafileBytes: 1 << 20, Search: cfg}, newTestFetcher(newFakeSource()), nil)
+
+	resp, err := svc.Search(context.Background(), &metav1.SearchRequest{Query: "x", Limit: 10})
+	got := fmt.Sprint(describe(resp))
+	t.Logf("input:  torrent t0 t1; Kad k0 k1 k2 with 40 sources, 4 complete; the server shares k0 at its size and k1's hash at another")
+	t.Logf("output: %s total=%d exact=%t next=%d err=%v; lookups=%d of %d hash(es)",
+		got, resp.GetTotal(), resp.GetTotalExact(), resp.GetNextOffset(), err, len(own.asked), len(own.asked[0]))
+
+	if want := "[t0/0/0 own name.iso/2/1 t1/0/0 k1/40/4 k2/40/4]"; err != nil || got != want {
+		t.Fatalf("got %s, want %s (err %v)", got, want, err)
+	}
+	if resp.GetTotal() != 5 || !resp.GetTotalExact() || resp.GetNextOffset() != 0 {
+		t.Fatalf("total %d exact %t next %d, want 5, exact, no next page: the row keeps its place",
+			resp.GetTotal(), resp.GetTotalExact(), resp.GetNextOffset())
+	}
+	if len(own.asked) != 1 || len(own.asked[0]) != 3 {
+		t.Fatalf("the file store was asked %d time(s), want once for the page's 3 eD2K hashes", len(own.asked))
+	}
+	entry := resp.GetEntries()[1]
+	if string(entry.GetMetaHash()) != string(kadHash("k0")) || entry.GetSize() != 1000 || entry.GetKind() != metav1.MetaKind_META_KIND_ED2K {
+		t.Fatalf("the rewritten entry lost what identifies it: %v", entry)
+	}
+
+	// The catalogue's rows are cached and shared: a search made once the user has
+	// left must see the Kad figures again.
+	own.files = nil
+	resp, err = svc.Search(context.Background(), &metav1.SearchRequest{Query: "x", Limit: 10})
+	got = fmt.Sprint(describe(resp))
+	t.Logf("input:  the same search with nothing shared any more")
+	t.Logf("output: %s err=%v", got, err)
+
+	if want := "[t0/0/0 k0/40/4 t1/0/0 k1/40/4 k2/40/4]"; err != nil || got != want {
+		t.Fatalf("got %s, want %s (err %v): the rewrite reached the shared rows", got, want, err)
+	}
+}
+
+// TestSearchAsksTheFileStoreOnlyAboutED2KRows: a page of torrent and Usenet rows has
+// nothing the server could hold, and costs no lookup.
+func TestSearchAsksTheFileStoreOnlyAboutED2KRows(t *testing.T) {
+	cat := newFakeCatalog()
+	cat.releases[networkTorrent] = releases("t", 2)
+	cat.releases[networkUsenet] = releases("u", 2)
+	own := &fakeOwnFiles{}
+	cfg := searchConfig(cat)
+	cfg.OwnFiles = own
+	svc := NewService(ServiceConfig{MaxMetafileBytes: 1 << 20, Search: cfg}, newTestFetcher(newFakeSource()), nil)
+
+	resp, err := svc.Search(context.Background(), &metav1.SearchRequest{Query: "x", Limit: 10})
+	t.Logf("input:  torrent t0 t1, Usenet u0 u1, no Kad network")
+	t.Logf("output: %v err=%v; lookups=%d", names(resp), err, len(own.asked))
+
+	if err != nil || len(resp.GetEntries()) != 4 {
+		t.Fatalf("got %v, err %v", names(resp), err)
+	}
+	if len(own.asked) != 0 {
+		t.Fatalf("the file store was asked %d time(s) about a page with no eD2K row", len(own.asked))
 	}
 }

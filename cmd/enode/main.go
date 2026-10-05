@@ -593,13 +593,20 @@ func startGossipLoops(
 	handler *ed2k.GossipHandler,
 	mainConn, gossipConn *net.UDPConn,
 ) func() {
-	stopClient := handler.StartGossipClient(ed2k.GossipClientConfig{
-		Main:       mainConn,
-		Gossip:     gossipConn,
+	clientCfg := ed2k.GossipClientConfig{
 		MainPort:   cfg.UDP.Port,
 		GossipPort: cfg.UDP.PortGossip,
 		Interval:   time.Duration(cfg.Gossip.IntervalSeconds) * time.Second,
-	})
+	}
+	// Wrapped so IPv6 frames leave from the advertised address; assigned only when
+	// bound, because a nil conn stored in the interface would no longer compare nil.
+	if conn := ed2k.NewUDPSourceConn(mainConn); conn != nil {
+		clientCfg.Main = conn
+	}
+	if conn := ed2k.NewUDPSourceConn(gossipConn); conn != nil {
+		clientCfg.Gossip = conn
+	}
+	stopClient := handler.StartGossipClient(clientCfg)
 
 	stopPersist := func() {}
 	if cfg.Gossip.PersistOrDefault() {
