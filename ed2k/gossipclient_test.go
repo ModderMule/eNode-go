@@ -347,7 +347,8 @@ func TestGossipDestPortFallsBackToPlus14(t *testing.T) {
 }
 
 // TestRoundSkipsParkedPeers guards the failure budget: a dead peer must stop consuming
-// a round's worth of datagrams once it has failed maxFailures times.
+// a round's worth of datagrams once it has failed maxFailures times. It is probed again
+// on every parkedRetryRounds-th round, and stays parked if it still does not answer.
 func TestRoundSkipsParkedPeers(t *testing.T) {
 	main, gossip := &captureWriter{}, &captureWriter{}
 	g := NewGossipHandler(GossipConfig{
@@ -355,18 +356,22 @@ func TestRoundSkipsParkedPeers(t *testing.T) {
 	}, []PeerAddr{{IP: net.ParseIP("203.0.113.5"), Port: 4661}})
 	cfg := testClientCfg(main, gossip)
 
-	for round := 1; round <= 4; round++ {
+	for round := 1; round <= parkedRetryRounds+1; round++ {
 		before := len(main.frames()) + len(gossip.frames())
 		g.RunRound(cfg)
 		after := len(main.frames()) + len(gossip.frames())
 		p, _ := g.PeerByIP(net.ParseIP("203.0.113.5"))
 		t.Logf("round %d: frames sent=%d failures=%d parked=%v", round, after-before, p.Failures, p.Parked(2))
 	}
-	// Rounds 1 and 2 send; the peer parks after 2 failures and rounds 3 and 4 are silent.
+	// Rounds 1 and 2 send and the peer parks after 2 failures. Every later round is
+	// silent except the retry round, which sends once more.
 	total := len(main.frames()) + len(gossip.frames())
-	t.Logf("output: %d frames total across 4 rounds", total)
-	if total != 6 {
-		t.Fatalf("sent %d frames, want 6 (3 per round for 2 rounds, then parked)", total)
+	t.Logf("output: %d frames total across %d rounds", total, parkedRetryRounds+1)
+	if total != 9 {
+		t.Fatalf("sent %d frames, want 9 (3 per round for 2 rounds, then 3 on the retry round)", total)
+	}
+	if p, _ := g.PeerByIP(net.ParseIP("203.0.113.5")); !p.Parked(2) {
+		t.Fatal("an unanswered retry must leave the peer parked")
 	}
 }
 

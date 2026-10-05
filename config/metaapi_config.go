@@ -51,8 +51,8 @@ type MetaAPIConfig struct {
 	Accounts  AccountsConfig         `yaml:"accounts"`
 }
 
-// MetaAPISearchConfig is MetaApi.Search: a paged search of the torrent and Usenet
-// catalogues behind metaSearch, for clients that browse them directly.
+// MetaAPISearchConfig is MetaApi.Search: a paged search of the torrent, Usenet
+// and Kad catalogues behind metaSearch, for clients that browse them directly.
 type MetaAPISearchConfig struct {
 	// Enabled serves MetaApi.Search whenever the API is on. *bool, defaults on. It
 	// needs at least one metaSearch network with liveSearch on.

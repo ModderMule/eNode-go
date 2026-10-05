@@ -332,15 +332,21 @@ func run(ctx context.Context, configPath string) error {
 					LowIDs:  int(runtime.LowIDs.Count()),
 					// What a client is actually sent, not Storage.ServersCount(): the latter
 					// counts only configured peers and reads 0 for everything gossip learns.
-					Servers:          runtime.AdvertisedServerCount(),
-					UptimeSeconds:    int64(time.Since(startTime).Seconds()),
-					Time:             time.Now().Format(time.RFC3339),
-					GossipKnown:      gossip.Known,
-					GossipVerified:   gossip.Verified,
-					GossipParked:     gossip.Parked,
-					GossipAdmitted:   gossip.Admitted,
-					FilterBlockedIP:  blockedIP,
-					FilterBlockedGeo: blockedGeo,
+					Servers:                   runtime.AdvertisedServerCount(),
+					UptimeSeconds:             int64(time.Since(startTime).Seconds()),
+					Time:                      time.Now().Format(time.RFC3339),
+					GossipKnown:               gossip.Known,
+					GossipVerified:            gossip.Verified,
+					GossipParked:              gossip.Parked,
+					GossipAdmitted:            gossip.Admitted,
+					GossipRejectedBad:         gossip.RejectedBad,
+					GossipRejectedSelf:        gossip.RejectedSelf,
+					GossipRejectedClient:      gossip.RejectedPeer,
+					GossipRejectedFull:        gossip.RejectedFull,
+					GossipRejectedUnsolicited: gossip.RejectedUnsolicited,
+					GossipRejectedPlaintext:   gossip.RejectedPlaintext,
+					FilterBlockedIP:           blockedIP,
+					FilterBlockedGeo:          blockedGeo,
 					// Files stays the eD2K count; this is what clients are sent.
 					AdvertisedFiles:  runtime.AdvertisedFiles(),
 					MetaCacheEntries: metaCacheEntries,
@@ -862,7 +868,7 @@ func warnMetaTokens(c config.MetaSearchConfig) {
 	for _, n := range []struct {
 		name string
 		cfg  config.MetaNetworkConfig
-	}{{meta.NetworkTorrent, c.Torrent}, {meta.NetworkUsenet, c.Usenet}} {
+	}{{meta.NetworkTorrent, c.Torrent}, {meta.NetworkUsenet, c.Usenet}, {meta.NetworkKad, c.Kad}} {
 		if !n.cfg.Enabled || n.cfg.Token != "" {
 			continue
 		}

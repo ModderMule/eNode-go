@@ -10,6 +10,9 @@ Both TCP (`OP_SEARCHREQUEST`) and UDP (`OP_GLOBSEARCHREQ*`) searches are covered
 The rows arrive in the same reply as the eD2K files. Each row's filename starts with
 a prefix, so every client can see which network it came from.
 
+A third daemon, kademlia-crawler, adds files found on the eMule Kad network. Those
+are real eD2K files and follow different rules: see [Kad results](#kad-results).
+
 The design and its reasoning are in `docs/meta-search-torrent-usenet-plan.local.md`.
 This page describes what is implemented.
 
@@ -148,6 +151,8 @@ meta rows. When it is `false`, only these requesters do:
 
 `OP_GLOBSEARCHREQ` and `…REQ2` have no tag block, so they never qualify.
 
+This gate covers torrent and Usenet rows. [Kad rows](#kad-results) go to every client.
+
 While any network is enabled, the server sets `FlagMetaSearch` (`0x10000`) in its
 TCP and UDP flag words. Clients ignore unknown bits.
 
@@ -172,6 +177,7 @@ metaSearch:
   advertiseToLegacyClients: true
   udpMaxConcurrent: 16
   torrent:                          # usenet: the same keys, url :9702, "[usenet] "
+                                    # kad:    the same keys, url :9703, "[kad] "
     enabled: false
     url: "http://127.0.0.1:9701"
     token: ""                       # the daemon's ingest.auth_token; keep it in enode.local.yaml
@@ -270,8 +276,65 @@ The `.torrent` / `.nzb` behind a row is served by the client-facing Meta API
 (`FetchMetaFile` proxy with verification, `ST_META_API` discovery, optional
 accounts). See [meta-api.md](meta-api.md).
 
-Clients can also search the catalogues directly, with paging and a torrent / Usenet /
-both selector, through `MetaApi.Search`. See [meta-api.md](meta-api.md#searching-the-catalogues).
+Clients can also search the catalogues directly, with paging and a selector for
+torrent, Usenet, Kad or all of them, through `MetaApi.Search`. See [meta-api.md](meta-api.md#searching-the-catalogues).
+
+## Kad results
+
+`metaSearch.kad` adds files that the kademlia-crawler daemon found on the eMule Kad
+network. It is off by default. The daemon speaks the same MetaIngest service as the
+other two (default `http://127.0.0.1:9703`), and everything above about the live
+search, the cache, the feed and the limits applies to it unchanged.
+
+What differs is the row. A Kad row is **native** (`META_KIND_ED2K`, contract amendments
+17 and 18): its hash is the file's own MD4, not a pseudo-hash, so it is an ordinary
+eD2K file that any client can download.
+
+| Field | Value |
+|---|---|
+| File hash | The file's real 16-byte MD4. |
+| Client ID / port | `0` / `0`. |
+| `FT_FILENAME` | `namePrefix` + the file's name. The default prefix is `[kad] `; `""` sends the bare name. |
+| `FT_SOURCES` | The sources Kad reported, capped at 99. |
+| `FT_COMPLETE_SOURCES` | The complete sources Kad reported, at most `FT_SOURCES`. Kad rarely reports this, so it is usually 0. |
+| `FT_META_NETWORK` (`0x6D`) | uint8 `3` (Kad). The row's only meta tag. |
+
+**How a client recognises the row.** By `FT_META_NETWORK` alone. `FT_META_KIND` and the
+other `0x60`–`0x6C` tags are not sent: a shipped eMuleQt drops a row whose kind tag its
+hash cannot back, and this hash is a real MD4. eMuleQt reads the tag, shows the Kad
+icon next to the file-type icon, and strips a leading `[kad…]` bracket from the name.
+It strips only when the tag is present, so a file that is merely named `[kad] …`
+keeps its name. The original eMule and older eMuleQt builds keep the unknown tag and
+ignore it: they list the row as a normal file with the prefix in its name.
+
+**The server's own file wins.** When a user shares a file with the same hash on this
+server, the search answer holds the server's row alone: its name without the prefix,
+its real source counts and source address, and no `FT_META_NETWORK` tag. The Kad row
+is dropped (`mergeMetaResults`). The check runs over the whole result set before
+paging, so it holds for every `OP_QUERY_MORE_RESULT` page and for UDP answers.
+
+The same holds across servers, on the client side: when one server answers with the
+file itself and another with a Kad row for the same hash, eMuleQt lists the file as a
+plain server result without the Kad icon.
+
+**Who receives the rows.** Every client, on TCP and UDP, whatever
+`advertiseToLegacyClients` and the capability bits say. Those gates cover torrent and
+Usenet rows, which a stock client cannot act on. For a requester behind the gate the
+server asks the Kad daemon only.
+
+**Downloading.** Nothing is special. `OP_GETSOURCES` for the hash returns the server's
+sources when it has any and an empty list otherwise; the client then finds sources
+through its own Kad lookup. `OP_OFFERFILES` accepts the hash, so a client that has the
+file becomes a source here like for any other file.
+
+**Freshness.** The daemon answers from its index within milliseconds and queues the
+searched words for a Kad lookup of its own, which takes 12 to 30 seconds. The first
+search for a new term is therefore sparse and a later one fuller. With
+`metaSearch.cache` on, the first answer is served again until `ttlSeconds` passes.
+
+`MetaApi.Search` serves Kad rows too, as a third network beside torrent and Usenet
+(see [meta-api.md](meta-api.md#searching-the-catalogues)). There is no metafile to
+fetch for one: the client builds the eD2K link from the row.
 
 ## By design / deferred
 

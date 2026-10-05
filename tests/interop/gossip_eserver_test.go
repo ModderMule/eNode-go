@@ -2,6 +2,7 @@ package interop
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -33,9 +34,21 @@ var eserverRejections = []string{
 	"bad name:desc",
 	"sent a bad challenge",
 	"from unknown server",
-	"ignore non obfuscated",
+	"ignore non obfuscated OP_SERVER_LIST_RES",
 	"Deny server",
 }
+
+// eserverPlainRegistrationRefusal is the one refusal that is expected rather than a
+// fault: eserver dropping the plaintext 0xA0 that sendPhase1 sends on purpose.
+//
+// Whether it appears depends on the build, not on us. The drop is gated by bit 0x200 of
+// the undocumented `sflags` option, and the compiled-in default differs: 0x5 in the
+// 17.14 i686 build of Oct 2006 (the rig's default binary, which therefore accepts the
+// plaintext registration silently), 0x205 in the 17.14 x86_64 build of Apr 2007 and in
+// both 17.15 builds. Measured: `sflags=517` makes the Oct 2006 build log the same line.
+// The handshake completes either way, because phase 3 repeats the registration
+// obfuscated — so the line is logged here and the peer-table checks stay authoritative.
+const eserverPlainRegistrationRefusal = "ignore non obfuscated OP_SERVER_LIST_REQ"
 
 // TestGossipWithLugdunumEserver is the case the host-based rig could not reach: with both
 // servers on one Docker network, eserver can route back to us, so its half of the
@@ -52,6 +65,12 @@ func TestGossipWithLugdunumEserver(t *testing.T) {
 	// own: everything it learns about us must come from our registration or from `ask`.
 	eserver := startEserver(t, pool, network, eserverOptions{})
 	enode := startEnode(t, pool, network, enodeOptions{Name: "enode", SeedIP: eserver.ip, SeedPort: eserverTCPPort})
+	defer func() {
+		if t.Failed() || os.Getenv("ENODE_INTEROP_LOGS") == "1" {
+			t.Logf("output: eserver log:\n%s", eserver.logs())
+			t.Logf("output: enode log:\n%s", tail(enode.logs(), 120))
+		}
+	}()
 
 	// --- direction 1: we verify eserver -------------------------------------------------
 	//
@@ -229,12 +248,20 @@ func TestGossipWithLugdunumEserver(t *testing.T) {
 func assertNoRejections(t *testing.T, n *node, label string) {
 	t.Helper()
 	logs := n.logs()
+	hits := 0
 	for _, bad := range eserverRejections {
 		if strings.Contains(logs, bad) {
+			hits++
 			t.Errorf("%s log contains the refusal %q: %s", label, bad, strings.TrimSpace(lineContaining(logs, bad)))
 		}
 	}
-	t.Logf("output: %s log carries none of the %d refusal messages", label, len(eserverRejections))
+	if n := len(allLinesMatching(logs, eserverPlainRegistrationRefusal)); n > 0 {
+		t.Logf("output: %s dropped our plaintext phase-1 0xA0 %d time(s) (%q) — expected on builds whose sflags has 0x200",
+			label, n, eserverPlainRegistrationRefusal)
+	}
+	if hits == 0 {
+		t.Logf("output: %s log carries none of the %d refusal messages", label, len(eserverRejections))
+	}
 }
 
 // waitForServerMet polls until a server.met inside a container holds ip:port, returning

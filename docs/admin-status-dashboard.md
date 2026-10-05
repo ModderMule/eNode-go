@@ -105,9 +105,22 @@ ever baked into the served HTML.
   "lowIDs": 0,
   "servers": 0,
   "uptimeSeconds": 6,
-  "time": "2026-07-22T15:00:49+07:00"
+  "time": "2026-07-22T15:00:49+07:00",
+  "gossipKnown": 0,
+  "gossipVerified": 0,
+  "gossipParked": 0,
+  "gossipAdmitted": 0,
+  "gossipRejectedBad": 0,
+  "gossipRejectedSelf": 0,
+  "gossipRejectedClient": 0,
+  "gossipRejectedFull": 0,
+  "gossipRejectedUnsolicited": 0,
+  "gossipRejectedPlaintext": 0
 }
 ```
+
+The `gossip*` fields are explained in `server-gossip.md` §5; the response carries
+further sections (filters, meta search, update check) not shown here.
 
 The client and file totals come from the same briefly cached reading that backs the
 eD2K `OP_SERVERSTATUS` / `OP_GLOBSERVSTATRES` responses (see `ed2k/countercache.go`),

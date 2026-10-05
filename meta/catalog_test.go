@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -207,6 +208,38 @@ func TestMintEntryMatchesEntryToFile(t *testing.T) {
 	}
 	if len(pb.GetMetaHash()) != 0 {
 		t.Fatalf("MintEntry modified its input")
+	}
+}
+
+// TestSearchCatalogKad covers a native network in the catalogue search: a file is a
+// release of one row, its meta_hash is the file's own MD4, and its name comes back
+// without the prefix the eD2K search puts on it.
+func TestSearchCatalogKad(t *testing.T) {
+	d := &pagingDaemon{window: 1000, releases: [][]*metav1.MetaEntry{
+		{kadEntry("Night.Of.The.Living.Dead.avi", 40, 2)}, {kadEntry("Nosferatu.avi", 7, 0)},
+	}}
+	cfg := testConfig(t, false, false)
+	cfg.Kad.Enabled = true
+	s := NewWithClients(cfg, func(string, config.MetaNetworkConfig) metav1connect.MetaIngestClient { return d.client() })
+	s.EnableCatalog(CatalogConfig{Timeout: time.Second, MaxEntries: 100, TTL: time.Minute})
+
+	chunk, err := s.SearchCatalog(context.Background(), NetworkKad, &metav1.SearchRequest{Query: "n"}, 0)
+	t.Logf("input: two Kad files; output: networks=%v releases=%d total=%d err=%v", s.CatalogNetworks(), len(chunk.Releases), chunk.Total, err)
+	if err != nil || fmt.Sprint(s.CatalogNetworks()) != "[kad]" || len(chunk.Releases) != 2 {
+		t.Fatalf("networks %v, %d releases, err %v; want [kad] and 2", s.CatalogNetworks(), len(chunk.Releases), err)
+	}
+	for _, release := range chunk.Releases {
+		row := release[0]
+		t.Logf("output: %s kind=%s meta_hash=%X identity=%X magnet=%q", row.GetName(), row.GetKind(), row.GetMetaHash(), row.GetIdentity(), row.GetMagnet())
+		if len(release) != 1 || row.GetKind() != metav1.MetaKind_META_KIND_ED2K {
+			t.Fatalf("release of %d rows, kind %s; want one ED2K row", len(release), row.GetKind())
+		}
+		if len(row.GetMetaHash()) != 16 || string(row.GetMetaHash()) != string(row.GetIdentity()) {
+			t.Fatalf("meta_hash %X, want the identity %X", row.GetMetaHash(), row.GetIdentity())
+		}
+		if strings.HasPrefix(row.GetName(), "[") || row.GetMagnet() != "" {
+			t.Fatalf("row %q magnet %q, want a bare name and no magnet", row.GetName(), row.GetMagnet())
+		}
 	}
 }
 

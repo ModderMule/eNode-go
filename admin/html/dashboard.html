@@ -60,13 +60,13 @@ button:disabled{opacity:.6;cursor:default}
 <div class="card"><div class="label">Clients online</div><div class="value" id="clients">…</div></div>
 <div class="card"><div class="label">Files</div><div class="value" id="files">…</div><div class="desc" id="filesAdvertised" style="margin:0"></div></div>
 <div class="card"><div class="label">LowID registrations</div><div class="value" id="lowIDs">…</div></div>
-<div class="card"><div class="label">Peer servers</div><div class="value" id="servers">…</div><div class="desc" id="gossip" style="margin:0"></div></div>
+<div class="card"><div class="label">Peer servers</div><div class="value" id="servers">…</div><div class="desc" id="gossip" style="margin:0"></div><div class="desc" id="gossipRej" style="margin:0"></div></div>
 <div class="card"><div class="label">Blocked addresses</div><div class="value" id="blocked">…</div><div class="desc" id="blockedBreak" style="margin:0"></div></div>
 <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">…</div></div>
 </div>
 
 <section id="metaSection" hidden>
-<h2>Torrent / Usenet</h2>
+<h2>Torrent / Usenet / Kad</h2>
 <p class="desc" id="metaSummary" style="margin:0 0 10px"></p>
 <div class="mgrid" id="metaCards"></div>
 </section>
@@ -196,7 +196,7 @@ function renderMeta(d){
   if(!section){ return; }
   section.hidden = list.length === 0;
   setText('filesAdvertised', d.advertisedFiles !== d.files
-    ? 'advertised ' + num(d.advertisedFiles) + ' incl. torrent/usenet' : '');
+    ? 'advertised ' + num(d.advertisedFiles) + ' incl. torrent/usenet/kad' : '');
   if(!list.length){ return; }
   setText('metaSummary', 'result cache: ' + num(d.metaCacheEntries) + ' queries');
   var cards = document.getElementById('metaCards');
@@ -253,6 +253,18 @@ async function refresh(){
       ? 'gossip ' + d.gossipVerified + '/' + d.gossipKnown + ' verified'
         + (d.gossipParked ? ', ' + d.gossipParked + ' parked' : '')
       : 'no gossip peers');
+    // Admitted against refused, so a flat peer count can be read as "nothing new on
+    // offer" or "entries are being turned away". The per-reason split is in the tooltip.
+    var rej = d.gossipRejectedBad + d.gossipRejectedSelf + d.gossipRejectedClient
+      + d.gossipRejectedFull + d.gossipRejectedUnsolicited + d.gossipRejectedPlaintext;
+    var rejEl = document.getElementById('gossipRej');
+    if(rejEl){
+      rejEl.textContent = d.gossipKnown ? d.gossipAdmitted + ' admitted, ' + rej + ' rejected' : '';
+      rejEl.title = 'bad address ' + d.gossipRejectedBad + ', self ' + d.gossipRejectedSelf
+        + ', client ' + d.gossipRejectedClient + ', table full ' + d.gossipRejectedFull
+        + ', unknown sender ' + d.gossipRejectedUnsolicited
+        + ', not obfuscated ' + d.gossipRejectedPlaintext;
+    }
     setText('blocked', (d.filterBlockedIP + d.filterBlockedGeo).toLocaleString());
     setText('blockedBreak', d.filterBlockedIP + ' ipfilter, ' + d.filterBlockedGeo + ' geoip');
     setText('uptime', fmtUptime(d.uptimeSeconds));

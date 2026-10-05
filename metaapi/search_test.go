@@ -34,7 +34,7 @@ func newFakeCatalog() *fakeCatalog {
 
 func (c *fakeCatalog) CatalogNetworks() []string {
 	var out []string
-	for _, n := range []string{networkTorrent, networkUsenet} {
+	for _, n := range []string{networkTorrent, networkUsenet, networkKad} {
 		if _, ok := c.releases[n]; ok {
 			out = append(out, n)
 		}
@@ -109,6 +109,72 @@ func TestSearchAlternatesNetworks(t *testing.T) {
 		t.Logf("input: offset=%d limit=%d; output: %s next=%d total=%d err=%v", tc.offset, tc.limit, got, resp.GetNextOffset(), resp.GetTotal(), err)
 		if err != nil || got != tc.want || resp.GetNextOffset() != tc.next || resp.GetTotal() != 7 {
 			t.Fatalf("got %s next %d total %d, want %s next %d total 7", got, resp.GetNextOffset(), resp.GetTotal(), tc.want, tc.next)
+		}
+	}
+}
+
+// TestSearchAlternatesThreeNetworks covers Kad beside the other two: one release
+// from each in turn, torrent, Usenet, Kad, and a network that runs out drops out.
+func TestSearchAlternatesThreeNetworks(t *testing.T) {
+	cat := newFakeCatalog()
+	cat.releases[networkTorrent] = releases("t", 3)
+	cat.releases[networkUsenet] = releases("u", 1)
+	cat.releases[networkKad] = releases("k", 4)
+	svc := searchService(cat)
+
+	for _, tc := range []struct {
+		offset, limit uint32
+		want          string
+		next          uint32
+	}{
+		{0, 5, "[t0 u0 k0 t1 k1]", 5},
+		{5, 5, "[t2 k2 k3]", 0},
+		{2, 2, "[k0 t1]", 4},
+	} {
+		resp, err := svc.Search(context.Background(), &metav1.SearchRequest{Query: "x", Offset: tc.offset, Limit: tc.limit})
+		got := fmt.Sprint(names(resp))
+		t.Logf("input: offset=%d limit=%d; output: %s next=%d total=%d err=%v", tc.offset, tc.limit, got, resp.GetNextOffset(), resp.GetTotal(), err)
+		if err != nil || got != tc.want || resp.GetNextOffset() != tc.next || resp.GetTotal() != 8 {
+			t.Fatalf("got %s next %d total %d, want %s next %d total 8", got, resp.GetNextOffset(), resp.GetTotal(), tc.want, tc.next)
+		}
+	}
+}
+
+// kadFiles returns one-row eD2K releases named prefix0 … with the given sizes and
+// ages. total_size is left unset, which the contract allows a native row.
+func kadFiles(prefix string, sizes, ages []uint64) []meta.Release {
+	out := make([]meta.Release, len(sizes))
+	for i := range out {
+		id := fmt.Sprintf("%s%d", prefix, i)
+		out[i] = meta.Release{{Kind: metav1.MetaKind_META_KIND_ED2K, Name: id, CatalogId: id, Size: sizes[i], AgeDays: uint32(ages[i])}}
+	}
+	return out
+}
+
+// TestSearchMergesKadByKey covers the keyed sorts with a Kad network in the mix: a
+// file's size stands in for the total size it does not carry.
+func TestSearchMergesKadByKey(t *testing.T) {
+	cat := newFakeCatalog()
+	cat.releases[networkTorrent] = sized("t", []uint64{900, 100}, []uint64{3, 9})
+	cat.releases[networkUsenet] = sized("u", []uint64{800}, []uint64{0})
+	cat.releases[networkKad] = kadFiles("k", []uint64{850, 50}, []uint64{1, 20})
+	svc := searchService(cat)
+
+	for _, tc := range []struct {
+		name      string
+		sort      metav1.SearchSort
+		ascending bool
+		want      string
+	}{
+		{"size", metav1.SearchSort_SEARCH_SORT_SIZE, false, "[t0 k0 u0 t1 k1]"},
+		{"date", metav1.SearchSort_SEARCH_SORT_DATE, false, "[u0 k0 t0 t1 k1]"},
+		{"relevance alternates", metav1.SearchSort_SEARCH_SORT_UNSPECIFIED, false, "[t0 u0 k0 t1 k1]"},
+	} {
+		resp, err := svc.Search(context.Background(), &metav1.SearchRequest{Query: "x", Sort: tc.sort, SortAscending: tc.ascending, Limit: 10})
+		got := fmt.Sprint(names(resp))
+		t.Logf("%s: input sort=%s asc=%t; output %s err=%v", tc.name, tc.sort, tc.ascending, got, err)
+		if err != nil || got != tc.want {
+			t.Fatalf("%s: got %s, want %s", tc.name, got, tc.want)
 		}
 	}
 }
@@ -276,12 +342,46 @@ func TestSearchNetworkAndKindSelection(t *testing.T) {
 		}
 	}
 
+	// Kad is a network like the others, and ED2K is its kind.
+	cat.releases[networkKad] = releases("k", 2)
+	for _, tc := range []struct {
+		name    string
+		network metav1.MetaNetwork
+		kinds   []metav1.MetaKind
+		want    string
+	}{
+		{"all three", metav1.MetaNetwork_META_NETWORK_UNSPECIFIED, nil, "[t0 u0 k0 t1 u1 k1 t2 u2]"},
+		{"kad", metav1.MetaNetwork_META_NETWORK_KAD, nil, "[k0 k1]"},
+		{"ed2k kind", metav1.MetaNetwork_META_NETWORK_UNSPECIFIED, []metav1.MetaKind{metav1.MetaKind_META_KIND_ED2K}, "[k0 k1]"},
+		{"torrent network, ed2k kind", metav1.MetaNetwork_META_NETWORK_TORRENT, []metav1.MetaKind{metav1.MetaKind_META_KIND_ED2K}, "[]"},
+		{"kad network, nzb kind", metav1.MetaNetwork_META_NETWORK_KAD, []metav1.MetaKind{metav1.MetaKind_META_KIND_NZB}, "[]"},
+	} {
+		resp, err := svc.Search(context.Background(), &metav1.SearchRequest{Query: "z", Network: tc.network, Kinds: tc.kinds})
+		got := fmt.Sprint(names(resp))
+		t.Logf("input: %s; output: %s err=%v", tc.name, got, err)
+		if err != nil || got != tc.want {
+			t.Fatalf("%s: got %s, want %s", tc.name, got, tc.want)
+		}
+	}
+	// Caps lists Kad as a network to search, and no kind for it: kinds are the
+	// metafiles the server can serve, and an eD2K file has none.
+	caps, _ := svc.GetCaps(context.Background(), &metav1.GetCapsRequest{})
+	t.Logf("input: three networks; output: caps.networks=%v caps.kinds=%v", caps.GetNetworks(), caps.GetKinds())
+	if fmt.Sprint(caps.GetNetworks()) != "[META_NETWORK_TORRENT META_NETWORK_USENET META_NETWORK_KAD]" {
+		t.Fatalf("caps.networks %v, want all three", caps.GetNetworks())
+	}
+	for _, kind := range caps.GetKinds() {
+		if kind == metav1.MetaKind_META_KIND_ED2K {
+			t.Fatalf("caps.kinds %v lists ED2K, which has no metafile", caps.GetKinds())
+		}
+	}
+
 	// Only torrent enabled: a Usenet search finds nothing, and Caps lists torrent only.
 	only := newFakeCatalog()
 	only.releases[networkTorrent] = releases("t", 1)
 	svc = searchService(only)
 	resp, err := svc.Search(context.Background(), &metav1.SearchRequest{Query: "x", Network: metav1.MetaNetwork_META_NETWORK_USENET})
-	caps, _ := svc.GetCaps(context.Background(), &metav1.GetCapsRequest{})
+	caps, _ = svc.GetCaps(context.Background(), &metav1.GetCapsRequest{})
 	t.Logf("input: usenet search, torrent-only server; output: %d entries err=%v caps.networks=%v", len(resp.GetEntries()), err, caps.GetNetworks())
 	if err != nil || len(resp.GetEntries()) != 0 || fmt.Sprint(caps.GetNetworks()) != "[META_NETWORK_TORRENT]" || !caps.GetSearchAvailable() {
 		t.Fatalf("torrent-only: %v %v caps %v", resp, err, caps)
@@ -439,5 +539,31 @@ func TestSearchOverConnectJSON(t *testing.T) {
 	t.Logf("input: POST %s; output: %d %+v err=%v", body, res.StatusCode, out, err)
 	if res.StatusCode != http.StatusOK || len(out.Entries) != 1 || out.Entries[0].Name != "u0" || out.NextOffset != 1 {
 		t.Fatalf("connect JSON search: %d %+v", res.StatusCode, out)
+	}
+}
+
+// TestSearchKadOverConnectJSON asks for the Kad network alone the way curl would.
+func TestSearchKadOverConnectJSON(t *testing.T) {
+	cat := newFakeCatalog()
+	cat.releases[networkTorrent] = releases("t", 2)
+	cat.releases[networkKad] = releases("k", 2)
+	fx := start(t, false, true, 0, searchConfig(cat))
+
+	body := `{"query":"x","network":"META_NETWORK_KAD"}`
+	res, err := http.Post(fx.httpURL+"/enode.meta.v1.MetaApi/Search", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var out struct {
+		Entries []struct {
+			Name string `json:"name"`
+		} `json:"entries"`
+		Total string `json:"total"`
+	}
+	err = json.NewDecoder(res.Body).Decode(&out)
+	t.Logf("input: POST %s; output: %d %+v err=%v", body, res.StatusCode, out, err)
+	if res.StatusCode != http.StatusOK || len(out.Entries) != 2 || out.Entries[0].Name != "k0" || out.Entries[1].Name != "k1" {
+		t.Fatalf("connect JSON kad search: %d %+v", res.StatusCode, out)
 	}
 }

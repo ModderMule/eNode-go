@@ -81,20 +81,29 @@ type LiveStats struct {
 	Time          string `json:"time"`
 
 	// Server-to-server gossip. Known counts every peer in the table whatever its state;
-	// Verified counts the subset advertisable to clients; Parked counts those retired
-	// after maxFailures consecutive failed rounds; Admitted is a monotonic total of
-	// entries ever accepted from a peer list.
+	// Verified counts the subset advertisable to clients, which excludes parked peers;
+	// Parked counts those retired after maxFailures consecutive failed rounds; Admitted
+	// is a monotonic total of entries ever accepted from a peer list.
 	GossipKnown    int    `json:"gossipKnown"`
 	GossipVerified int    `json:"gossipVerified"`
 	GossipParked   int    `json:"gossipParked"`
 	GossipAdmitted uint64 `json:"gossipAdmitted"`
+	// Monotonic totals of what gossip refused, by reason: an unusable address, our own
+	// address, a current or recent client, a full table, a list from a sender we never
+	// handshook with, and a gossip frame that arrived unobfuscated.
+	GossipRejectedBad         uint64 `json:"gossipRejectedBad"`
+	GossipRejectedSelf        uint64 `json:"gossipRejectedSelf"`
+	GossipRejectedClient      uint64 `json:"gossipRejectedClient"`
+	GossipRejectedFull        uint64 `json:"gossipRejectedFull"`
+	GossipRejectedUnsolicited uint64 `json:"gossipRejectedUnsolicited"`
+	GossipRejectedPlaintext   uint64 `json:"gossipRejectedPlaintext"`
 
 	// Access filters, counted per layer: addresses refused by the ipfilter range list
 	// and by the GeoIP country deny-list respectively.
 	FilterBlockedIP  int64 `json:"filterBlockedIP"`
 	FilterBlockedGeo int64 `json:"filterBlockedGeo"`
 
-	// Torrent/Usenet meta search. Files above is the eD2K count alone; AdvertisedFiles
+	// Torrent/Usenet/Kad meta search. Files above is the eD2K count alone; AdvertisedFiles
 	// is the total clients are sent in the server status, which adds the networks set
 	// to countInServerStatus. Meta is empty when meta search is off.
 	AdvertisedFiles  int                `json:"advertisedFiles"`
@@ -138,7 +147,7 @@ type MetaAPIStats struct {
 	AccountsDisabled int `json:"accountsDisabled"`
 }
 
-// MetaNetworkStats is one torrent or Usenet network's figures: the meta.NetworkStats
+// MetaNetworkStats is one torrent, Usenet or Kad network's figures: the meta.NetworkStats
 // fields the page shows. The caller maps one to the other so this package keeps no
 // dependency on the meta package.
 type MetaNetworkStats struct {

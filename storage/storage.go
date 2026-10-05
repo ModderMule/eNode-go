@@ -118,11 +118,12 @@ type File struct {
 	Meta *MetaInfo
 }
 
-// MetaInfo is what a torrent or Usenet row carries beyond an eD2K record: the
+// MetaInfo is what a catalogue row carries beyond an eD2K record: the
 // FT_META_* tags (0x60-0x6C) of the enode.meta.v1 contract. Plain values, so
 // storage takes no dependency on the contract module.
 type MetaInfo struct {
-	// Kind is the network: 1 BitTorrent v1/hybrid, 2 BitTorrent v2, 3 NZB.
+	// Kind is the network: 1 BitTorrent v1/hybrid, 2 BitTorrent v2, 3 NZB, 4 a real
+	// eD2K file found on Kad (see Native).
 	Kind      uint8
 	Version   uint8
 	FileIndex uint32
@@ -135,6 +136,16 @@ type MetaInfo struct {
 	Indexer   string
 	Flags     uint32
 	Magnet    string
+}
+
+// MetaKindED2K is MetaInfo.Kind for a native row, META_KIND_ED2K of the contract.
+const MetaKindED2K uint8 = 4
+
+// Native reports whether the row is a real eD2K file — its Hash is the file's own
+// MD4, not a pseudo-hash — which a catalogue daemon found on another network. Such a
+// row is sent as an ordinary search result with FT_META_NETWORK as its only meta tag.
+func (m *MetaInfo) Native() bool {
+	return m != nil && m.Kind == MetaKindED2K
 }
 
 type Server struct {

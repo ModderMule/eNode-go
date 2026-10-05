@@ -3,7 +3,7 @@
 eNode-go merges torrent and Usenet releases into eD2K search results
 (see [meta-search.md](meta-search.md)). A row carries a meta hash and `FT_META_*`
 tags, but not the `.torrent` or `.nzb` itself. The **Meta API** serves those files to
-a client such as eMuleQt. It also searches the torrent and Usenet catalogues
+a client such as eMuleQt. It also searches the torrent, Usenet and Kad catalogues
 directly, with paging (`MetaApi.Search`). These are phases 4 and 7 of
 `docs/meta-search-torrent-usenet-plan.local.md`.
 
@@ -36,7 +36,7 @@ eMuleQt generates its C++ code from the same file. Its two services reuse `MetaF
 |---|---|---|
 | `MetaApi.GetCaps` | never | Contract version, kinds served, auth mode, registration and account URLs, HTTP endpoint URL, whether search is served, which networks it covers and whether it needs an account. |
 | `MetaApi.GetMetaFile` | when accounts are on | The `.torrent` / `.nzb` behind a row, verified against the meta hash. |
-| `MetaApi.Search` | when accounts are on and `search.requireAccount` | Paged search of the torrent and/or Usenet catalogues. See [Searching the catalogues](#searching-the-catalogues). |
+| `MetaApi.Search` | when accounts are on and `search.requireAccount` | Paged search of the torrent, Usenet and Kad catalogues, one or all. See [Searching the catalogues](#searching-the-catalogues). |
 | `AccountApi.GetAuthStatus` | optional | Login state, account state, expiry, open registration steps, links. It never fails for a missing or bad credential. |
 | `AccountApi.Login` | — | Takes a username and password and returns a bearer token. |
 | `AccountApi.Logout` | bearer | Revokes the token. |
@@ -141,12 +141,15 @@ The other fields are optional filters passed to the daemons: `exclude`, `kinds`,
 
 | `network` | Searches |
 |---|---|
-| `META_NETWORK_UNSPECIFIED` (default) | torrent and Usenet |
+| `META_NETWORK_UNSPECIFIED` (default) | every network the server offers |
 | `META_NETWORK_TORRENT` | torrent only |
 | `META_NETWORK_USENET` | Usenet only |
+| `META_NETWORK_KAD` | Kad only: eD2K files |
 
 A network the server does not offer gives an empty result, not an error. `kinds`
-narrows further within the chosen networks, for example BT v2 only.
+narrows further within the chosen networks, for example BT v2 only. Each network
+has kinds of its own (torrent: BT v1 and v2, Usenet: NZB, Kad: ED2K), so `kinds`
+alone also selects: torrent and Usenet without Kad is `kinds` = BT v1, BT v2, NZB.
 
 **Paging counts releases, not rows.** A multi-file release is several entries with
 one `catalog_id` (the whole-set row and one per file), and they always arrive on
@@ -155,9 +158,15 @@ Ask for the next page with the returned `next_offset`. Zero means there is no
 further page. Paging stops at `search.window` releases (1000). `total` is the sum
 the daemons report, or 0 when it is not known.
 
-**Both networks** interleave one release from each in turn (torrent, Usenet,
-torrent, …). When one network runs out, the other continues alone. The order is
+**Several networks** interleave one release from each in turn (torrent, Usenet,
+Kad, torrent, …). When one network runs out, the others continue. The order is
 deterministic, so page N is the same on every call while the answers are cached.
+
+Two sorts merge by key instead, because every network answers them and every row
+carries the key: `SEARCH_SORT_DATE` by `age_days` and `SEARCH_SORT_SIZE` by
+`total_size` (for an eD2K file, which may leave that unset, by `size`). Any other
+sort alternates: relevance scores are not comparable between daemons, and a sort a
+network does not have comes back from it in relevance order.
 
 **Cache.** Each network's answer is fetched in chunks of 100 releases and cached per
 network, search and chunk (`search.cache`, 2000 chunks, 600 s). Paging forward and
@@ -170,8 +179,30 @@ any order.
 `catalog_id` are all `GetMetaFile` needs. A row with the magnet-only flag
 (`flags` bit 3) has no metafile: use its `magnet`.
 
+**A Kad entry is an eD2K file** (`kind` = `META_KIND_ED2K`) and differs in three
+ways:
+
+- `meta_hash` is not minted. It is the file's own 16-byte MD4, the same bytes as
+  `identity`, and the hash an eD2K client downloads by.
+- There is no metafile and no magnet. `GetMetaFile` refuses the hash with
+  `invalid_argument` / `metafile.invalid_request`, since it is not a meta hash.
+  `Caps.kinds` lists the kinds whose metafiles are served, so ED2K is never in it;
+  `Caps.networks` is where Kad shows.
+- What a client needs is the eD2K link, which it builds from the row's `name`,
+  `size` and `identity` (`ed2klink.Build` in enodemeta). The row is one file:
+  `file_index` 0, `file_count` 1.
+
+`seeders` is the complete sources and `peers` every source Kad reported. The name
+comes without the `metaSearch.kad.namePrefix` that the eD2K search adds. A file the
+eD2K server also holds can come back from both searches; the API does not merge
+them.
+
+The Kad daemon answers from its index and queues the words of a first page for a
+Kad lookup of its own, so the first search of a new term is sparse. That answer is
+cached like any other for `search.cache.ttlSeconds`.
+
 **Failures.** If one network is down or slow (`search.timeoutMs`, 5 s), the page
-comes from the other one and `total` is 0. If every selected network fails, the call
+comes from the others and `total` is 0. If every selected network fails, the call
 returns `unavailable` / `search.unavailable`.
 
 | Code | `msg_code` |

@@ -316,7 +316,10 @@ func AddFile(packet *[]PacketItem, file SharedFile) {
 	if file.Codec != "" {
 		tags = append(tags, Tag{Type: TypeString, Code: TagMediaCodec, Data: file.Codec})
 	}
-	if file.Meta != nil {
+	switch {
+	case file.Meta.Native():
+		tags = append(tags, Tag{Type: TypeUint8, Code: TagMetaNetwork, Data: MetaNetworkKad})
+	case file.Meta != nil:
 		tags = appendMetaTags(tags, file.Meta)
 	}
 	*packet = append(*packet,

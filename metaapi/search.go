@@ -63,9 +63,10 @@ type limits struct {
 var networkKinds = map[string][]metav1.MetaKind{
 	networkTorrent: {metav1.MetaKind_META_KIND_BT_V1, metav1.MetaKind_META_KIND_BT_V2},
 	networkUsenet:  {metav1.MetaKind_META_KIND_NZB},
+	networkKad:     {metav1.MetaKind_META_KIND_ED2K},
 }
 
-// Search pages through the torrent and Usenet catalogues. See the contract's
+// Search pages through the torrent, Usenet and Kad catalogues. See the contract's
 // MetaApi.Search for the paging rules.
 func (s *Service) Search(ctx context.Context, req *metav1.SearchRequest) (*metav1.SearchResponse, error) {
 	if s.search == nil {
@@ -96,6 +97,8 @@ func (s *Service) SearchNetworks() []metav1.MetaNetwork {
 			out = append(out, metav1.MetaNetwork_META_NETWORK_TORRENT)
 		case networkUsenet:
 			out = append(out, metav1.MetaNetwork_META_NETWORK_USENET)
+		case networkKad:
+			out = append(out, metav1.MetaNetwork_META_NETWORK_KAD)
 		}
 	}
 	return out
@@ -148,8 +151,8 @@ func (c *catalogSearch) run(ctx context.Context, req *metav1.SearchRequest) (*me
 
 // streams returns one release stream per network the request selects, with the
 // request's kinds narrowed to that network's. The chunks a page of want releases
-// needs are fetched concurrently across streams, so a page over two networks waits
-// for the slower daemon, not for both in turn.
+// needs are fetched concurrently across streams, so a page over several networks
+// waits for the slowest daemon, not for each in turn.
 func (c *catalogSearch) streams(ctx context.Context, req *metav1.SearchRequest, want int) []*releaseStream {
 	var out []*releaseStream
 	for _, network := range c.cfg.Catalog.CatalogNetworks() {
@@ -302,9 +305,9 @@ func mergeOrder(req *metav1.SearchRequest) releaseLess {
 	case metav1.SearchSort_SEARCH_SORT_SIZE:
 		return func(a, b meta.Release) bool {
 			if ascending {
-				return releaseKey(a).GetTotalSize() < releaseKey(b).GetTotalSize()
+				return releaseSize(a) < releaseSize(b)
 			}
-			return releaseKey(a).GetTotalSize() > releaseKey(b).GetTotalSize()
+			return releaseSize(a) > releaseSize(b)
 		}
 	default:
 		return nil
@@ -318,6 +321,16 @@ func releaseKey(release meta.Release) *metav1.MetaEntry {
 		return nil
 	}
 	return release[0]
+}
+
+// releaseSize is a release's size for the SIZE merge. A native row (an eD2K file)
+// is one file and may leave total_size unset, so its size stands in.
+func releaseSize(release meta.Release) uint64 {
+	key := releaseKey(release)
+	if total := key.GetTotalSize(); total != 0 {
+		return total
+	}
+	return key.GetSize()
 }
 
 // total adds the daemons' counts, or reports 0 ("not counted") when any stream
@@ -352,6 +365,8 @@ func networkSelected(want metav1.MetaNetwork, network string) bool {
 		return network == networkTorrent
 	case metav1.MetaNetwork_META_NETWORK_USENET:
 		return network == networkUsenet
+	case metav1.MetaNetwork_META_NETWORK_KAD:
+		return network == networkKad
 	default:
 		return false
 	}

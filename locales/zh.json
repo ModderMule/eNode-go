@@ -30,7 +30,7 @@
   "metafile.magnet_only": "此发布没有种子文件，请使用它的磁力链接。",
   "search.query_required": "请至少输入一个搜索词。",
   "search.query_too_long": "搜索内容过长。",
-  "search.unavailable": "Torrent 和 Usenet 目录暂时无法访问。",
+  "search.unavailable": "目录暂时无法访问。",
   "search.disabled": "此服务器不提供目录搜索。",
   "ratelimit.exceeded": "请求过多，请等待一分钟。",
   "request.invalid_form": "表单已过期，请重试。",

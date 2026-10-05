@@ -30,7 +30,7 @@
   "metafile.magnet_only": "このリリースには Torrent ファイルがありません。マグネットリンクを使用してください。",
   "search.query_required": "検索語を 1 つ以上入力してください。",
   "search.query_too_long": "検索語が長すぎます。",
-  "search.unavailable": "現在、Torrent および Usenet のカタログに接続できません。",
+  "search.unavailable": "現在、カタログに接続できません。",
   "search.disabled": "このサーバーはカタログ検索を提供していません。",
   "ratelimit.exceeded": "リクエストが多すぎます。1 分ほどお待ちください。",
   "request.invalid_form": "フォームの有効期限が切れました。もう一度お試しください。",

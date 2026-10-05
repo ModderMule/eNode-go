@@ -30,7 +30,7 @@
   "metafile.magnet_only": "Zu dieser Veröffentlichung gibt es keine Torrent-Datei. Bitte den Magnet-Link verwenden.",
   "search.query_required": "Bitte mindestens ein Suchwort eingeben.",
   "search.query_too_long": "Die Suche ist zu lang.",
-  "search.unavailable": "Die Torrent- und Usenet-Kataloge sind gerade nicht erreichbar.",
+  "search.unavailable": "Die Kataloge sind gerade nicht erreichbar.",
   "search.disabled": "Dieser Server bietet keine Katalogsuche an.",
   "ratelimit.exceeded": "Zu viele Anfragen. Bitte warte eine Minute.",
   "request.invalid_form": "Das Formular ist abgelaufen. Bitte versuche es erneut.",

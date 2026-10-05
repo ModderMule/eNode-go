@@ -260,6 +260,13 @@ the *server↔client* namespace: `srchybrid/Opcodes.h` ends that block at
 that allocated `OpGlobGetSourcesIPv6 0xa5`/`0xa6`. They are sent only to a peer that
 advertised `FlagIPv6`, so a stock eserver never sees them.
 
+That holds for the eMule trees, not for the original eserver. Disassembly of 17.14 and
+17.15 shows both use UDP `0xA6` (client → server, obfuscated only) and `0xA7` (server →
+client) for a NAT callback, with TCP `0x37` as the fallback notice — opcodes no eMule
+header lists. The directions differ from ours: eserver never sends `0xA7` to another
+server and never sends `0xA6` at all, so no frame is misrouted. A client that implements
+both dialects has to choose by the kind of server it is connected to.
+
 **On IP byte order**, which reads ambiguously in every description of this protocol: the
 reference calls these addresses "network order" while our `OP_SERVERLIST` builder writes
 a little-endian uint32 — and those are the same four bytes. For `1.2.3.4`, network order
@@ -344,8 +351,21 @@ than partially accepted. Parsing whatever happens to fit is exactly how a foreig
 becomes a list of garbage `ip:port` pairs that then propagate.
 
 A peer that produces no inbound frame for `gossip.maxFailures` consecutive rounds is
-**parked**: no longer contacted, but retained, so any inbound frame revives it. A server
-down for an afternoon should not have to be rediscovered.
+**parked**. A parked peer is:
+
+- **withdrawn** from `OP_SERVERLIST`, from the lists echoed to other servers and from
+  `server.met`. State never regresses, so without this a peer that verified once and
+  then died would be handed out for as long as the process runs;
+- **retained** in the table with its state, key and name, so any inbound frame from it
+  revives it at once. A server down for an afternoon should not have to be rediscovered;
+- **re-probed** on every 8th round (about 20 minutes at the default interval), so a
+  server that comes back without contacting us first is still found again.
+
+`/stats.json` reports the table as `gossipKnown`, `gossipVerified` (advertisable, so
+parked peers are not counted) and `gossipParked`, with `gossipAdmitted` and one
+`gossipRejected*` counter per refusal reason above. A peer count that stays flat while
+`gossipAdmitted` and the rejection counters also stay flat means the mesh has nothing
+new to offer.
 
 ### Deduplication
 

@@ -1,6 +1,8 @@
 package meta
 
 import (
+	"bytes"
+	"fmt"
 	"testing"
 
 	"enode/storage"
@@ -53,6 +55,60 @@ func TestEntryToFileNZBHasNoSources(t *testing.T) {
 	if file.Meta.Kind != 3 || file.Meta.Seeders != 98 {
 		t.Fatalf("meta %+v", *file.Meta)
 	}
+}
+
+// TestEntryToFileKad: a Kad row keeps the file's own MD4 as its hash — nothing is
+// minted — and its sources are what Kad reported, not the seldom-known complete count.
+func TestEntryToFileKad(t *testing.T) {
+	entry := kadEntry("Night.Of.The.Living.Dead.1968.avi", 250, 3)
+	file, err := EntryToFile(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("input: %v", entry)
+	t.Logf("output: hash=%x name=%q size=%d sources=%d completed=%d meta=%+v",
+		file.Hash, file.Name, file.Size, file.Sources, file.Completed, *file.Meta)
+
+	if !bytes.Equal(file.Hash, entry.GetIdentity()) || metahash.IsMetaHash(file.Hash) {
+		t.Fatalf("hash %x, want the file's own MD4 %x", file.Hash, entry.GetIdentity())
+	}
+	if !file.Meta.Native() || file.Meta.Kind != storage.MetaKindED2K || file.Meta.CatalogID != entry.GetCatalogId() {
+		t.Fatalf("meta %+v, want a native row", *file.Meta)
+	}
+	if file.Sources != 99 || file.Completed != 3 {
+		t.Fatalf("sources=%d completed=%d, want peers capped at 99 and the 3 complete", file.Sources, file.Completed)
+	}
+	if file.Name != entry.GetName() || file.SourceID != 0 || file.SourcePort != 0 {
+		t.Fatalf("name=%q source=%d:%d, want the unprefixed name and no source", file.Name, file.SourceID, file.SourcePort)
+	}
+
+	unknown, err := EntryToFile(kadEntry("no.complete.count.avi", 12, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("input: 12 sources, 0 complete; output: sources=%d completed=%d", unknown.Sources, unknown.Completed)
+	if unknown.Sources != 12 || unknown.Completed != 0 {
+		t.Fatalf("sources=%d completed=%d, want 12/0", unknown.Sources, unknown.Completed)
+	}
+
+	lookalike := kadEntry("lookalike.avi", 5, 0)
+	lookalike.Identity = torrentFile(t).Hash
+	lookalike.CatalogId = fmt.Sprintf("ed2k:%X", lookalike.Identity)
+	_, err = EntryToFile(lookalike)
+	t.Logf("input: a Kad row whose MD4 %x reads as a meta hash; output: err=%v", lookalike.Identity, err)
+	if err == nil {
+		t.Fatal("a real hash that looks like a meta hash must be refused, or capable clients would read it as a torrent")
+	}
+}
+
+// torrentFile is a converted torrent row, for a test that needs a genuine meta hash.
+func torrentFile(t *testing.T) storage.File {
+	t.Helper()
+	file, err := EntryToFile(torrentEntry("some.torrent.mkv", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return file
 }
 
 func TestEntryToFileRejectsBadRows(t *testing.T) {

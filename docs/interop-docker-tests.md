@@ -22,6 +22,11 @@ caught**, all in §4 below.
 ENODE_INTEGRATION=1 go test ./tests/interop/ -v -timeout 30m
 ```
 
+`ENODE_INTEROP_ESERVER=17.15` runs the same cases against the 17.15 build instead (the
+default is 17.14, the release every measurement below was taken against). All six cases
+pass on both, measured 2026-10-06. `ENODE_INTEROP_LOGS=1` dumps both servers' logs from
+the eserver gossip case even when it passes; they are always dumped when it fails.
+
 The suite skips itself unless `ENODE_INTEGRATION=1`, matching
 `storage/integration_dockertest_test.go` and the (currently commented-out) line in
 `.github/workflows/linux.yml`. It skips again, with a clear message, when Docker is not
@@ -110,8 +115,23 @@ phase independently:
 `{K…}` is printed only when a ServerKey is on file, so phase 2 produced one, and `{U}`/`{T}`
 are the ports we published in our `0x97`. Those three are asserted. Its log must also carry
 **none** of its six refusal strings (`continue because portUDPobf`, `bad name:desc`, `sent
-a bad challenge`, `from unknown server`, `ignore non obfuscated`, `Deny server`) — each
-names one decision that has to be right.
+a bad challenge`, `from unknown server`, `ignore non obfuscated OP_SERVER_LIST_RES`, `Deny
+server`) — each names one decision that has to be right.
+
+The sibling line `ignore non obfuscated OP_SERVER_LIST_REQ` is **logged, not asserted**. It
+is eserver dropping the plaintext `0xA0` that phase 1 sends on purpose, and whether it
+appears depends on the build rather than on us. The drop is gated by bit `0x200` of the
+undocumented `sflags` option, whose compiled-in default differs between builds:
+
+| Build | `sflags` default | Plaintext `0xA0` |
+| --- | --- | --- |
+| 17.14 i686, Oct 2006 (the rig's default) | `0x5` | accepted silently |
+| 17.14 x86_64, Apr 2007 | `0x205` | dropped and logged |
+| 17.15 i686 and x86_64, Sep 2007 | `0x205` | dropped and logged |
+
+So the rig's default binary is the lenient outlier, not the norm. Measured both ways: 17.15
+logs the line, and `sflags=517` makes the Oct 2006 build log it too. The handshake
+completes regardless, because phase 3 repeats the registration obfuscated.
 
 The trailing `dynip=… version=… enode` can only have come from the tags in our `0xa3`, but
 the *name* is **reported rather than asserted**: it survives on roughly one run in three.

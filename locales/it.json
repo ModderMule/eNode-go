@@ -30,7 +30,7 @@
   "metafile.magnet_only": "Questa release non ha un file torrent. Usa il suo link magnet.",
   "search.query_required": "Inserisci almeno una parola di ricerca.",
   "search.query_too_long": "La ricerca è troppo lunga.",
-  "search.unavailable": "I cataloghi torrent e Usenet non sono raggiungibili al momento.",
+  "search.unavailable": "I cataloghi non sono raggiungibili al momento.",
   "search.disabled": "Questo server non offre la ricerca nei cataloghi.",
   "ratelimit.exceeded": "Troppe richieste. Attendi un minuto.",
   "request.invalid_form": "Il modulo è scaduto. Riprova.",

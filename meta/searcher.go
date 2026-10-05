@@ -27,6 +27,8 @@ import (
 const (
 	NetworkTorrent = "torrent"
 	NetworkUsenet  = "usenet"
+	// NetworkKad is the kademlia-crawler daemon. Its rows are native: real eD2K files.
+	NetworkKad = "kad"
 )
 
 // downBackoff is how long a daemon that answered "unavailable", "unimplemented" or
@@ -49,7 +51,11 @@ type Searcher struct {
 
 // source is one network: its daemon client, its feed and its limits.
 type source struct {
-	network       string
+	network string
+	// native marks a network whose rows are real eD2K files (Kad) rather than
+	// pseudo-hash rows: every client gets them in an eD2K search, whether or not it
+	// reads meta tags. MetaApi.Search serves them like any other network's.
+	native        bool
 	url           string
 	prefix        string
 	countInStatus bool
@@ -89,15 +95,18 @@ func NewWithClients(cfg config.MetaSearchConfig, clientFor func(network string, 
 		name   string
 		cfg    config.MetaNetworkConfig
 		prefix string
+		native bool
 	}{
-		{NetworkTorrent, cfg.Torrent, config.DefaultTorrentNamePrefix},
-		{NetworkUsenet, cfg.Usenet, config.DefaultUsenetNamePrefix},
+		{NetworkTorrent, cfg.Torrent, config.DefaultTorrentNamePrefix, false},
+		{NetworkUsenet, cfg.Usenet, config.DefaultUsenetNamePrefix, false},
+		{NetworkKad, cfg.Kad, config.DefaultKadNamePrefix, true},
 	} {
 		if !n.cfg.Enabled {
 			continue
 		}
 		src := &source{
 			network:       n.name,
+			native:        n.native,
 			url:           n.cfg.URL,
 			prefix:        n.cfg.NamePrefixOrDefault(n.prefix),
 			countInStatus: n.cfg.CountInServerStatus,
@@ -179,7 +188,10 @@ func (s *Searcher) FetchMetaFile(ctx context.Context, network, catalogID string)
 //
 // udp selects the UDP limits: a shorter deadline, a smaller row cap, and a live call
 // only while a udpMaxConcurrent slot is free.
-func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp bool) []storage.File {
+//
+// nativeOnly asks the native networks alone (Kad), for a requester that cannot act on
+// a torrent or Usenet row: those daemons are then not called at all.
+func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, nativeOnly bool) []storage.File {
 	if expr == nil || len(s.sources) == 0 {
 		return nil
 	}
@@ -188,6 +200,9 @@ func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp boo
 	results := make([][]storage.File, len(s.sources))
 	var wg sync.WaitGroup
 	for i, src := range s.sources {
+		if nativeOnly && !src.native {
+			continue
+		}
 		wg.Add(1)
 		go func(i int, src *source) {
 			defer wg.Done()

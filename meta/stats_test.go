@@ -133,7 +133,7 @@ func TestStatsStaleWhenSearchStillAnswers(t *testing.T) {
 	src := s.sources[0]
 
 	src.refreshInfo(context.Background())
-	_ = s.Search(context.Background(), text("stale"), false)
+	_ = s.Search(context.Background(), text("stale"), false, false)
 	healthy := s.Stats()[0]
 
 	d.mu.Lock()
@@ -172,7 +172,7 @@ func TestStatsNotStaleWithoutSearchAnswer(t *testing.T) {
 
 	unpolled := s.Stats()[0]
 	src.refreshInfo(context.Background())
-	_ = s.Search(context.Background(), text("failing"), false)
+	_ = s.Search(context.Background(), text("failing"), false, false)
 	failed := s.Stats()[0]
 
 	t.Logf("input: no poll yet, then poll unavailable + search error; output: unpolled stale=%t, failed reachable=%t stale=%t liveOKAt.zero=%t liveErrors=%d",
@@ -212,22 +212,22 @@ func TestStatsSearchCounters(t *testing.T) {
 	cfg.Torrent.SearchTimeoutMs = 50
 	s := searcherFor(cfg, map[string]*fakeDaemon{NetworkTorrent: d})
 
-	_ = s.Search(context.Background(), text("count"), false) // miss, live call, 1 row
-	_ = s.Search(context.Background(), text("count"), false) // hit, 1 row
+	_ = s.Search(context.Background(), text("count"), false, false) // miss, live call, 1 row
+	_ = s.Search(context.Background(), text("count"), false, false) // hit, 1 row
 	s.udpSlots <- struct{}{}
-	_ = s.Search(context.Background(), text("count"), true) // slots full: skipped, cache hit, 1 row
-	_ = s.Search(context.Background(), text("other"), true) // slots full: skipped, nothing cached
+	_ = s.Search(context.Background(), text("count"), true, false) // slots full: skipped, cache hit, 1 row
+	_ = s.Search(context.Background(), text("other"), true, false) // slots full: skipped, nothing cached
 	<-s.udpSlots
 
 	d.mu.Lock()
 	d.searchErr = errors.New("boom")
 	d.mu.Unlock()
-	_ = s.Search(context.Background(), text("failing"), false) // miss, live call, error
+	_ = s.Search(context.Background(), text("failing"), false, false) // miss, live call, error
 
 	d.mu.Lock()
 	d.searchErr, d.searchDelay = nil, time.Second
 	d.mu.Unlock()
-	_ = s.Search(context.Background(), text("slow"), false) // miss, live call, timeout
+	_ = s.Search(context.Background(), text("slow"), false, false) // miss, live call, timeout
 
 	st := s.Stats()[0]
 	t.Logf("input: miss, hit, 2 UDP with slots full, error, timeout; output: tcp=%d udp=%d rows=%d live=%d errors=%d timeouts=%d hits=%d misses=%d udpSkipped=%d cacheEntries=%d",

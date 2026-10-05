@@ -3,6 +3,7 @@ package ed2k
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
@@ -18,19 +19,31 @@ import (
 	"github.com/ModderMule/enodemeta/tags"
 )
 
-// fakeMeta is a MetaSearcher with a fixed answer that records how it was asked.
+// fakeMeta is a MetaSearcher with a fixed answer that records how it was asked. Like
+// the real searcher, a nativeOnly call answers with the native (Kad) rows alone.
 type fakeMeta struct {
-	mu    sync.Mutex
-	rows  []storage.File
-	calls []bool // the udp argument of each call
-	files int    // what AdvertisedFiles reports
+	mu          sync.Mutex
+	rows        []storage.File
+	calls       []bool // the udp argument of each call for every network
+	nativeCalls int    // calls limited to the native networks
+	files       int    // what AdvertisedFiles reports
 }
 
-func (f *fakeMeta) Search(_ context.Context, _ *storage.SearchExpr, udp bool) []storage.File {
+func (f *fakeMeta) Search(_ context.Context, _ *storage.SearchExpr, udp, nativeOnly bool) []storage.File {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, udp)
-	return f.rows
+	if !nativeOnly {
+		f.calls = append(f.calls, udp)
+		return f.rows
+	}
+	f.nativeCalls++
+	var native []storage.File
+	for _, row := range f.rows {
+		if row.Meta.Native() {
+			native = append(native, row)
+		}
+	}
+	return native
 }
 
 func (f *fakeMeta) AdvertisedFiles() int { return f.files }
@@ -71,6 +84,26 @@ func metaRows(t *testing.T, n int) []storage.File {
 				Kind: 1, Version: 1, FileIndex: 0, FilePath: fmt.Sprintf("dir/paging-meta-%02d.mkv", i),
 				TotalSize: 5 << 30, CatalogID: fmt.Sprintf("bt:v1:%040X", i), Seeders: 42, Peers: 7,
 				AgeDays: 3, Indexer: "dht", Flags: 0, Magnet: "magnet:?xt=urn:btih:00",
+			},
+		}
+	}
+	return rows
+}
+
+// kadRows returns n Kad rows as the meta package builds them: a real MD4 in the hash
+// slot, the network prefix on the name, and Meta saying the row is native.
+func kadRows(n int) []storage.File {
+	rows := make([]storage.File, n)
+	for i := range rows {
+		hash := md5.Sum([]byte{'k', 'a', 'd', byte(i)})
+		rows[i] = storage.File{
+			Hash:    hash[:],
+			Name:    fmt.Sprintf("[kad emule-qt.org] paging-kad-%02d.avi", i),
+			Size:    uint64(700<<20 + i),
+			Type:    "Video",
+			Sources: 17, Completed: 0,
+			Meta: &storage.MetaInfo{
+				Kind: storage.MetaKindED2K, CatalogID: fmt.Sprintf("ed2k:%X", hash), Peers: 17, AgeDays: 2, Indexer: "kad",
 			},
 		}
 	}
@@ -293,6 +326,10 @@ func TestAddFileEmitsMetaTags(t *testing.T) {
 		TagMetaFilePath: tags.FTMetaFilePath, TagMetaTotalSize: tags.FTMetaTotalSize, TagMetaID: tags.FTMetaID,
 		TagMetaSeeders: tags.FTMetaSeeders, TagMetaPeers: tags.FTMetaPeers, TagMetaAge: tags.FTMetaAge,
 		TagMetaIndexer: tags.FTMetaIndexer, TagMetaFlags: tags.FTMetaFlags, TagMetaMagnet: tags.FTMetaMagnet,
+		TagMetaNetwork: tags.FTMetaNetwork,
+	}
+	if MetaNetworkKad != tags.MetaNetworkKad {
+		t.Fatal("MetaNetworkKad differs from the contract's")
 	}
 	for ours, contract := range ids {
 		if int(ours) != contract {
@@ -484,4 +521,227 @@ func countGlobSearchRecords(t *testing.T, datagram []byte) int {
 		n++
 	}
 	return n
+}
+
+// hasMetaTags reports whether a decoded record carries any FT_META_* tag of a
+// pseudo-hash row (0x60-0x6c).
+func hasMetaTags(r FileRecord) bool {
+	for code := TagMetaKind; code <= TagMetaMagnet; code++ {
+		if _, ok := r.Tags[tagName(code)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// TestKadRowIsAnOrdinaryFileWithOneTag is what eMuleQt recognises a Kad result by:
+// FT_META_NETWORK = 3 and nothing else of the meta block. FT_META_KIND in particular
+// must be absent — a shipped eMuleQt drops a row whose kind tag its hash cannot back.
+func TestKadRowIsAnOrdinaryFileWithOneTag(t *testing.T) {
+	client, conn := searchPagingClient(t, 1)
+	client.server.SetMetaSearcher(&fakeMeta{rows: kadRows(1)}, true)
+
+	client.handleED2K(OpSearchRequest, searchFor(t, "paging-"))
+	records := decodeSearchRecords(t, conn.takeWritten())
+	t.Logf("input: 1 eD2K file + 1 Kad row, search \"paging-\"")
+	for i, r := range records {
+		t.Logf("output: record %d hash=%x id=%d port=%d tags=%v", i, r.Hash, r.ID, r.Port, r.Tags)
+	}
+	if len(records) != 2 {
+		t.Fatalf("got %d records, want the eD2K file and the Kad row", len(records))
+	}
+	local, kad := records[0], records[1]
+	if _, marked := local.Tags[tagName(TagMetaNetwork)]; marked {
+		t.Fatal("the server's own file carries FT_META_NETWORK")
+	}
+	want := kadRows(1)[0]
+	if !bytes.Equal(kad.Hash, want.Hash) || metahash.IsMetaHash(kad.Hash) {
+		t.Fatalf("Kad row hash %x, want the file's own MD4 %x", kad.Hash, want.Hash)
+	}
+	if kad.Tags[tagName(TagMetaNetwork)] != uint64(MetaNetworkKad) {
+		t.Fatalf("FT_META_NETWORK = %v, want %d", kad.Tags[tagName(TagMetaNetwork)], MetaNetworkKad)
+	}
+	if hasMetaTags(kad) {
+		t.Fatalf("the Kad row carries FT_META_* tags of a pseudo-hash row: %v", kad.Tags)
+	}
+	if kad.ID != 0 || kad.Port != 0 {
+		t.Fatalf("Kad row source %d:%d, want 0:0", kad.ID, kad.Port)
+	}
+	if kad.Tags["name"] != want.Name || kad.Tags[tagName(TagSources)] != uint64(want.Sources) {
+		t.Fatalf("Kad row name=%v sources=%v, want %q / %d", kad.Tags["name"], kad.Tags[tagName(TagSources)], want.Name, want.Sources)
+	}
+}
+
+// TestLocalFileTakesPrecedenceOverKadRow: a file a user shares on this server is
+// answered from the server's own database, whatever Kad says about the same hash. One
+// record is sent, with the local name, sources and source address, and without the
+// Kad prefix or tag — on a single page, on a later page and over UDP.
+func TestLocalFileTakesPrecedenceOverKadRow(t *testing.T) {
+	// Local file i has hash {i>>8, i, 0...}, name paging-%04d.bin and size 1024+i.
+	kadFor := func(i int) storage.File {
+		row := kadRows(1)[0]
+		row.Hash = make([]byte, 16)
+		row.Hash[0], row.Hash[1] = byte(i>>8), byte(i)
+		row.Name = fmt.Sprintf("[kad emule-qt.org] kad name of paging-%04d.avi", i)
+		row.Sources = 99
+		return row
+	}
+	check := func(label string, records []FileRecord, local int) {
+		t.Helper()
+		hash := kadFor(local).Hash
+		found := 0
+		for _, r := range records {
+			if !bytes.Equal(r.Hash, hash) {
+				continue
+			}
+			found++
+			t.Logf("output: %s record name=%v sources=%v id=%#x port=%d network=%v",
+				label, r.Tags["name"], r.Tags[tagName(TagSources)], r.ID, r.Port, r.Tags[tagName(TagMetaNetwork)])
+			if want := fmt.Sprintf("paging-%04d.bin", local); r.Tags["name"] != want {
+				t.Fatalf("%s: name %v, want the local %q", label, r.Tags["name"], want)
+			}
+			if r.Tags[tagName(TagSources)] != uint64(1) {
+				t.Fatalf("%s: sources %v, want the server's own count 1", label, r.Tags[tagName(TagSources)])
+			}
+			if r.ID != 0x0100007F || r.Port != 4662 {
+				t.Fatalf("%s: source %#x:%d, want the sharing client's", label, r.ID, r.Port)
+			}
+			if _, marked := r.Tags[tagName(TagMetaNetwork)]; marked {
+				t.Fatalf("%s: the local file carries FT_META_NETWORK", label)
+			}
+		}
+		if found != 1 {
+			t.Fatalf("%s: hash %x sent %d times, want once", label, hash, found)
+		}
+	}
+
+	// One page: 3 local files, Kad knows file 1 too and one file the server lacks.
+	client, conn := searchPagingClient(t, 3)
+	client.server.SetMetaSearcher(&fakeMeta{rows: append([]storage.File{kadFor(1)}, kadRows(1)...)}, true)
+	t.Logf("input: 3 local files, Kad rows for local file 1 and for one unknown file")
+	client.handleED2K(OpSearchRequest, searchFor(t, "paging-"))
+	records := decodeSearchRecords(t, conn.takeWritten())
+	if len(records) != 4 {
+		t.Fatalf("got %d records, want 3 local + 1 Kad-only", len(records))
+	}
+	check("single page", records, 1)
+
+	// Two pages: the local file sits on page 2, the Kad row would have been appended
+	// after it.
+	localOnPage2 := storage.MaxSearchPage + 10
+	client, conn = searchPagingClient(t, storage.MaxSearchPage+20)
+	client.server.SetMetaSearcher(&fakeMeta{rows: []storage.File{kadFor(localOnPage2)}}, true)
+	t.Logf("input: %d local files, a Kad row for local file %d (page 2)", storage.MaxSearchPage+20, localOnPage2)
+	client.handleED2K(OpSearchRequest, searchFor(t, "paging-"))
+	page1 := decodeSearchRecords(t, conn.takeWritten())
+	client.handleED2K(OpQueryMoreResult, NewBuffer(0))
+	page2 := decodeSearchRecords(t, conn.takeWritten())
+	all := append(page1, page2...)
+	if len(all) != storage.MaxSearchPage+20 {
+		t.Fatalf("pages hold %d records, want the %d local files and no Kad row", len(all), storage.MaxSearchPage+20)
+	}
+	check("paged", all, localOnPage2)
+
+	// UDP: the seeded file "food.bin" is local; Kad reports the same hash.
+	kad := kadRows(1)[0]
+	kad.Hash = []byte("fedcba9876543210")
+	kad.Name = "[kad emule-qt.org] food from kad.bin"
+	rt := NewServerRuntime(TCPRuntimeConfig{}, UDPRuntimeConfig{}, seededEngine(t))
+	rt.SetMetaSearcher(&fakeMeta{rows: []storage.File{kad}}, true)
+	server, remote, gotReply := udpProbe(t)
+	rt.udpGlobSearchReq(NewBufferFromBytes([]byte{0x01, 0x04, 0x00, 'f', 'o', 'o', 'd'}), remote, server, nil, "udp")
+	var udp []FileRecord
+	for d := gotReply(); d != nil; d = gotReply() {
+		if countGlobSearchRecords(t, d) != 1 {
+			t.Fatalf("udp datagram holds more than the one local record: % x", d)
+		}
+		recs, err := NewBufferFromBytes(append([]byte{1, 0, 0, 0}, d[2:]...)).GetFileList()
+		if err != nil {
+			t.Fatal(err)
+		}
+		udp = append(udp, recs...)
+	}
+	t.Logf("input: UDP search \"food\", local food.bin and a Kad row with its hash; output: %d records", len(udp))
+	if len(udp) != 1 || udp[0].Tags["name"] != "food.bin" {
+		t.Fatalf("udp answer %v, want the local food.bin alone", udp)
+	}
+	if _, marked := udp[0].Tags[tagName(TagMetaNetwork)]; marked {
+		t.Fatal("udp: the local file carries FT_META_NETWORK")
+	}
+}
+
+// TestKadRowsReachEveryClient: with advertiseToLegacyClients off a client that never
+// announced SrvCapMetaSearch gets no torrent or Usenet row, which it could not act on,
+// but still gets the Kad rows, which it can download. The pseudo-hash networks are not
+// even asked. The same holds for the UDP opcodes without a tag block.
+func TestKadRowsReachEveryClient(t *testing.T) {
+	rows := append(metaRows(t, 2), kadRows(2)...)
+
+	client, conn := searchPagingClient(t, 1)
+	client.metaCapable = false
+	fake := &fakeMeta{rows: rows}
+	client.server.SetMetaSearcher(fake, false)
+	client.handleED2K(OpSearchRequest, searchFor(t, "paging-"))
+	records := decodeSearchRecords(t, conn.takeWritten())
+	kad, pseudo := 0, 0
+	for _, r := range records {
+		if _, ok := r.Tags[tagName(TagMetaNetwork)]; ok {
+			kad++
+		}
+		if hasMetaTags(r) {
+			pseudo++
+		}
+	}
+	t.Logf("input: TCP, advertiseToLegacyClients=false, metaCapable=false, 2 torrent + 2 Kad rows; output: records=%d kad=%d pseudo=%d fullCalls=%d nativeCalls=%d",
+		len(records), kad, pseudo, fake.callCount(), fake.nativeCalls)
+	if len(records) != 3 || kad != 2 || pseudo != 0 {
+		t.Fatalf("records=%d kad=%d pseudo=%d, want 1 local + 2 Kad and no pseudo-hash row", len(records), kad, pseudo)
+	}
+	if fake.callCount() != 0 || fake.nativeCalls != 1 {
+		t.Fatalf("fullCalls=%d nativeCalls=%d, want 0/1", fake.callCount(), fake.nativeCalls)
+	}
+
+	fake = &fakeMeta{rows: rows}
+	rt := NewServerRuntime(TCPRuntimeConfig{}, UDPRuntimeConfig{}, seededEngine(t))
+	rt.SetMetaSearcher(fake, false)
+	server, remote, gotReply := udpProbe(t)
+	rt.udpGlobSearchReq(NewBufferFromBytes([]byte{0x01, 0x04, 0x00, 'f', 'o', 'o', 'd'}), remote, server, nil, "udp")
+	udpRecords := 0
+	for d := gotReply(); d != nil; d = gotReply() {
+		udpRecords += countGlobSearchRecords(t, d)
+	}
+	t.Logf("input: UDP OP_GLOBSEARCHREQ, same rows; output: records=%d fullCalls=%d nativeCalls=%d",
+		udpRecords, fake.callCount(), fake.nativeCalls)
+	if udpRecords != 3 || fake.callCount() != 0 || fake.nativeCalls != 1 {
+		t.Fatalf("udp records=%d fullCalls=%d nativeCalls=%d, want 3/0/1", udpRecords, fake.callCount(), fake.nativeCalls)
+	}
+}
+
+// TestKadHashIsAnOrdinaryFileToTheServer: a Kad row's hash is a real MD4, so the
+// pseudo-hash guards do not apply. A client may offer the file, and from then on
+// OP_GETSOURCES answers with it; before that the answer is empty, and the client
+// finds its sources on Kad.
+func TestKadHashIsAnOrdinaryFileToTheServer(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	client, _ := newOfferLimitClient(t, engine, 0, 0)
+	kad := kadRows(1)[0]
+
+	before := engine.GetSources(kad.Hash, 4096)
+	offer := []PacketItem{
+		{Type: TypeUint8, Value: OpOfferFiles},
+		{Type: TypeUint32, Value: uint32(1)},
+	}
+	AddFile(&offer, SharedFile{Name: "paging-kad-00.avi", Size: 4096, Hash: kad.Hash,
+		SourceID: ValCompleteID, SourcePort: ValCompletePort})
+	dispatchIncomingTCPPacket(t, client, offer)
+	after := engine.GetSources(kad.Hash, 4096)
+
+	t.Logf("input: OP_GETSOURCES for Kad hash %x, then OP_OFFERFILES of it, then OP_GETSOURCES again", kad.Hash)
+	t.Logf("output: sources before=%d after=%d FilesCount=%d", len(before), len(after), engine.FilesCount())
+	if len(before) != 0 {
+		t.Fatalf("an unknown Kad hash returned %d sources", len(before))
+	}
+	if engine.FilesCount() != 1 || len(after) != 1 {
+		t.Fatalf("the offered file was refused: FilesCount=%d sources=%d", engine.FilesCount(), len(after))
+	}
 }

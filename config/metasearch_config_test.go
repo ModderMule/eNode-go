@@ -31,12 +31,16 @@ func TestMetaSearchDefaults(t *testing.T) {
 	if !m.AdvertiseToLegacyClientsOrDefault() || m.UDPMaxConcurrent != 16 {
 		t.Fatalf("advertise=%t udpMaxConcurrent=%d", m.AdvertiseToLegacyClientsOrDefault(), m.UDPMaxConcurrent)
 	}
-	if m.Torrent.URL != DefaultTorrentURL || m.Usenet.URL != DefaultUsenetURL {
-		t.Fatalf("urls %q / %q", m.Torrent.URL, m.Usenet.URL)
+	if m.Torrent.URL != DefaultTorrentURL || m.Usenet.URL != DefaultUsenetURL || m.Kad.URL != DefaultKadURL {
+		t.Fatalf("urls %q / %q / %q", m.Torrent.URL, m.Usenet.URL, m.Kad.URL)
 	}
 	if m.Torrent.NamePrefixOrDefault(DefaultTorrentNamePrefix) != "[torrent] " ||
-		m.Usenet.NamePrefixOrDefault(DefaultUsenetNamePrefix) != "[usenet] " {
+		m.Usenet.NamePrefixOrDefault(DefaultUsenetNamePrefix) != "[usenet] " ||
+		m.Kad.NamePrefixOrDefault(DefaultKadNamePrefix) != "[kad] " {
 		t.Fatal("default prefixes wrong")
+	}
+	if m.Kad.Enabled || m.Kad.MaxResults != 50 || m.Kad.MaxUDPResults != 10 {
+		t.Fatalf("kad defaults %+v, want off with the shared limits", m.Kad)
 	}
 	if !m.Torrent.LiveSearchOrDefault() || m.Torrent.SearchTimeoutMs != 1500 || m.Torrent.UDPSearchTimeoutMs != 800 ||
 		m.Torrent.MaxResults != 50 || m.Torrent.MaxUDPResults != 10 || m.Torrent.Feed.MaxRows != 250000 {
@@ -60,6 +64,32 @@ func TestMetaSearchExplicitEmptyPrefix(t *testing.T) {
 	t.Logf("input: namePrefix \"\"; output: %q", got)
 	if got != "" {
 		t.Fatalf("prefix %q, want none", got)
+	}
+}
+
+// TestMetaSearchKad: the Kad network is a setting of its own, off unless enabled, with
+// a configurable prefix like the other networks.
+func TestMetaSearchKad(t *testing.T) {
+	body := "metaSearch:\n  kad:\n    enabled: true\n    namePrefix: \"[kad emule-qt.org] \"\n"
+	cfg, err := loadYAML(t, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := cfg.MetaSearch
+	prefix := m.Kad.NamePrefixOrDefault(DefaultKadNamePrefix)
+	t.Logf("input: %q; output: kad.enabled=%t url=%q prefix=%q anyEnabled=%t torrent=%t usenet=%t",
+		body, m.Kad.Enabled, m.Kad.URL, prefix, m.AnyEnabled(), m.Torrent.Enabled, m.Usenet.Enabled)
+	if !m.Kad.Enabled || !m.AnyEnabled() || m.Torrent.Enabled || m.Usenet.Enabled {
+		t.Fatal("enabling kad must turn on kad alone")
+	}
+	if m.Kad.URL != DefaultKadURL || prefix != "[kad emule-qt.org] " {
+		t.Fatalf("url %q prefix %q", m.Kad.URL, prefix)
+	}
+
+	_, err = loadYAML(t, "metaSearch:\n  kad:\n    enabled: true\n    url: \"127.0.0.1:9703\"\n")
+	t.Logf("input: kad url without a scheme; output: err=%v", err)
+	if err == nil || !strings.Contains(err.Error(), "metaSearch.kad.url") {
+		t.Fatalf("err = %v, want metaSearch.kad.url", err)
 	}
 }
 

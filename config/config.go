@@ -404,18 +404,19 @@ func (c GeoIPConfig) HasCredentials() bool {
 	return c.AccountID != "" && c.LicenseKey != ""
 }
 
-// MetaSearchConfig merges torrent and Usenet releases into eD2K search results. The
-// rows come from the torrent-crawler and usenet-crawler daemons over their MetaIngest
-// service (github.com/ModderMule/enodemeta): a live Search per query, bounded by a
+// MetaSearchConfig merges torrent and Usenet releases, and files found on the eMule
+// Kad network, into eD2K search results. The rows come from the torrent-crawler,
+// usenet-crawler and kademlia-crawler daemons over their MetaIngest service
+// (github.com/ModderMule/enodemeta): a live Search per query, bounded by a
 // deadline, plus an optional subscription to each daemon's published feed. Every
 // network is off by default, so a server that never enables one answers searches
 // exactly as before. See docs/meta-search.md.
 type MetaSearchConfig struct {
-	// AdvertiseToLegacyClients sends meta rows to every client. When false, only a
-	// client that announced SRVCAP_METASEARCH (0x2000) at login, or a UDP
+	// AdvertiseToLegacyClients sends torrent and Usenet rows to every client. When
+	// false, only a client that announced SRVCAP_METASEARCH (0x2000) at login, or a UDP
 	// OP_GLOBSEARCHREQ3 carrying SRVCAP_UDP_METASEARCH (0x02), receives them. *bool,
 	// defaults on: a stock eMule shows the rows (the name prefix marks them) but can
-	// never download one.
+	// never download one. Kad rows are real eD2K files and go to every client either way.
 	AdvertiseToLegacyClients *bool `yaml:"advertiseToLegacyClients"`
 	// UDPMaxConcurrent caps live Search calls made on behalf of UDP global searches.
 	// A UDP search runs on a shared worker; past the cap it is answered from the cache
@@ -424,7 +425,11 @@ type MetaSearchConfig struct {
 
 	Torrent MetaNetworkConfig `yaml:"torrent"`
 	Usenet  MetaNetworkConfig `yaml:"usenet"`
-	Cache   MetaCacheConfig   `yaml:"cache"`
+	// Kad is the kademlia-crawler daemon. Its rows are real eD2K files: the hash is
+	// the file's own MD4, so every client can download one. A file a user shares on
+	// this server is always answered from the server's own database instead.
+	Kad   MetaNetworkConfig `yaml:"kad"`
+	Cache MetaCacheConfig   `yaml:"cache"`
 }
 
 // AdvertiseToLegacyClientsOrDefault reports whether every client receives meta rows,
@@ -434,12 +439,15 @@ func (c MetaSearchConfig) AdvertiseToLegacyClientsOrDefault() bool {
 }
 
 // AnyEnabled reports whether at least one network is on.
-func (c MetaSearchConfig) AnyEnabled() bool { return c.Torrent.Enabled || c.Usenet.Enabled }
+func (c MetaSearchConfig) AnyEnabled() bool {
+	return c.Torrent.Enabled || c.Usenet.Enabled || c.Kad.Enabled
+}
 
 // MetaNetworkConfig is one catalogue daemon.
 type MetaNetworkConfig struct {
 	Enabled bool `yaml:"enabled"`
-	// URL is the daemon's MetaIngest listener (torrent-crawler 9701, usenet-crawler 9702).
+	// URL is the daemon's MetaIngest listener (torrent-crawler 9701, usenet-crawler 9702,
+	// kademlia-crawler 9703).
 	URL string `yaml:"url"`
 	// Token is the daemon's ingest.auth_token, sent as a bearer token. A daemon on a
 	// non-loopback address refuses to start without one. Keep it in enode.local.yaml.
@@ -941,8 +949,10 @@ func normalizeMessageText(s string) string {
 const (
 	DefaultTorrentURL        = "http://127.0.0.1:9701"
 	DefaultUsenetURL         = "http://127.0.0.1:9702"
+	DefaultKadURL            = "http://127.0.0.1:9703"
 	DefaultTorrentNamePrefix = "[torrent] "
 	DefaultUsenetNamePrefix  = "[usenet] "
+	DefaultKadNamePrefix     = "[kad] "
 	// maxMetaUDPResults bounds maxUDPResults: each row is one datagram answering one
 	// unauthenticated request.
 	maxMetaUDPResults = 50
@@ -965,6 +975,9 @@ func setMetaSearchDefaults(c *MetaSearchConfig) error {
 		return err
 	}
 	if err := setMetaNetworkDefaults("metaSearch.usenet", &c.Usenet, DefaultUsenetURL); err != nil {
+		return err
+	}
+	if err := setMetaNetworkDefaults("metaSearch.kad", &c.Kad, DefaultKadURL); err != nil {
 		return err
 	}
 	if c.Cache.MaxEntries <= 0 {

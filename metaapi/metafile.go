@@ -23,6 +23,9 @@ import (
 const (
 	networkTorrent = "torrent"
 	networkUsenet  = "usenet"
+	// networkKad has no metafiles: its rows are eD2K files. It is a network of
+	// MetaApi.Search only.
+	networkKad = "kad"
 )
 
 // MetaFileSource fetches metafiles from the catalogue daemons. *meta.Searcher is one.

@@ -164,6 +164,12 @@ type GossipConfig struct {
 // its session closed.
 const recentClientWindow = 30 * time.Minute
 
+// parkedRetryRounds is how often a round also probes the parked peers: every Nth one,
+// about 20 minutes at the default 150 s interval. Parking exists so a dead peer stops
+// costing a round's worth of datagrams, but a peer that is only ever revived by its own
+// inbound frame stays lost if it comes back without contacting us first.
+const parkedRetryRounds = 8
+
 // GossipHandler owns the peer table and every decision about what enters it.
 type GossipHandler struct {
 	mu    sync.RWMutex
@@ -183,11 +189,16 @@ type GossipHandler struct {
 
 	// stats are cumulative counters for the admin surface and the logs.
 	stats GossipStats
+
+	// round counts outbound rounds, so every parkedRetryRounds-th one can include the
+	// parked peers.
+	round uint64
 }
 
 // GossipStats is a snapshot of what gossip has done. Counters only ever increase.
 type GossipStats struct {
-	Known        int
+	Known int
+	// Verified counts the peers currently advertisable, which excludes parked ones.
 	Verified     int
 	Parked       int
 	Admitted     uint64
@@ -261,6 +272,7 @@ func (g *GossipHandler) NoteClient(ip net.IP) {
 
 // Verified returns the peers that may be advertised to clients and echoed to other
 // servers, newest-verified first so a truncated list carries the freshest entries.
+// Parked peers are left out: see advertisableLocked.
 func (g *GossipHandler) Verified() []PeerAddr {
 	if g == nil {
 		return nil
@@ -269,7 +281,7 @@ func (g *GossipHandler) Verified() []PeerAddr {
 	defer g.mu.RUnlock()
 	out := make([]*PeerServer, 0, len(g.peers))
 	for _, p := range g.peers {
-		if p.State >= advertisableState {
+		if g.advertisableLocked(p) {
 			out = append(out, p)
 		}
 	}
@@ -290,7 +302,7 @@ func (g *GossipHandler) VerifiedEntries() []ServerMetEntry {
 	defer g.mu.RUnlock()
 	out := make([]ServerMetEntry, 0, len(g.peers))
 	for _, p := range g.peers {
-		if p.State < advertisableState {
+		if !g.advertisableLocked(p) {
 			continue
 		}
 		out = append(out, ServerMetEntry{
@@ -311,7 +323,7 @@ func (g *GossipHandler) Stats() GossipStats {
 	s := g.stats
 	s.Known = len(g.peers)
 	for _, p := range g.peers {
-		if p.State >= advertisableState {
+		if g.advertisableLocked(p) {
 			s.Verified++
 		}
 		if p.Parked(g.cfg.MaxFailures) {
@@ -578,8 +590,9 @@ func (g *GossipHandler) PeerByIP(ip net.IP) (PeerServer, bool) {
 	return *p, true
 }
 
-// Contactable returns copies of the peers the outbound loop should work on this round:
-// everything not parked. Copies so the loop can send without holding the lock.
+// Contactable returns copies of the peers that are not parked. Copies so a caller can
+// use them without holding the lock. The outbound loop uses contactableForRound, which
+// also retries the parked ones periodically.
 func (g *GossipHandler) Contactable() []PeerServer {
 	if g == nil {
 		return nil
@@ -610,7 +623,9 @@ func (g *GossipHandler) NoteRoundFailure(addr PeerAddr) {
 		return
 	}
 	p.Failures++
-	if p.Parked(g.cfg.MaxFailures) {
+	// Logged on the transition only: a parked peer is still probed every
+	// parkedRetryRounds-th round and keeps counting failures there.
+	if g.cfg.MaxFailures > 0 && p.Failures == g.cfg.MaxFailures {
 		logging.Debugf("gossip: parking %s after %d consecutive failures", p.Addr, p.Failures)
 	}
 }
@@ -660,6 +675,37 @@ func (g *GossipHandler) AddSeeds(seeds []PeerAddr) int {
 		added++
 	}
 	return added
+}
+
+// contactableForRound returns the peers the outbound loop should work on in the round
+// that is starting: everything not parked, plus the parked peers on every
+// parkedRetryRounds-th round. A parked peer that answers is revived by the inbound
+// handlers like any other; one that does not simply stays parked.
+func (g *GossipHandler) contactableForRound() []PeerServer {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.round++
+	retryParked := g.round%parkedRetryRounds == 0
+	out := make([]PeerServer, 0, len(g.peers))
+	for _, p := range g.peers {
+		if !retryParked && p.Parked(g.cfg.MaxFailures) {
+			continue
+		}
+		out = append(out, *p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Addr.String() < out[j].Addr.String() })
+	return out
+}
+
+// advertisableLocked reports whether a peer may be advertised to clients, echoed to
+// other servers and persisted: it has passed the admission bar and is not parked.
+//
+// Parking has to count because state never regresses. Without it a peer that verified
+// once and then went away would be handed out for as long as the process runs. The
+// peer keeps its state, key and name while parked, so the first inbound frame from it
+// puts it straight back.
+func (g *GossipHandler) advertisableLocked(p *PeerServer) bool {
+	return p.State >= advertisableState && !p.Parked(g.cfg.MaxFailures)
 }
 
 // admitLocked applies the merge policy to one address and inserts it at peerSeen if it

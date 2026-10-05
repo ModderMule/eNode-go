@@ -59,16 +59,26 @@ const (
 	enodeUDPObfPort = 5567
 	enodeTCPObfPort = 5565
 
-	enodeImage   = "enode-interop:test"
-	eserverImage = "lugdunum-interop:17.14-i686"
+	enodeImage = "enode-interop:test"
 
 	// Docker Engine 20.10 and later. Anything below 1.40 is rejected outright by current
 	// Docker Desktop; 1.41 is old enough to be present everywhere that still runs.
 	dockerAPIVersion = "1.41"
 
-	// Relative to the module root; gitignored, so a fresh clone will not have it.
-	eserverBinaryPath = "lugdunum-eserver/run/eserver-17.14.i686-linux.nptl"
+	// eserverVersionEnv selects which vendored eserver release the rig runs. Unset means
+	// 17.14, the release every measurement in docs/server-gossip.md was taken against.
+	defaultDockerSocket = "/var/run/docker.sock"
+
+	eserverVersionEnv     = "ENODE_INTEROP_ESERVER"
+	eserverDefaultVersion = "17.14"
 )
+
+// eserverBinaryPaths maps a release to its 32-bit ELF, relative to the module root. The
+// tree is gitignored, so a fresh clone will not have any of them.
+var eserverBinaryPaths = map[string]string{
+	"17.14": "lugdunum-eserver/run/eserver-17.14.i686-linux.nptl",
+	"17.15": "lugdunum-eserver/bin/eserver-17.15.i686-linux",
+}
 
 var (
 	enodeImageOnce    sync.Once
@@ -143,12 +153,16 @@ func requireInterop(t *testing.T) *dockertest.Pool {
 // default fails even though `docker ps` works fine. An explicit DOCKER_HOST always wins;
 // otherwise the known per-runtime locations are tried before giving up and letting
 // dockertest use its default (so the skip message names the real problem).
+//
+// The default socket is returned spelled out, never as "": requireInterop builds the
+// client with NewVersionedClient, which rejects an empty endpoint as invalid instead of
+// falling back the way dockertest.NewPool does.
 func dockerEndpoint() string {
 	if h := os.Getenv("DOCKER_HOST"); h != "" {
 		return h
 	}
-	if _, err := os.Stat("/var/run/docker.sock"); err == nil {
-		return ""
+	if _, err := os.Stat(defaultDockerSocket); err == nil {
+		return "unix://" + defaultDockerSocket
 	}
 	home, _ := os.UserHomeDir()
 	candidates := []string{
@@ -164,12 +178,12 @@ func dockerEndpoint() string {
 			return "unix://" + c
 		}
 	}
-	return ""
+	return "unix://" + defaultDockerSocket
 }
 
 func orDefaultSocket(endpoint string) string {
 	if endpoint == "" {
-		return "unix:///var/run/docker.sock (dockertest default)"
+		return "unix://" + defaultDockerSocket + " (dockertest default)"
 	}
 	return endpoint
 }
@@ -177,10 +191,15 @@ func orDefaultSocket(endpoint string) string {
 // eserverBinary resolves the vendored 32-bit ELF, skipping when the tree is absent.
 func eserverBinary(t *testing.T) string {
 	t.Helper()
-	path := tests.FixRelativeTestingPath(eserverBinaryPath)
+	version := eserverVersion()
+	rel, ok := eserverBinaryPaths[version]
+	if !ok {
+		t.Fatalf("%s=%q is not a vendored eserver release", eserverVersionEnv, version)
+	}
+	path := tests.FixRelativeTestingPath(rel)
 	if _, err := os.Stat(path); err != nil {
 		t.Skipf("Lugdunum reference binary not present at %s (the tree is gitignored): %v",
-			eserverBinaryPath, err)
+			rel, err)
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -245,6 +264,7 @@ func startEserver(t *testing.T, pool *dockertest.Pool, network *dockertest.Netwo
 	t.Helper()
 	binary := eserverBinary(t)
 
+	eserverImage := eserverImageName()
 	eserverImageOnce.Do(func() { eserverImageErr = buildEserverImage(t, pool, binary) })
 	if eserverImageErr != nil {
 		t.Fatalf("build %s: %v", eserverImage, eserverImageErr)
@@ -383,14 +403,25 @@ func (n *node) restart(t *testing.T) {
 	// Re-inspect: with PublishAllPorts, Docker assigns a *new* ephemeral host port on every
 	// start, so the cached Container snapshot still names the old one and every subsequent
 	// stats() would dial a closed port.
-	container, err := n.pool.Client.InspectContainer(id)
-	if err != nil {
-		t.Fatalf("re-inspect %s after restart: %v", n.label, err)
-	}
-	n.resource.Container = container
-
+	//
+	// Inside the retry, and only accepted once a binding exists: RestartContainer returns
+	// before Docker has assigned the new ports, and an inspect taken in that window comes
+	// back with an empty port map — which hostPort treats as fatal.
 	if err := n.pool.Retry(func() error {
-		_, err := n.stats()
+		container, err := n.pool.Client.InspectContainer(id)
+		if err != nil {
+			return fmt.Errorf("re-inspect: %w", err)
+		}
+		if container.NetworkSettings == nil || len(container.NetworkSettings.Ports) == 0 {
+			return fmt.Errorf("no ports published yet")
+		}
+		for port, bindings := range container.NetworkSettings.Ports {
+			if len(bindings) == 0 {
+				return fmt.Errorf("port %s not bound yet", port)
+			}
+		}
+		n.resource.Container = container
+		_, err = n.stats()
 		return err
 	}); err != nil {
 		t.Fatalf("%s did not come back after a restart: %v\nlogs:\n%s", n.label, err, n.logs())
@@ -456,13 +487,15 @@ func (n *node) serverMet(path string) []ed2k.ServerMetEntry {
 
 // hostIP is the address on the host that the container's published ports are reachable
 // on. Docker reports 0.0.0.0 for a wildcard binding, which is not dialable on every
-// platform, so it is normalised to loopback.
+// platform, so it is normalised to loopback. So is "localhost", which Docker Desktop
+// reports: a UDP dial has no fallback between address families, so Go picks ::1 and the
+// datagram is refused when the port is only forwarded on IPv4.
 func (n *node) hostIP() string {
 	ip := n.resource.GetBoundIP("4661/tcp")
 	if ip == "" {
 		ip = n.resource.GetBoundIP("5555/tcp")
 	}
-	if ip == "" || ip == "0.0.0.0" || ip == "::" {
+	if ip == "" || ip == "0.0.0.0" || ip == "::" || ip == "localhost" {
 		return "127.0.0.1"
 	}
 	return ip
@@ -544,6 +577,20 @@ func describeEntries(entries []ed2k.ServerMetEntry) string {
 // private helpers
 // ---------------------------------------------------------------------------
 
+// eserverVersion is the eserver release under test: eserverVersionEnv, or the default.
+func eserverVersion() string {
+	if v := strings.TrimSpace(os.Getenv(eserverVersionEnv)); v != "" {
+		return v
+	}
+	return eserverDefaultVersion
+}
+
+// eserverImageName tags the image by release, so switching releases never reuses a stale
+// image built from the other binary.
+func eserverImageName() string {
+	return "lugdunum-interop:" + eserverVersion() + "-i686"
+}
+
 // buildEnodeImage builds the server image with the module root as the build context. The
 // image is built once per test binary and reused, so the go mod download and compile are
 // paid once rather than per case.
@@ -594,6 +641,7 @@ func buildEserverImage(t *testing.T, pool *dockertest.Pool, binary string) error
 			return fmt.Errorf("write %s: %w", dst, err)
 		}
 	}
+	eserverImage := eserverImageName()
 	t.Logf("input: building %s (staged context=%s, binary=%s)", eserverImage, ctxDir, binary)
 	start := time.Now()
 	var out bytes.Buffer

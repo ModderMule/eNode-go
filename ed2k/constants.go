@@ -72,13 +72,20 @@ const (
 //	OpServerListReqIPv6 (0xa7)  empty payload, the v6 analogue of 0xa4.
 //	OpServerListResIPv6 (0xa8)  <count 1> then count × (<ipv6 16 network order><port 2 LE>).
 //
-// 0xa7/0xa8 are free in the *server↔client* namespace: srchybrid/Opcodes.h ends that
-// block at OP_SERVER_LIST_REQ2 0xa4, and the OP_FWCHECKUDPREQ 0xa7 /
-// OP_KAD_FWTCPCHECK_ACK 0xa8 at :283-284 live in the separate client↔client block.
-// That is the same reasoning that allocated OpGlobGetSourcesIPv6 0xa5 / 0xa6 above,
-// which likewise coexist with client↔client OP_CHATCAPTCHAREQ/RES. Sent only to a
-// peer that advertised FlagIPv6 in its OP_GLOBSERVSTATRES udpflags, so a stock
-// eserver never sees them.
+// 0xa7/0xa8 are free in the *server↔client* namespace of the eMule trees:
+// srchybrid/Opcodes.h ends that block at OP_SERVER_LIST_REQ2 0xa4, and the
+// OP_FWCHECKUDPREQ 0xa7 / OP_KAD_FWTCPCHECK_ACK 0xa8 at :283-284 live in the separate
+// client↔client block. That is the same reasoning that allocated
+// OpGlobGetSourcesIPv6 0xa5 / 0xa6 above, which likewise coexist with client↔client
+// OP_CHATCAPTCHAREQ/RES. Sent only to a peer that advertised FlagIPv6 in its
+// OP_GLOBSERVSTATRES udpflags, so a stock eserver never sees them.
+//
+// They are not free in the original eserver, which no eMule header documents: 17.14
+// and 17.15 both use UDP 0xa6 (client→server) and 0xa7 (server→client) for a NAT
+// callback, with TCP 0x37 as the fallback notice. The directions differ from ours —
+// eserver never sends 0xa7 to a server and never sends 0xa6 at all — so nothing is
+// misrouted, but a client speaking both dialects must tell them apart by which kind
+// of server it is talking to.
 const (
 	OpServerListReqIPv6 uint8 = 0xa7
 	OpServerListResIPv6 uint8 = 0xa8
@@ -92,6 +99,8 @@ const (
 // classic high-water marks (OP_GETSOURCES_OBFU 0x23, OP_SERVER_LIST_REQ2 0xa4)
 // and are free across every surveyed eMule tree, so a legacy client never emits
 // them and its ProcessPacket drops them with a harmless default case.
+// The original eserver does take UDP 0xa6 as a client→server NAT callback request;
+// see the note on OpServerListReqIPv6 above.
 const (
 	OpGetSourcesIPv6       uint8 = 0x24
 	OpFoundSourcesIPv6     uint8 = 0x25
@@ -276,6 +285,18 @@ const (
 	TagMetaIndexer   uint8 = 0x6a
 	TagMetaFlags     uint8 = 0x6b
 	TagMetaMagnet    uint8 = 0x6c
+)
+
+// TagMetaNetwork (FT_META_NETWORK) marks a native row: a real eD2K file, with its own
+// MD4 in the hash slot, that a catalogue daemon found on another network. It is a
+// uint8 and the row's only meta tag. TagMetaKind must not go with it: an eMuleQt that
+// knows the meta rows drops a row whose kind tag its hash cannot back. Both eMule
+// trees keep an unknown numeric tag of a known type and ignore it, so a client that
+// does not know this one has an ordinary file.
+const (
+	TagMetaNetwork uint8 = 0x6d
+	// MetaNetworkKad is TagMetaNetwork's value for a file found on the Kad network.
+	MetaNetworkKad uint8 = 3
 )
 
 // IPv6Status* are the bits of the TagIPv6Status (0xab) bitfield. Unset bits mean

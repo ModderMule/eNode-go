@@ -181,11 +181,13 @@ filter:
 # Torrent and Usenet releases merged into eD2K search results, from the
 # torrent-crawler / usenet-crawler daemons over their MetaIngest service. Each row
 # carries a pseudo-hash and FT_META_* tags; a stock eMule shows it (the name prefix
-# marks it) but cannot download it. Every network is off by default, and off means
-# searches are answered exactly as before. See docs/meta-search.md.
+# marks it) but cannot download it. The kad network below adds real eD2K files found
+# on Kad. Every network is off by default, and off means searches are answered
+# exactly as before. See docs/meta-search.md.
 metaSearch:
-  # Send meta rows to every client. false limits them to clients that announced
-  # SRVCAP_METASEARCH (0x2000) at login, or a UDP OP_GLOBSEARCHREQ3 with flag 0x02.
+  # Send torrent and Usenet rows to every client. false limits them to clients that
+  # announced SRVCAP_METASEARCH (0x2000) at login, or a UDP OP_GLOBSEARCHREQ3 with
+  # flag 0x02. Kad rows are not affected.
   advertiseToLegacyClients: true
   # Live Search calls allowed in flight for UDP global searches. Past it a UDP
   # search is answered from the cache and feed only, never by waiting on a daemon.
@@ -218,6 +220,31 @@ metaSearch:
     url: "http://127.0.0.1:9702"   # usenet-crawler's MetaIngest listener
     token: ""
     namePrefix: "[usenet emule-qt.org] "
+    liveSearch: true
+    searchTimeoutMs: 1500
+    udpSearchTimeoutMs: 800
+    maxResults: 50
+    maxUDPResults: 10
+    countInServerStatus: false
+    feed:
+      enabled: false
+      maxRows: 250000
+      reconnectMinSeconds: 5
+      reconnectMaxSeconds: 300
+  # Files found on the eMule Kad network, from the kademlia-crawler daemon. Unlike the
+  # two networks above these are real eD2K files: the row carries the file's own hash,
+  # so every client can download it and finds its sources on Kad. They go to every
+  # client, whatever advertiseToLegacyClients says. eMuleQt knows them by the
+  # FT_META_NETWORK tag (0x6D) and shows a Kad icon in place of the prefix. A file a
+  # user shares on this server is always answered from the server's own database:
+  # the Kad row for the same hash is dropped. Off by default.
+  kad:
+    enabled: false
+    url: "http://127.0.0.1:9703"   # kademlia-crawler's MetaIngest listener
+    token: ""
+    # Prepended to every filename, e.g. "[kad emule-qt.org] "; "" for none. eMuleQt
+    # strips a leading "[kad ...] " bracket; other clients show and keep it.
+    namePrefix: "[kad] "
     liveSearch: true
     searchTimeoutMs: 1500
     udpSearchTimeoutMs: 800
@@ -278,8 +305,9 @@ metaApi:
   rateLimit:
     perIPPerMinute: 30             # metafile downloads per client address; 0 = unlimited
     perAccountPerMinute: 120       # per logged-in account; 0 = unlimited
-  # MetaApi.Search: paged search of the torrent and Usenet catalogues (the metaSearch
-  # networks with liveSearch on). A request picks torrent, Usenet or both (default).
+  # MetaApi.Search: paged search of the torrent, Usenet and Kad catalogues (the
+  # metaSearch networks with liveSearch on). A request picks one network, or all of
+  # them (default).
   search:
     enabled: true                  # served whenever the API is
     # With accounts enabled: true = searching needs an active account, like downloads;

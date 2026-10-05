@@ -30,7 +30,7 @@
   "metafile.magnet_only": "이 릴리스에는 토렌트 파일이 없습니다. 마그넷 링크를 사용하세요.",
   "search.query_required": "검색어를 하나 이상 입력하세요.",
   "search.query_too_long": "검색어가 너무 깁니다.",
-  "search.unavailable": "지금은 토렌트 및 Usenet 카탈로그에 연결할 수 없습니다.",
+  "search.unavailable": "지금은 카탈로그에 연결할 수 없습니다.",
   "search.disabled": "이 서버는 카탈로그 검색을 제공하지 않습니다.",
   "ratelimit.exceeded": "요청이 너무 많습니다. 1분 정도 기다리세요.",
   "request.invalid_form": "양식이 만료되었습니다. 다시 시도하세요.",

@@ -542,6 +542,67 @@ func TestParkingAndRevival(t *testing.T) {
 	}
 }
 
+// TestParkedPeerIsNotAdvertised covers the other half of parking. State never regresses,
+// so without this a peer that verified once and then died would stay in OP_SERVERLIST,
+// in the lists echoed to other servers and in server.met for the life of the process.
+func TestParkedPeerIsNotAdvertised(t *testing.T) {
+	g := testGossip(t, func(c *GossipConfig) { c.MaxFailures = 3 })
+	addr := keyPeer(t, g, "203.0.113.81", 4661)
+	g.NoteDescription(addr.IP, "peer", "desc")
+	g.NoteVerified(addr.IP)
+	t.Logf("input: %s verified; advertised=%v entries=%d stats=%+v",
+		addr, g.Verified(), len(g.VerifiedEntries()), g.Stats())
+	if len(g.Verified()) != 1 || len(g.VerifiedEntries()) != 1 || g.Stats().Verified != 1 {
+		t.Fatal("a verified, answering peer must be advertised")
+	}
+
+	for range 3 {
+		g.NoteRoundFailure(addr)
+	}
+	st := g.Stats()
+	t.Logf("after 3 failed rounds: advertised=%v entries=%d known=%d verified=%d parked=%d state=%s",
+		g.Verified(), len(g.VerifiedEntries()), st.Known, st.Verified, st.Parked, peerState_(t, g, addr))
+	if len(g.Verified()) != 0 || len(g.VerifiedEntries()) != 0 {
+		t.Fatal("a parked peer must not be advertised or persisted")
+	}
+	if st.Verified != 0 || st.Parked != 1 || st.Known != 1 {
+		t.Fatalf("stats = %+v, want known=1 verified=0 parked=1", st)
+	}
+	if peerState_(t, g, addr) != peerVerified {
+		t.Fatal("parking must not regress the peer's state")
+	}
+
+	// Any inbound frame puts it straight back, with nothing to re-earn.
+	g.NoteDescription(addr.IP, "peer", "desc")
+	t.Logf("after an inbound frame: advertised=%v entries=%d stats=%+v",
+		g.Verified(), len(g.VerifiedEntries()), g.Stats())
+	if len(g.Verified()) != 1 || len(g.VerifiedEntries()) != 1 || g.Stats().Verified != 1 {
+		t.Fatal("a revived peer must be advertised again")
+	}
+}
+
+// TestParkedPeersAreRetriedPeriodically pins the retry cadence: parked peers are absent
+// from ordinary rounds and included on every parkedRetryRounds-th one, so a server that
+// comes back without contacting us first is still found again.
+func TestParkedPeersAreRetriedPeriodically(t *testing.T) {
+	g := testGossip(t, func(c *GossipConfig) { c.MaxFailures = 1 })
+	live := keyPeer(t, g, "203.0.113.82", 4661)
+	dead := keyPeer(t, g, "203.0.113.83", 4661)
+	g.NoteRoundFailure(dead)
+
+	for round := 1; round <= 2*parkedRetryRounds; round++ {
+		got := g.contactableForRound()
+		t.Logf("round %d: contactable=%d (live=%s parked=%s)", round, len(got), live, dead)
+		want := 1
+		if round%parkedRetryRounds == 0 {
+			want = 2
+		}
+		if len(got) != want {
+			t.Fatalf("round %d: %d contactable, want %d", round, len(got), want)
+		}
+	}
+}
+
 // TestVerifiedIsOrderedByFreshness matters because both OP_SERVERLIST and 0xA1 are
 // capped at 255: when the table is larger, the freshest entries are the ones worth
 // carrying.

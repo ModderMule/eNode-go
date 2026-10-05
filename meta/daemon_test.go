@@ -2,6 +2,7 @@ package meta
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
 	"fmt"
@@ -148,6 +149,26 @@ func nzbEntry(name string) *metav1.MetaEntry {
 		Peers:     1200,
 		Indexer:   "usenet-crawler",
 		CatalogId: fmt.Sprintf("nzb:%X", id),
+		Identity:  id[:],
+		FileCount: 1,
+	}
+}
+
+// kadEntry is a file as kademlia-crawler publishes it: kind 4, the file's own MD4 as
+// identity, peers the sources Kad reported and seeders the complete ones.
+func kadEntry(name string, sources, complete uint32) *metav1.MetaEntry {
+	id := md5.Sum([]byte(name))
+	return &metav1.MetaEntry{
+		Kind:      metav1.MetaKind_META_KIND_ED2K,
+		Name:      name,
+		Size:      700 << 20,
+		TotalSize: 700 << 20,
+		Type:      "Video",
+		Seeders:   complete,
+		Peers:     sources,
+		AgeDays:   4,
+		Indexer:   "kad",
+		CatalogId: fmt.Sprintf("ed2k:%X", id),
 		Identity:  id[:],
 		FileCount: 1,
 	}

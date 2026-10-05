@@ -15,6 +15,7 @@ import (
 // EntryToFile turns one daemon row into a search result. The daemon supplies the
 // identity and the server mints the 16-byte pseudo-hash — hash construction lives in
 // enodemeta alone, so a daemon cannot put a malformed or colliding hash on the wire.
+// A native row (Kad) is the exception: its hash is the file's own MD4.
 //
 // The result carries no source address (0/0, which eMule records as "no source") and
 // its unprefixed name; the network's prefix is applied when the row is sent, so the
@@ -23,6 +24,9 @@ func EntryToFile(pb *metav1.MetaEntry) (storage.File, error) {
 	entry, err := mint(pb)
 	if err != nil {
 		return storage.File{}, err
+	}
+	if entry.Kind.Native() {
+		return nativeEntryToFile(entry)
 	}
 	parsed, err := metahash.Parse(entry.MetaHash)
 	if err != nil {
@@ -118,6 +122,36 @@ func NameSubFiles(rows []storage.File) {
 		}
 		row.Name = root + SubFileSeparator + sub
 	}
+}
+
+// nativeEntryToFile builds the row of a real eD2K file found on Kad. Mint has put the
+// file's MD4 in MetaHash. Its sources are what the Kad network reported (peers), the
+// complete ones the seeders, both capped like every catalogue row (tags.MaxSources);
+// Kad seldom reports a complete count, so Completed is usually 0.
+//
+// Meta carries the kind and the catalogue id for the feed and the release matching;
+// on the wire the row has FT_META_NETWORK alone (ed2k.AddFile).
+func nativeEntryToFile(entry model.Entry) (storage.File, error) {
+	if entry.Size == 0 {
+		return storage.File{}, fmt.Errorf("file %s has no size", entry.CatalogID)
+	}
+	sources := min(entry.Peers, uint32(tags.MaxSources))
+	return storage.File{
+		Hash:      entry.MetaHash,
+		Name:      entry.Name,
+		Size:      entry.Size,
+		Type:      entry.Type,
+		Sources:   sources,
+		Completed: min(entry.Seeders, sources),
+		Meta: &storage.MetaInfo{
+			Kind:      uint8(entry.Kind),
+			CatalogID: entry.CatalogID,
+			Seeders:   entry.Seeders,
+			Peers:     entry.Peers,
+			AgeDays:   entry.AgeDays,
+			Indexer:   entry.Indexer,
+		},
+	}, nil
 }
 
 func mint(pb *metav1.MetaEntry) (model.Entry, error) {

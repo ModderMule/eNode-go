@@ -2599,7 +2599,8 @@ func (s *ServerRuntime) udpGlobSearchReq(b *Buffer, remote *net.UDPAddr, conn UD
 		return
 	}
 	// OP_GLOBSEARCHREQ and ...REQ2 carry no tag block, so the requester cannot have
-	// asked for meta rows: it gets them only when they go to every client.
+	// asked for meta rows: it gets the pseudo-hash ones only when they go to every
+	// client. Kad rows are plain eD2K files and it gets those regardless.
 	metaCh := s.startMetaSearch(expr, false, true)
 	files := capUDPSearchResults(mergeMetaResults(s.Storage.FindBySearch(expr), metaCh))
 	if len(files) == 0 {

@@ -65,7 +65,9 @@ func (s *Searcher) EnableCatalog(cfg CatalogConfig) {
 
 // CatalogNetworks lists the networks SearchCatalog can query: enabled, with live
 // search on. A network with live search off is one whose operator chose not to
-// forward keywords to its daemon.
+// forward keywords to its daemon. A native network (Kad) is one of them: its rows
+// are eD2K files, served with the file's own hash where the others carry a minted
+// one.
 func (s *Searcher) CatalogNetworks() []string {
 	var out []string
 	for _, src := range s.sources {

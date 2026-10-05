@@ -96,13 +96,14 @@ func (g *GossipHandler) StartGossipClient(cfg GossipClientConfig) (stop func()) 
 	return func() { once.Do(func() { close(done) }) }
 }
 
-// RunRound contacts every non-parked peer once. Exported so a test can drive a single
+// RunRound contacts every non-parked peer once, and the parked ones too on every
+// parkedRetryRounds-th round. Exported so a test can drive a single
 // round deterministically instead of waiting on a ticker.
 func (g *GossipHandler) RunRound(cfg GossipClientConfig) {
 	if g == nil {
 		return
 	}
-	peers := g.Contactable()
+	peers := g.contactableForRound()
 	if len(peers) == 0 {
 		return
 	}

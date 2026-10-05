@@ -7,25 +7,28 @@ import (
 	"enode/storage"
 )
 
-// MetaSearcher supplies torrent and Usenet rows for a search (package meta). It is an
-// interface so this package takes no dependency on the catalogue daemons' transport,
-// and so tests can stand in a fixed answer.
+// MetaSearcher supplies torrent, Usenet and Kad rows for a search (package meta). It is
+// an interface so this package takes no dependency on the catalogue daemons'
+// transport, and so tests can stand in a fixed answer.
 //
 // Search must return within its own deadline and must not fail: a slow or missing
 // daemon yields fewer rows, never an error, because the eD2K answer is sent either way.
+// nativeOnly limits it to native rows — real eD2K files found on Kad — for a
+// requester that gets no pseudo-hash rows.
 //
 // AdvertisedFiles is the file count the searcher adds to the server status total
 // (metaSearch.<network>.countInServerStatus). It is read on every status reply, so
 // it must answer from memory, never from a daemon.
 type MetaSearcher interface {
-	Search(ctx context.Context, expr *storage.SearchExpr, udp bool) []storage.File
+	Search(ctx context.Context, expr *storage.SearchExpr, udp, nativeOnly bool) []storage.File
 	AdvertisedFiles() int
 }
 
-// SetMetaSearcher attaches the meta searcher. advertiseToLegacy sends its rows to
-// every client; when false only a client that asked for them receives them — the
-// SrvCapMetaSearch login bit on TCP, the SrvCapUDPMetaSearch flag of
-// OP_GLOBSEARCHREQ3 on UDP.
+// SetMetaSearcher attaches the meta searcher. advertiseToLegacy sends its torrent and
+// Usenet rows to every client; when false only a client that asked for them receives
+// them — the SrvCapMetaSearch login bit on TCP, the SrvCapUDPMetaSearch flag of
+// OP_GLOBSEARCHREQ3 on UDP. Its Kad rows are ordinary eD2K files and go to every
+// client either way.
 //
 // Like SetGossipHandler it must be called before the listeners bind: the field is
 // read without a lock by every search. nil leaves searches exactly as they were.
@@ -43,31 +46,37 @@ func (s *ServerRuntime) AdvertisedFiles() int {
 	return s.advertisedFiles(files)
 }
 
-// metaSearchFor reports whether a requester gets meta rows. capable is whether it
-// announced it can act on them.
+// metaSearchFor reports whether a requester gets pseudo-hash rows (torrent, Usenet).
+// capable is whether it announced it can act on them.
 func (s *ServerRuntime) metaSearchFor(capable bool) bool {
 	return s.meta != nil && (s.metaAdvertiseLegacy || capable)
 }
 
 // startMetaSearch begins the meta half of a search alongside the storage query, so
 // the two run concurrently and the reply waits for the slower of them, not their
-// sum. It returns nil when this requester gets no meta rows.
+// sum. A requester that gets no pseudo-hash rows is still answered with the native
+// ones. It returns nil when no meta searcher is attached.
 func (s *ServerRuntime) startMetaSearch(expr *storage.SearchExpr, capable, udp bool) <-chan []storage.File {
-	if !s.metaSearchFor(capable) {
+	if s.meta == nil {
 		return nil
 	}
+	nativeOnly := !s.metaSearchFor(capable)
 	ch := make(chan []storage.File, 1)
 	go func() {
-		ch <- s.meta.Search(context.Background(), expr, udp)
+		ch <- s.meta.Search(context.Background(), expr, udp, nativeOnly)
 	}()
 	return ch
 }
 
 // mergeMetaResults appends the meta rows to the eD2K results. eD2K files come first
-// — they are what a stock client can download — and the total stays within
-// storage.MaxSearchResults, the ceiling paging and every engine already assume. A
-// meta row whose hash an eD2K row already has is dropped; the OP_OFFERFILES guard
-// makes that impossible for a pseudo-hash, so this only defends the page invariant.
+// — they are what the server has sources for — and the total stays within
+// storage.MaxSearchResults, the ceiling paging and every engine already assume.
+//
+// A meta row whose hash an eD2K row already has is dropped. For a Kad row that is
+// the ordinary case: the file is one a user shares here, and the server's own row
+// — its name, its real sources, no prefix and no FT_META_NETWORK tag — is the one
+// sent. files is the whole answer, not one page, so this holds on every page. For a
+// pseudo-hash the OP_OFFERFILES guard makes a clash impossible.
 func mergeMetaResults(files []storage.File, metaCh <-chan []storage.File) []storage.File {
 	if metaCh == nil {
 		return files
