@@ -49,6 +49,31 @@ server additionally logs a warning that off-box clients can see the status page.
 | `/api/accounts?q=&state=&offset=` | GET | Account list as JSON, 50 per page, newest first. |
 | `/api/accounts/{id}` | GET | One account with its registration steps and payments.    |
 | `/api/accounts/{id}/{action}` | POST | `disable`, `enable`, `adjust` (`{"days": ±N}`), `skip-step` (`{"step": "payment"}`). Returns the updated account. |
+| `/api/reload-config` | POST | Re-reads the config file and applies what can change without a restart. Returns `{"applied": [...], "restartRequired": [...]}`, both lists of config key paths. |
+
+### Reload config
+
+The **Reload config** button in the dashboard header calls `/api/reload-config`. The
+server re-reads the file it was started with and applies the changed keys below. No
+listener is closed and no client is disconnected.
+
+| Applied by a reload | |
+|---|---|
+| `name`, `description`, `messageLogin`, `messageLowID` | new logins and status replies use them |
+| `logLevel`, `logFile` | |
+| `files.softLimit`, `files.hardLimit` | |
+| `tcp.loginTimeout`, `tcp.disconnectTimeout`, `tcp.connectionTimeout`, `tcp.maxConnectionsPerIP` | open connections pick up the new timeouts |
+| `udp.getSources`, `udp.getFiles` | |
+| `servers` | new entries only; a removed entry stays until a restart |
+| `gossip.*` | including turning gossip on or off and adding seeds; the peer table is kept |
+| `admin.username`, `admin.password` | |
+
+Every other changed key is listed under `restartRequired` and keeps the value the
+process started with until it is restarted. The list is repeated on each reload for as
+long as the file differs from the running server.
+
+A file that does not load, or fails validation, changes nothing: the endpoint answers
+`422` with the error and the dashboard shows it.
 
 ### Account administration
 
@@ -120,7 +145,7 @@ Set `checkUpdates: false` if the server must never contact github.com.
 
 The dashboard is **loopback-only by default**. Access rules (`admin/auth.go`):
 
-| Client | Credentials configured | Status page, `/stats.json` | Accounts pages and API |
+| Client | Credentials configured | Status page, `/stats.json` | Accounts pages and API, config reload |
 |---|---|---|---|
 | loopback (and no proxy header) | either | yes, no login | yes, no login |
 | anyone else | no | yes (as before) | **403** |

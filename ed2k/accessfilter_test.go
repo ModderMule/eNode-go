@@ -211,7 +211,7 @@ func TestNilAccessFilterServesEveryone(t *testing.T) {
 // accepted address is recorded so gossip will refuse to admit a client as a peer.
 func TestGossipNotesConnectingClients(t *testing.T) {
 	rt, g := dispatchRuntime(t, true, func(c *GossipConfig) { c.AllowPrivatePeers = true })
-	rt.TCP.DisconnectTimeout = time.Second
+	rt.tcp().DisconnectTimeout = time.Second
 
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {

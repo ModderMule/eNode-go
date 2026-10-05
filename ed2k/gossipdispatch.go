@@ -16,8 +16,15 @@ import (
 
 // SetGossipHandler attaches the peer table. nil leaves gossip disabled, and every
 // dispatch case is gated on it, so a server with gossip off behaves exactly as before.
+// Each handler below loads the handler once and returns if it is gone, because a reload
+// can detach it between the dispatcher's gate and the handler. Safe to call with the listeners live: a config reload turns gossip on and off this way.
 func (s *ServerRuntime) SetGossipHandler(h *GossipHandler) {
-	s.Gossip = h
+	s.gossipHandler.Store(h)
+}
+
+// GossipStats returns the peer table's counters, all zero while gossip is disabled.
+func (s *ServerRuntime) GossipStats() GossipStats {
+	return s.gossip().Stats()
 }
 
 // decryptPeerReply makes the two extra decryption attempts a reply from a *peer server*
@@ -42,12 +49,16 @@ func (s *ServerRuntime) SetGossipHandler(h *GossipHandler) {
 // unsupported-protocol log and were silently dropped — so a peer never got past phase 2
 // and gossip could not complete against a real eserver.
 func (s *ServerRuntime) decryptPeerReply(data []byte, from net.IP) []byte {
-	if peer, ok := s.Gossip.PeerByIP(from); ok && peer.ServerKey != 0 {
+	g := s.gossip()
+	if g == nil {
+		return data
+	}
+	if peer, ok := g.PeerByIP(from); ok && peer.ServerKey != 0 {
 		if reply := NewUDPCrypt(true, peer.ServerKey).DecryptFromServer(data); len(reply) > 0 && reply[0] == PrED2K {
 			return reply
 		}
 	}
-	if challenge, ok := s.Gossip.PingChallengeFor(from); ok {
+	if challenge, ok := g.PingChallengeFor(from); ok {
 		if reply := NewUDPCrypt(true, challenge).DecryptFromServer(data); len(reply) > 0 && reply[0] == PrED2K {
 			return reply
 		}
@@ -73,7 +84,11 @@ func (s *ServerRuntime) udpServerListReq(b *Buffer, remote *net.UDPAddr, conn UD
 	}
 	// The payload's challenge is parsed but discarded: it is not the value a peer expects
 	// echoed in a 0x97 (see NoteRegistration).
-	s.Gossip.NoteRegistration(remote.IP, port, obfuscated)
+	g := s.gossip()
+	if g == nil {
+		return
+	}
+	g.NoteRegistration(remote.IP, port, obfuscated)
 
 	if obfuscated {
 		s.sendPeerList(remote, conn, false, module)
@@ -117,7 +132,9 @@ func (s *ServerRuntime) udpServerListRes(b *Buffer, remote *net.UDPAddr, isIPv6,
 		logging.Debugf("[module=%s] gossip: received an IPv6 peer list (0xA8) from %s with %d entr(ies)",
 			module, remote, len(entries))
 	}
-	s.Gossip.MergePeerList(remote.IP, entries, obfuscated)
+	if g := s.gossip(); g != nil {
+		g.MergePeerList(remote.IP, entries, obfuscated)
+	}
 }
 
 // udpGlobServStatRes handles an inbound 0x97 — a peer answering our probe.
@@ -132,7 +149,11 @@ func (s *ServerRuntime) udpGlobServStatRes(b *Buffer, remote *net.UDPAddr, modul
 		logging.Debugf("[module=%s] malformed OP_GLOBSERVSTATRES from %s: %v", module, remote, err)
 		return
 	}
-	peer, known := s.Gossip.PeerByIP(remote.IP)
+	g := s.gossip()
+	if g == nil {
+		return
+	}
+	peer, known := g.PeerByIP(remote.IP)
 	if !known {
 		logging.Debugf("[module=%s] received a pong from unknown server %s chl=%x %d users, %d files",
 			module, remote, fields.Challenge, fields.Users, fields.Files)
@@ -144,7 +165,7 @@ func (s *ServerRuntime) udpGlobServStatRes(b *Buffer, remote *net.UDPAddr, modul
 	// requiring the phase-1 value alone would reject every keyed reply.
 	matches := fields.Challenge == peer.OurChallenge ||
 		(peer.PlainChallenge != 0 && fields.Challenge == peer.PlainChallenge)
-	s.Gossip.NoteStatRes(remote.IP, fields, matches)
+	g.NoteStatRes(remote.IP, fields, matches)
 }
 
 // udpServerDescRes handles an inbound 0xA3 — a peer answering our name/description
@@ -156,7 +177,9 @@ func (s *ServerRuntime) udpServerDescRes(b *Buffer, remote *net.UDPAddr, module 
 		logging.Debugf("[module=%s] malformed OP_SERVER_DESC_RES from %s: %v", module, remote, err)
 		return
 	}
-	s.Gossip.NoteDescription(remote.IP, name, desc)
+	if g := s.gossip(); g != nil {
+		g.NoteDescription(remote.IP, name, desc)
+	}
 }
 
 // sendPeerList answers a list request with our verified peers.
@@ -165,7 +188,11 @@ func (s *ServerRuntime) udpServerDescRes(b *Buffer, remote *net.UDPAddr, module 
 // propagating it would spread addresses we cannot vouch for — precisely the behaviour
 // that makes a stale peer list circulate around a mesh forever.
 func (s *ServerRuntime) sendPeerList(remote *net.UDPAddr, conn UDPReplyConn, wantIPv6 bool, module string) {
-	peers := s.Gossip.Verified()
+	g := s.gossip()
+	if g == nil {
+		return
+	}
+	peers := g.Verified()
 	var packet *Buffer
 	var err error
 	if wantIPv6 {

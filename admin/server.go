@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"enode/internal/ratelimit"
@@ -58,6 +59,8 @@ type StaticInfo struct {
 
 	// Accounts is set by SetAccounts: the Meta API has accounts to manage.
 	Accounts bool
+	// Reload is set by SetReloader: the page offers the "Reload config" button.
+	Reload bool
 }
 
 // LiveStats holds the figures that change over the life of the server. It is
@@ -153,6 +156,11 @@ type MetaNetworkStats struct {
 	// Down is whether live searches are paused after an unavailable, unimplemented
 	// or unauthenticated answer.
 	Down bool `json:"down"`
+	// StatsStale is whether the last GetInfo poll failed although the daemon answered
+	// a search within the last two polls: it is up, only its figures are old. LiveOKAt
+	// is when it last answered one (RFC 3339, "" for never).
+	StatsStale bool   `json:"statsStale"`
+	LiveOKAt   string `json:"liveOkAt"`
 
 	Daemon          string `json:"daemon"`
 	Version         string `json:"version"`
@@ -188,8 +196,12 @@ type MetaNetworkStats struct {
 
 // Server is the admin dashboard HTTP server.
 type Server struct {
+	// mu guards cfg's credentials, static and reload, which a config reload replaces
+	// while requests are being served.
+	mu        sync.RWMutex
 	cfg       Config
 	static    StaticInfo
+	reload    func() (ReloadResult, error)
 	snapshot  func() LiveStats
 	accounts  AccountAdmin
 	authLimit *ratelimit.Limiter
@@ -214,6 +226,7 @@ func New(cfg Config, static StaticInfo, snapshot func() LiveStats) *Server {
 	mux.HandleFunc("GET /api/accounts", s.guard(true, s.handleAccountList))
 	mux.HandleFunc("GET /api/accounts/{id}", s.guard(true, s.handleAccountDetail))
 	mux.HandleFunc("POST /api/accounts/{id}/{action}", s.guard(true, s.handleAccountAction))
+	mux.HandleFunc("POST /api/reload-config", s.guard(true, s.handleReloadConfig))
 	mux.HandleFunc("/", s.guard(false, s.handleIndex))
 	s.http = &http.Server{
 		Handler: mux,
@@ -257,7 +270,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := pageTemplate.Execute(w, s.static); err != nil {
+	if err := pageTemplate.Execute(w, s.staticInfo()); err != nil {
 		logging.Warnf("admin dashboard render error: %v", err)
 	}
 }

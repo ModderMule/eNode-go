@@ -76,6 +76,9 @@ func run(ctx context.Context, configPath string) error {
 		return fmt.Errorf("config logLevel invalid: %w", err)
 	}
 	logging.Infof("welcome: enode starting (config=%s)", configPath)
+	// The config exactly as the file had it, before dynIp is replaced by its resolved
+	// value below: a config reload compares the file against this.
+	bootFileCfg := cfg
 
 	resolvedDynIP, resolvedByURL, err := resolveDynIPValue(cfg.DynIP, cfg.TestURLs, 0)
 	if err != nil {
@@ -186,36 +189,7 @@ func run(ctx context.Context, configPath string) error {
 	}
 
 	dualStack := cfg.IPv6.EnabledOrDefault()
-	// Server-independent (cross-server / serverless) PR_NAT rendezvous is effective
-	// only when the NAT service itself is enabled. It drives both the FlagNatRendezvous
-	// advertisement and the OP_SERVERIDENT NAT-port tag.
-	natServerIndependent := cfg.NAT.Enabled && cfg.NAT.ServerIndependentOrDefault()
-	natRendezvousPort := uint16(0)
-	if natServerIndependent {
-		natRendezvousPort = cfg.NAT.Port
-	}
-	tcpCfg := ed2k.TCPServerConfig{
-		Address:        cfg.Address,
-		Port:           cfg.TCP.Port,
-		MaxConnections: cfg.TCP.MaxConnections,
-		AuxiliarPort:   cfg.AuxiliarPort,
-		RequireCrypt:   cfg.RequireCrypt,
-		RequestCrypt:   cfg.RequestCrypt,
-		SupportCrypt:   cfg.SupportCrypt,
-		IPInLogin:      cfg.IPInLogin,
-		DualStack:      dualStack,
-		NatRendezvous:  natServerIndependent,
-	}
-	udpCfg := ed2k.UDPServerConfig{
-		Address:      cfg.Address,
-		Port:         cfg.UDP.Port,
-		GetSources:   cfg.UDP.GetSources,
-		GetFiles:     cfg.UDP.GetFiles,
-		SupportCrypt: cfg.SupportCrypt,
-		DualStack:    dualStack,
-	}
-	tcpFlags := ed2k.BuildTCPFlags(tcpCfg)
-	udpFlags := ed2k.BuildUDPFlags(udpCfg)
+	tcpCfg, udpCfg := serverListenConfigs(cfg)
 
 	// Torrent/Usenet rows from the catalogue daemons. Built before the runtime so the
 	// FlagMetaSearch bit reaches both advertised flag words; attached and started
@@ -223,8 +197,6 @@ func run(ctx context.Context, configPath string) error {
 	var metaSearcher *meta.Searcher
 	if cfg.MetaSearch.AnyEnabled() {
 		metaSearcher = meta.New(cfg.MetaSearch)
-		tcpFlags |= ed2k.FlagMetaSearch
-		udpFlags |= ed2k.FlagMetaSearch
 	}
 
 	// The address clients are told to reach us on. cfg.Address is the *bind*
@@ -253,60 +225,18 @@ func run(ctx context.Context, configPath string) error {
 		return err
 	}
 
-	runtime := ed2k.NewServerRuntime(
-		ed2k.TCPRuntimeConfig{
-			Name:        cfg.Name,
-			Description: cfg.Description,
-			// Address stays the bind address: probeClient uses it as its
-			// LocalAddr and special-cases the wildcard. AdvertisedIP is what goes
-			// out in OP_SERVERIDENT.
-			Address:           cfg.Address,
-			AdvertisedIP:      advertisedIP,
-			Port:              cfg.TCP.Port,
-			Flags:             tcpFlags,
-			Hash:              serverHash,
-			MessageLogin:      cfg.MessageLogin,
-			MessageLowID:      cfg.MessageLowID,
-			ConnectionTimeout: time.Duration(cfg.TCP.ConnectionTimeout) * time.Millisecond,
-			DisconnectTimeout: time.Duration(cfg.TCP.DisconnectTimeout) * time.Second,
-			LoginTimeout:      time.Duration(cfg.TCP.LoginTimeout) * time.Second,
-			MaxConnsPerIP:     cfg.TCP.MaxConnectionsPerIPOrDefault(),
-			AllowLowIDs:       cfg.TCP.AllowLowIDs,
-			SupportCrypt:      cfg.SupportCrypt,
-			MinLowID:          cfg.TCP.MinLowID,
-			MaxLowID:          cfg.TCP.MaxLowID,
-			IPv6:              dualStack,
-			PublishV6Sources:  dualStack && cfg.IPv6.PublishSourcesOrDefault(),
-			ProbeIPv6:         dualStack && cfg.IPv6.ProbeReachabilityOrDefault(),
-			ServerIPv6:        serverIPv6,
-			NatRendezvousPort: natRendezvousPort,
-			MetaAPI:           metaAPI.advertisement(),
-			SoftFileLimit:     cfg.Files.SoftLimitOrDefault(),
-			HardFileLimit:     cfg.Files.HardLimitOrDefault(),
-		},
-		ed2k.UDPRuntimeConfig{
-			Name:        cfg.Name,
-			Description: cfg.Description,
-			DynIP:       cfg.DynIP,
-			UDPFlags:    udpFlags,
-			// The same two options BuildUDPFlags advertises. They must reach the
-			// dispatcher too, or the server clears the flag and keeps answering.
-			GetSources:     cfg.UDP.GetSources,
-			GetFiles:       cfg.UDP.GetFiles,
-			UDPPortObf:     advertisedUDPObfPort(cfg),
-			TCPPortObf:     cfg.TCP.PortObfuscated,
-			UDPSecret:      udpSecret,
-			MaxConnections: uint32(cfg.TCP.MaxConnections),
-			// Read from the same accessors as the TCP half above. Advertising a cap we
-			// do not apply is the state this feature exists to end, so the two must
-			// come from one source or not be separate fields at all.
-			SoftFiles: uint32(cfg.Files.SoftLimitOrDefault()),
-			HardFiles: uint32(cfg.Files.HardLimitOrDefault()),
-
-			RateLimitPerIPPerMinute: cfg.UDP.RateLimitPerIPPerMinuteOrDefault(),
-		},
-		engine,
-	)
+	// Everything the runtime configs need beyond the config file. Computed once here and
+	// reused unchanged by a config reload.
+	derived := bootDerived{
+		advertisedIP: advertisedIP,
+		serverIPv6:   serverIPv6,
+		serverHash:   serverHash,
+		udpSecret:    udpSecret,
+		metaSearch:   metaSearcher != nil,
+		metaAPI:      metaAPI.advertisement(),
+	}
+	runtimeTCP, runtimeUDP := buildRuntimeConfigs(cfg, derived)
+	runtime := ed2k.NewServerRuntime(runtimeTCP, runtimeUDP, engine)
 
 	// Access filters: ipfilter.dat ranges and MaxMind country blocking. A blocked address
 	// is dropped before any wire parsing on both transports.
@@ -336,10 +266,10 @@ func run(ctx context.Context, configPath string) error {
 		logging.Infof("access filters: disabled")
 	}
 
-	// The gossip peer table is attached here, before any listener binds: ServerRuntime's
-	// Gossip field is read without a lock by every accept and every datagram, so writing it
-	// once the listeners are live is a data race. Its sockets and timers start further
-	// down, once the main UDP socket the outbound loop sends from exists.
+	// The gossip peer table is attached here, before any listener binds, so no client is
+	// accepted unrecorded. Its sockets and timers start further down, once the main UDP
+	// socket the outbound loop sends from exists. A config reload attaches and detaches
+	// the handler later, with the listeners live.
 	gossipHandler := buildGossipHandler(cfg, advertisedIP, serverIPv6)
 	if gossipHandler != nil {
 		runtime.SetGossipHandler(gossipHandler)
@@ -358,11 +288,7 @@ func run(ctx context.Context, configPath string) error {
 
 	// Offsets added to the counts in OP_SERVERSTATUS and OP_GLOBSERVSTATRES. Local-only
 	// config; absent means the real counts are advertised.
-	runtime.SetStatsBoost(ed2k.StatsBoost{
-		Users:      cfg.StatsBoost.Users,
-		LowIDUsers: cfg.StatsBoost.LowIDUsers,
-		Files:      cfg.StatsBoost.Files,
-	})
+	runtime.SetStatsBoost(statsBoostFromConfig(cfg))
 	if b := cfg.StatsBoost; b.Users != 0 || b.LowIDUsers != 0 || b.Files != 0 {
 		logging.Warnf("statsBoost active: advertising users+%d lowIDUsers+%d files+%d over the real counts",
 			b.Users, b.LowIDUsers, b.Files)
@@ -379,16 +305,9 @@ func run(ctx context.Context, configPath string) error {
 	// Local admin status dashboard. Default on and bound to loopback; a bind
 	// failure is fatal because the operator asked for it. Static server facts are
 	// captured once; the live counters come from a snapshot read per request.
+	var adminSrv *admin.Server
 	if cfg.Admin.EnabledOrDefault() {
 		startTime := time.Now()
-		tcpObf, udpObf := uint16(0), uint16(0)
-		if cfg.SupportCrypt {
-			tcpObf, udpObf = cfg.TCP.PortObfuscated, cfg.UDP.PortObfuscated
-		}
-		natPort := uint16(0)
-		if cfg.NAT.Enabled {
-			natPort = cfg.NAT.Port
-		}
 		// Daily GitHub release check; Info() is nil-receiver safe, so a disabled
 		// checker simply leaves the dashboard without an update hint.
 		var updateChecker *admin.UpdateChecker
@@ -396,30 +315,15 @@ func run(ctx context.Context, configPath string) error {
 			updateChecker = admin.NewUpdateChecker(ed2k.ENodeVersionStr)
 			defer updateChecker.Start(ctx)()
 		}
-		adminSrv := admin.New(
+		adminSrv = admin.New(
 			admin.Config{BindIP: cfg.Admin.BindIP, Port: cfg.Admin.Port, Username: cfg.Admin.Username, Password: cfg.Admin.Password},
-			admin.StaticInfo{
-				Name:              cfg.Name,
-				Description:       cfg.Description,
-				Version:           ed2k.ENodeVersionStr,
-				Engine:            cfg.Storage.Engine,
-				AdvertisedIP:      advertisedIP,
-				AdvertisedIPv6:    ipv6String(serverIPv6),
-				TCPPort:           cfg.TCP.Port,
-				TCPPortObf:        tcpObf,
-				UDPPort:           cfg.UDP.Port,
-				UDPPortObf:        udpObf,
-				NATPort:           natPort,
-				Crypt:             cfg.SupportCrypt,
-				IPv6:              dualStack,
-				NAT:               cfg.NAT.Enabled,
-				ServerIndependent: natServerIndependent,
-			},
+			buildAdminStatic(cfg, derived),
 			func() admin.LiveStats {
 				clients, files := runtime.Counts()
-				// Gossip.Stats() and accessFilter.Stats() are both nil-receiver safe and
-				// return zero values when the subsystem is off, so neither needs a branch.
-				gossip := gossipHandler.Stats()
+				// GossipStats() and accessFilter.Stats() both return zero values when the
+				// subsystem is off, so neither needs a branch. Read through the runtime
+				// because a config reload can replace the gossip handler.
+				gossip := runtime.GossipStats()
 				blockedIP, blockedGeo := accessFilter.Stats()
 				metaCacheEntries, metaStats := adminMetaStats(metaSearcher)
 				return admin.LiveStats{
@@ -587,27 +491,32 @@ func run(ctx context.Context, configPath string) error {
 	// or when obfuscation is off and there is therefore no tcp+12 socket to share.
 	//
 	// The handler itself was attached to the runtime before any listener bound (see
-	// buildGossipHandler above); only the sockets and timers start here. Nothing below
-	// writes a ServerRuntime field.
+	// buildGossipHandler above); only the sockets and timers start here, in
+	// reloader.startGossipIO, which a config reload that turns gossip on runs again.
+	reload := &reloader{
+		ctx:       ctx,
+		path:      configPath,
+		bootFile:  bootFileCfg,
+		boot:      cfg,
+		applied:   cfg,
+		derived:   derived,
+		runtime:   runtime,
+		engine:    engine,
+		adminSrv:  adminSrv,
+		udpCfg:    udpCfg,
+		mainConn:  udpConn,
+		obfConn:   obfUDPConn,
+		gossip:    gossipHandler,
+		stopLoops: func() {},
+	}
+	defer reload.close()
 	if gossipHandler != nil {
-		gossipConn := obfUDPConn
-		if gossipConn == nil || cfg.UDP.PortGossip != cfg.UDP.PortObfuscated {
-			gossipUDPCfg := udpCfg
-			gossipUDPCfg.Port = cfg.UDP.PortGossip
-			conn, err := ed2k.RunUDPServer(gossipUDPCfg, runtime.UDPHandler(true))
-			if err != nil {
-				return fmt.Errorf("gossip udp server failed: %w", err)
-			}
-			defer conn.Close()
-			gossipConn = conn
-			logging.Infof("listening: udp-gossip %s:%d", gossipUDPCfg.Address, gossipUDPCfg.Port)
-		} else {
-			logging.Infof("gossip shares the obfuscated udp socket on port %d (Lugdunum reads a peer's TCP port as this minus 12)",
-				cfg.UDP.PortGossip)
+		if err := reload.startGossipIO(cfg); err != nil {
+			return err
 		}
-
-		stopGossip := startGossipLoops(ctx, cfg, gossipHandler, udpConn, gossipConn)
-		defer stopGossip()
+	}
+	if adminSrv != nil {
+		adminSrv.SetReloader(reload.Reload)
 	}
 
 	<-ctx.Done()
@@ -618,12 +527,10 @@ func run(ctx context.Context, configPath string) error {
 // buildGossipHandler creates the peer table and seeds it, or returns nil when gossip is
 // disabled.
 //
-// Separate from startGossipLoops, and called before any listener binds, because
-// ServerRuntime's Gossip field is read by every accept and every datagram without a lock.
-// Attaching it after the listeners are live is a genuine data race — the race detector
-// catches it — and the same pre-bind ordering is what SetNATHandler and SetAccessFilter
-// already rely on. The loops cannot start this early because phase 1 sends from the main
-// UDP socket, which does not exist yet.
+// Separate from startGossipLoops: at boot it is called before any listener binds, so
+// every accepted client is recorded from the first connection, while the loops cannot
+// start that early because phase 1 sends from the main UDP socket, which does not exist
+// yet. A config reload that turns gossip on calls it with the listeners live.
 //
 // Seeding order mirrors eserver's: a persisted server.met wins, and the configured seeds
 // are the fallback for when that file is absent or empty. eserver documents
@@ -654,23 +561,7 @@ func buildGossipHandler(cfg config.Config, advertisedIP string, serverIPv6 []byt
 		}
 	}
 
-	gossipCfg := ed2k.GossipConfig{
-		SelfPort:          cfg.TCP.Port,
-		Name:              cfg.Name,
-		Desc:              cfg.Description,
-		MaxServers:        cfg.Gossip.MaxServers,
-		MaxFailures:       cfg.Gossip.MaxFailures,
-		AllowPrivatePeers: cfg.Gossip.AllowPrivatePeers,
-		PublishIPv6:       cfg.IPv6.EnabledOrDefault() && cfg.Gossip.PublishIPv6OrDefault(),
-		UDPPortObf:        cfg.UDP.PortGossip,
-		TCPPortObf:        cfg.TCP.PortObfuscated,
-	}
-	if ip := net.ParseIP(advertisedIP); ip != nil {
-		gossipCfg.SelfIPv4 = ip
-	}
-	if len(serverIPv6) == 16 {
-		gossipCfg.SelfIPv6 = net.IP(serverIPv6)
-	}
+	gossipCfg := buildGossipConfig(cfg, advertisedIP, serverIPv6)
 
 	handler := ed2k.NewGossipHandler(gossipCfg, seeds)
 	// Register every address a peer could observe us on, so an echoed self-entry is
@@ -996,9 +887,12 @@ func adminMetaStats(s *meta.Searcher) (cacheEntries int, out []admin.MetaNetwork
 		return 0, out
 	}
 	for _, st := range s.Stats() {
-		infoAt := ""
+		infoAt, liveOKAt := "", ""
 		if !st.InfoAt.IsZero() {
 			infoAt = st.InfoAt.Format(time.RFC3339)
+		}
+		if !st.LiveOKAt.IsZero() {
+			liveOKAt = st.LiveOKAt.UTC().Format(time.RFC3339)
 		}
 		out = append(out, admin.MetaNetworkStats{
 			Network:             st.Network,
@@ -1010,6 +904,8 @@ func adminMetaStats(s *meta.Searcher) (cacheEntries int, out []admin.MetaNetwork
 			LastError:           st.LastError,
 			InfoAt:              infoAt,
 			Down:                st.Down,
+			StatsStale:          st.StatsStale,
+			LiveOKAt:            liveOKAt,
 			Daemon:              st.Daemon,
 			Version:             st.Version,
 			SearchAvailable:     st.SearchAvailable,

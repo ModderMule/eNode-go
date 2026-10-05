@@ -620,7 +620,46 @@ func (g *GossipHandler) Config() GossipConfig {
 	if g == nil {
 		return GossipConfig{}
 	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
 	return g.cfg
+}
+
+// UpdateConfig replaces the handler's configuration while it is running, for a config
+// reload. The peer table is kept: a lower MaxServers stops new admissions but evicts
+// nobody, and a changed MaxFailures takes effect on the next round.
+func (g *GossipHandler) UpdateConfig(cfg GossipConfig) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.cfg = cfg
+}
+
+// AddSeeds enters operator-configured seeds that are not in the table yet, at peerSeen
+// like the seeds NewGossipHandler takes, and returns how many were new. Our own
+// addresses are skipped.
+func (g *GossipHandler) AddSeeds(seeds []PeerAddr) int {
+	if g == nil {
+		return 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	added := 0
+	for _, s := range seeds {
+		if s.IP == nil || s.Port == 0 {
+			continue
+		}
+		s.IP = NormalizeIP(s.IP)
+		key := s.String()
+		if _, exists := g.peers[key]; exists || g.isSelfLocked(s) {
+			continue
+		}
+		g.peers[key] = &PeerServer{Addr: s, State: peerSeen}
+		added++
+	}
+	return added
 }
 
 // admitLocked applies the merge policy to one address and inserts it at peerSeen if it

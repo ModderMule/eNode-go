@@ -54,7 +54,7 @@ func feed(t *testing.T, rt *ServerRuntime, conn *net.UDPConn, from string, packe
 	t.Helper()
 	remote := &net.UDPAddr{IP: net.ParseIP(from), Port: 4675}
 	if obfuscate {
-		crypt := NewUDPCrypt(true, deriveUDPKey(LegacyUDPSecret(rt.UDP.UDPServerKey), remote.IP))
+		crypt := NewUDPCrypt(true, deriveUDPKey(LegacyUDPSecret(rt.udp().UDPServerKey), remote.IP))
 		packet = crypt.EncryptAsClient(packet)
 	}
 	// enableCrypt=true models the gossip/obfuscated listener.
@@ -256,7 +256,7 @@ func TestParseServerDescResFormDiscrimination(t *testing.T) {
 func TestDispatchIgnoresGossipOpcodesWhenDisabled(t *testing.T) {
 	rt, _ := dispatchRuntime(t, false, nil)
 	conn := dispatchConn(t)
-	if rt.Gossip != nil {
+	if rt.gossip() != nil {
 		t.Fatal("expected gossip to be off")
 	}
 	pkt, err := BuildServerListReqPacket(net.ParseIP("203.0.113.5"), 4661, 0)

@@ -153,7 +153,7 @@ func TestTouchDeadlineDoesNotWaitForWriter(t *testing.T) {
 	server, client := net.Pipe()
 	t.Cleanup(func() { server.Close(); client.Close() })
 	rt := NewServerRuntime(TCPRuntimeConfig{Hash: []byte("0123456789abcdef")}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
-	rt.TCP.DisconnectTimeout = time.Hour
+	rt.tcp().DisconnectTimeout = time.Hour
 	c := newTCPClient(rt, server, false)
 
 	c.writeMu.Lock() // a writer blocked on the socket

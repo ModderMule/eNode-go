@@ -241,8 +241,14 @@ The dashboard's Files card shows the eD2K count. When counted networks add to th
 total, a line under it shows the advertised total. When meta search is on, a
 **Torrent / Usenet** section adds one card per network. Each card shows:
 
-- whether the daemon is reachable, or live search is paused after an
-  unavailable/unimplemented/unauthenticated answer (the last error appears on hover);
+- the daemon's state (the last `GetInfo` error appears on hover):
+  - **reachable**: the last `GetInfo` poll succeeded;
+  - **stats stale**: the last poll failed, but the daemon answered a search within
+    the last two polls (2 minutes). It is up and searches work; only the figures on
+    the card are old, and the Catalogue row says how old;
+  - **unreachable**: the last poll failed and no search was answered in that time;
+  - **search paused**: live search is paused after an
+    unavailable/unimplemented/unauthenticated answer;
 - the daemon's name and version;
 - catalogued releases and files, and the published count;
 - the live-search state, and whether the daemon has a search index;
@@ -254,7 +260,9 @@ total, a line under it shows the advertised total. When meta search is on, a
 - what the network adds to the server status file total.
 
 The same figures are in `/stats.json`: `advertisedFiles`, `metaCacheEntries`, and the
-`meta` array.
+`meta` array. Per network, `reachable` is the last poll's outcome, `infoAt` when a
+poll last succeeded, `liveOkAt` when the daemon last answered a search, and
+`statsStale` the state described above (`reachable` is then `false`).
 
 ## Downloading a row
 

@@ -423,7 +423,7 @@ func TestServerIdentSentWithoutAdvertisableIPv4(t *testing.T) {
 				ServerIPv6:       serverV6,
 			}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
 			c, conn := newReflectClient(t, rt, "2001:db8::1")
-			t.Logf("input: bindAddress=%q advertisedIP=%q remote=2001:db8::1", bind, rt.TCP.AdvertisedIP)
+			t.Logf("input: bindAddress=%q advertisedIP=%q remote=2001:db8::1", bind, rt.tcp().AdvertisedIP)
 
 			c.sendServerIdent()
 			payload := payloadOfOpcode(t, conn.written(), OpServerIdent)

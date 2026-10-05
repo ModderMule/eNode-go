@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"enode/internal/ratelimit"
@@ -106,15 +107,19 @@ type UDPRuntimeConfig struct {
 }
 
 type ServerRuntime struct {
-	TCP     TCPRuntimeConfig
-	UDP     UDPRuntimeConfig
+	// tcpCfg and udpCfg are the settings every connection and datagram reads. They are
+	// immutable snapshots swapped whole by ApplyRuntimeConfig, so a config reload can
+	// replace them while the listeners are live; read them through tcp() and udp().
+	tcpCfg  atomic.Pointer[TCPRuntimeConfig]
+	udpCfg  atomic.Pointer[UDPRuntimeConfig]
 	Storage storage.Engine
 	LowIDs  *LowIDClients
 	NAT     *NATTraversalHandler
-	// Gossip is the server-to-server peer table, or nil when gossip is disabled. Every
-	// dispatch case that touches it is gated on nil, so a server with gossip off has
-	// exactly its previous behaviour.
-	Gossip *GossipHandler
+	// gossipHandler is the server-to-server peer table, or nil when gossip is disabled.
+	// Every dispatch case that touches it is gated on nil, so a server with gossip off
+	// has exactly its previous behaviour. Swapped by SetGossipHandler, which a config
+	// reload may call with the listeners live; read it through gossip().
+	gossipHandler atomic.Pointer[GossipHandler]
 	// Filter refuses blocked addresses before any parsing, or nil to filter nothing.
 	Filter   AccessFilter
 	counters *counterCache
@@ -143,32 +148,55 @@ type ServerRuntime struct {
 	// bind, then only read. metaAdvertiseLegacy sends them to clients that did not ask.
 	meta                MetaSearcher
 	metaAdvertiseLegacy bool
-	// boost is added to the counts in both status packets. Set once by SetStatsBoost
-	// before the listeners bind, then only read. The zero value advertises real counts.
-	boost StatsBoost
+	// boost is added to the counts in both status packets. Swapped by SetStatsBoost,
+	// which a config reload may call with the listeners live. nil advertises real counts.
+	boost atomic.Pointer[StatsBoost]
 }
 
 // ipv6Enabled reports whether IPv6 is on at all (dual-stack accept, CT_MOD_IP_V6
 // parsing, advertisement). publishV6Sources reports whether IPv6 sources are
 // emitted. Both the TCP and UDP handlers read these accessors rather than poking
 // the TCP runtime config directly, so the two stacks share one source of truth.
-func (s *ServerRuntime) ipv6Enabled() bool      { return s.TCP.IPv6 }
-func (s *ServerRuntime) publishV6Sources() bool { return s.TCP.PublishV6Sources }
+func (s *ServerRuntime) ipv6Enabled() bool      { return s.tcp().IPv6 }
+func (s *ServerRuntime) publishV6Sources() bool { return s.tcp().PublishV6Sources }
 
 func NewServerRuntime(tcp TCPRuntimeConfig, udp UDPRuntimeConfig, store storage.Engine) *ServerRuntime {
 	if tcp.ServerStatusInterval <= 0 {
 		tcp.ServerStatusInterval = defaultServerStatusInterval
 	}
-	return &ServerRuntime{
-		TCP:      tcp,
-		UDP:      udp,
+	s := &ServerRuntime{
 		Storage:  store,
 		LowIDs:   NewLowIDClients(tcp.AllowLowIDs, tcp.MinLowID, tcp.MaxLowID),
 		counters: newCounterCache(store, tcp.CounterCacheTTL),
 		// A disabled limiter allows everything, so a zero config costs one branch.
 		udpLimiter: ratelimit.New(udp.RateLimitPerIPPerMinute),
 	}
+	s.tcpCfg.Store(&tcp)
+	s.udpCfg.Store(&udp)
+	return s
 }
+
+// ApplyRuntimeConfig replaces the TCP and UDP settings while the server is running.
+// Connections and datagrams already in flight finish on the snapshot they loaded; the
+// next read sees the new one. Settings consumed only at construction (the LowID range,
+// the counter cache TTL, the UDP rate limit) are not affected.
+func (s *ServerRuntime) ApplyRuntimeConfig(tcp TCPRuntimeConfig, udp UDPRuntimeConfig) {
+	if tcp.ServerStatusInterval <= 0 {
+		tcp.ServerStatusInterval = defaultServerStatusInterval
+	}
+	s.tcpCfg.Store(&tcp)
+	s.udpCfg.Store(&udp)
+}
+
+// TCPConfig and UDPConfig return copies of the current settings.
+func (s *ServerRuntime) TCPConfig() TCPRuntimeConfig { return *s.tcp() }
+func (s *ServerRuntime) UDPConfig() UDPRuntimeConfig { return *s.udp() }
+
+// tcp, udp and gossip load the current snapshots. The returned configs must not be
+// modified; gossip() is nil when gossip is disabled.
+func (s *ServerRuntime) tcp() *TCPRuntimeConfig { return s.tcpCfg.Load() }
+func (s *ServerRuntime) udp() *UDPRuntimeConfig { return s.udpCfg.Load() }
+func (s *ServerRuntime) gossip() *GossipHandler { return s.gossipHandler.Load() }
 
 // AccessFilter decides whether a peer address may talk to this server at all. The
 // interface is declared here rather than imported so the protocol package gains no
@@ -211,15 +239,15 @@ func (s *ServerRuntime) TCPHandler(enableCrypt bool) func(net.Conn) {
 		}
 		// Record every accepted address so gossip can refuse to admit a client as a peer.
 		// Placed after the filter so a blocked address is not tracked at all.
-		if s.Gossip != nil {
+		if g := s.gossip(); g != nil {
 			if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
-				s.Gossip.NoteClient(tcpAddr.IP)
+				g.NoteClient(tcpAddr.IP)
 			}
 		}
 		if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
 			key := addressKey(NormalizeIP(tcpAddr.IP))
 			if !s.acquireConnSlot(key) {
-				logging.Debugf("tcp connection refused remote=%s reason=per-ip-limit(%d)", tcpAddr.IP, s.TCP.MaxConnsPerIP)
+				logging.Debugf("tcp connection refused remote=%s reason=per-ip-limit(%d)", tcpAddr.IP, s.tcp().MaxConnsPerIP)
 				_ = conn.Close()
 				return
 			}
@@ -232,12 +260,12 @@ func (s *ServerRuntime) TCPHandler(enableCrypt bool) func(net.Conn) {
 
 // acquireConnSlot counts a new connection from key, refusing it past MaxConnsPerIP.
 func (s *ServerRuntime) acquireConnSlot(key string) bool {
-	if s.TCP.MaxConnsPerIP <= 0 {
-		return true
-	}
+	// Counted even while the limit is off: a config reload can turn the limit on with
+	// connections already open, and their slots must be there to release.
+	limit := s.tcp().MaxConnsPerIP
 	s.connsMu.Lock()
 	defer s.connsMu.Unlock()
-	if s.connsPerIP[key] >= s.TCP.MaxConnsPerIP {
+	if limit > 0 && s.connsPerIP[key] >= limit {
 		return false
 	}
 	if s.connsPerIP == nil {
@@ -249,9 +277,6 @@ func (s *ServerRuntime) acquireConnSlot(key string) bool {
 
 // releaseConnSlot undoes acquireConnSlot when the connection ends.
 func (s *ServerRuntime) releaseConnSlot(key string) {
-	if s.TCP.MaxConnsPerIP <= 0 {
-		return
-	}
 	s.connsMu.Lock()
 	defer s.connsMu.Unlock()
 	if s.connsPerIP[key] <= 1 {
@@ -263,12 +288,13 @@ func (s *ServerRuntime) releaseConnSlot(key string) {
 
 // advertisedAddress is the address published to clients, falling back to the
 // bind address when none was configured. Callers that need the *bind* address
-// (probeClient's LocalAddr) must keep using TCP.Address.
+// (probeClient's LocalAddr) must keep using tcp().Address.
 func (s *ServerRuntime) advertisedAddress() string {
-	if s.TCP.AdvertisedIP != "" {
-		return s.TCP.AdvertisedIP
+	cfg := s.tcp()
+	if cfg.AdvertisedIP != "" {
+		return cfg.AdvertisedIP
 	}
-	return s.TCP.Address
+	return cfg.Address
 }
 
 func (s *ServerRuntime) SetNATHandler(handler *NATTraversalHandler) {
@@ -412,7 +438,7 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 		// Neither of a *peer server's* two reply shapes can be read by the decrypt above,
 		// so gossip needs two more attempts. Both key/direction pairs below were measured
 		// against eserver 17.14 rather than inferred — see docs/server-gossip.md.
-		if enableCrypt && !arrivedPlaintext && (len(data) == 0 || data[0] != PrED2K) && s.Gossip != nil {
+		if enableCrypt && !arrivedPlaintext && (len(data) == 0 || data[0] != PrED2K) && s.gossip() != nil {
 			data = s.decryptPeerReply(data, remote.IP)
 		}
 		obfuscated := enableCrypt && !arrivedPlaintext && len(data) > 0 && data[0] == PrED2K
@@ -455,17 +481,17 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 		// lists.
 		switch code {
 		case OpGlobGetSources:
-			if !s.udpOpcodeEnabled(s.UDP.GetSources, code, remote) {
+			if !s.udpOpcodeEnabled(s.udp().GetSources, code, remote) {
 				return
 			}
 			s.udpGlobGetSources(b, remote, conn, crypt, module)
 		case OpGlobGetSources2:
-			if !s.udpOpcodeEnabled(s.UDP.GetSources, code, remote) {
+			if !s.udpOpcodeEnabled(s.udp().GetSources, code, remote) {
 				return
 			}
 			s.udpGlobGetSources2(b, remote, conn, crypt, module)
 		case OpGlobGetSourcesIPv6:
-			if !s.TCP.IPv6 || !s.udpOpcodeEnabled(s.UDP.GetSources, code, remote) {
+			if !s.tcp().IPv6 || !s.udpOpcodeEnabled(s.udp().GetSources, code, remote) {
 				return
 			}
 			s.udpGlobGetSourcesIPv6(b, remote, conn, crypt, module)
@@ -486,12 +512,12 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 		// and fell through to `default:`, so those clients got no reply of any
 		// kind — a gap inherited from the Node original (udpoperations.js:32-35).
 		case OpGlobSearchReq, OpGlobSearchReq2:
-			if !s.udpOpcodeEnabled(s.UDP.GetFiles, code, remote) {
+			if !s.udpOpcodeEnabled(s.udp().GetFiles, code, remote) {
 				return
 			}
 			s.udpGlobSearchReq(b, remote, conn, crypt, module)
 		case OpGlobSearchReq3:
-			if !s.udpOpcodeEnabled(s.UDP.GetFiles, code, remote) {
+			if !s.udpOpcodeEnabled(s.udp().GetFiles, code, remote) {
 				return
 			}
 			s.udpGlobSearchReq3(b, remote, conn, crypt, module)
@@ -547,11 +573,12 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 // IPv6 extension being on for the 0xa7/0xa8 pair. Mirrors udpOpcodeEnabled: the decision
 // and its log line live in one place rather than being repeated at each case.
 func (s *ServerRuntime) gossipOpcodeEnabled(code uint8, remote *net.UDPAddr, needIPv6 bool) bool {
-	if s.Gossip == nil {
+	g := s.gossip()
+	if g == nil {
 		logging.Debugf("udp gossip opcode ignored, gossip disabled remote=%s opcode=0x%x", remote, code)
 		return false
 	}
-	if needIPv6 && !s.Gossip.Config().PublishIPv6 {
+	if needIPv6 && !g.Config().PublishIPv6 {
 		logging.Debugf("udp gossip opcode ignored, publishIPv6 off remote=%s opcode=0x%x", remote, code)
 		return false
 	}
@@ -775,14 +802,14 @@ func (c *tcpClient) run() {
 	// that trickles a byte at a time never completes a login and is never reaped.
 	// Until login, the deadline is also capped at accept + LoginTimeout.
 	var loginDeadline time.Time
-	if c.server.TCP.LoginTimeout > 0 {
-		loginDeadline = time.Now().Add(c.server.TCP.LoginTimeout)
+	if c.server.tcp().LoginTimeout > 0 {
+		loginDeadline = time.Now().Add(c.server.tcp().LoginTimeout)
 	}
 	buf := make([]byte, 4096)
 	for {
 		var deadline time.Time
-		if c.server.TCP.DisconnectTimeout > 0 {
-			deadline = time.Now().Add(c.server.TCP.DisconnectTimeout)
+		if c.server.tcp().DisconnectTimeout > 0 {
+			deadline = time.Now().Add(c.server.tcp().DisconnectTimeout)
 		}
 		preLogin := !loginDeadline.IsZero() && !c.isLogged()
 		if preLogin && (deadline.IsZero() || loginDeadline.Before(deadline)) {
@@ -796,9 +823,9 @@ func (c *tcpClient) run() {
 			if errors.Is(err, io.EOF) {
 				c.setCloseReason("peer-closed")
 			} else if ne, ok := err.(net.Error); ok && ne.Timeout() && preLogin {
-				c.setCloseReason(fmt.Sprintf("login-timeout(%s)", c.server.TCP.LoginTimeout))
+				c.setCloseReason(fmt.Sprintf("login-timeout(%s)", c.server.tcp().LoginTimeout))
 			} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				c.setCloseReason(fmt.Sprintf("read-timeout(%s)", c.server.TCP.DisconnectTimeout))
+				c.setCloseReason(fmt.Sprintf("read-timeout(%s)", c.server.tcp().DisconnectTimeout))
 			} else {
 				c.setCloseReason(fmt.Sprintf("read-error: %v", err))
 			}
@@ -969,7 +996,7 @@ func (c *tcpClient) handleED2K(opcode uint8, data *Buffer) {
 		// SRVCAP_IPV6 is advertised whenever the server is dual-stack, so the request
 		// is answered even with ipv6.publishSources off — in the IPv6 form, carrying
 		// no addresses — rather than leaving the client waiting on silence.
-		if c.server.TCP.IPv6 {
+		if c.server.tcp().IPv6 {
 			c.handleGetSourcesIPv6(data)
 		} else {
 			logging.Debugf("tcp unhandled opcode remote=%s opcode=0x%x (ipv6 off)", c.remoteHost, opcode)
@@ -1109,7 +1136,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		c.hasLowID = true
 		c.info.LowID = true
 		c.infoMu.Unlock()
-		c.sendServerMessage(c.server.TCP.MessageLowID)
+		c.sendServerMessage(c.server.tcp().MessageLowID)
 
 		// AddByAddress publishes this *tcpClient into a table other goroutines
 		// read. The address+port seed only affects LowID distribution; keying on
@@ -1173,7 +1200,7 @@ func (c *tcpClient) handShake() {
 	// alive. Removed in run()'s defer.
 	c.server.registerSession(info.Hash, c)
 
-	c.sendServerMessage(c.server.TCP.MessageLogin)
+	c.sendServerMessage(c.server.tcp().MessageLogin)
 	c.sendServerMessage(fmt.Sprintf("server version %s (%s)", ENodeVersionStr, ENodeName))
 	c.sendServerStatus()
 	c.startPeriodicServerStatus()
@@ -1190,10 +1217,10 @@ func (c *tcpClient) handShake() {
 // keepalive, until the pool ran dry. A race with the read loop's own SetReadDeadline
 // only moves the deadline by the time between the two calls.
 func (c *tcpClient) touchDeadline() {
-	if c.server.TCP.DisconnectTimeout <= 0 {
+	if c.server.tcp().DisconnectTimeout <= 0 {
 		return
 	}
-	_ = c.conn.SetReadDeadline(time.Now().Add(c.server.TCP.DisconnectTimeout))
+	_ = c.conn.SetReadDeadline(time.Now().Add(c.server.tcp().DisconnectTimeout))
 }
 
 func (c *tcpClient) setCloseReason(reason string) {
@@ -1324,7 +1351,7 @@ func (c *tcpClient) startPeriodicServerStatus() {
 	if c.statusStop != nil {
 		return
 	}
-	interval := c.server.TCP.ServerStatusInterval
+	interval := c.server.tcp().ServerStatusInterval
 	if interval <= 0 {
 		return
 	}
@@ -1409,7 +1436,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	// One snapshot for the whole batch: the identity cannot change mid-batch,
 	// and taking it per file would lock once per offered file.
 	info := c.snapshotInfo()
-	softLimit, hardLimit := c.server.TCP.SoftFileLimit, c.server.TCP.HardFileLimit
+	softLimit, hardLimit := c.server.tcp().SoftFileLimit, c.server.tcp().HardFileLimit
 	var zeroSize, metaHashes int
 	// The whole packet is written in one AddFiles call. Storing record by record cost
 	// a fixed set of round-trips per file, so a database outside the host turned one
@@ -1723,8 +1750,8 @@ func (c *tcpClient) sendServerList() {
 func (s *ServerRuntime) advertisableServers() []storage.Server {
 	configured := s.Storage.ServersAll()
 	var verified []PeerAddr
-	if s.Gossip != nil {
-		verified = s.Gossip.Verified()
+	if g := s.gossip(); g != nil {
+		verified = g.Verified()
 	}
 
 	out := make([]storage.Server, 0, len(configured)+len(verified))
@@ -1773,7 +1800,7 @@ func (c *tcpClient) sendIDChange(id uint32) {
 	if IsLANIP(c.peerIP) && !HasHighID(id) {
 		observed = 0
 	}
-	packet, err := BuildIDChangePacket(id, c.server.TCP.Flags, c.server.TCP.Port, observed)
+	packet, err := BuildIDChangePacket(id, c.server.tcp().Flags, c.server.tcp().Port, observed)
 	if err != nil {
 		return
 	}
@@ -1790,18 +1817,19 @@ func (c *tcpClient) sendCallbackFailed() {
 
 func (c *tcpClient) sendServerIdent() {
 	clientV6, v6Status := c.ipv6Reflection()
+	cfg := c.server.tcp()
 	packet, err := BuildServerIdentPacket(ServerConfig{
-		Name:             c.server.TCP.Name,
-		Description:      c.server.TCP.Description,
+		Name:             cfg.Name,
+		Description:      cfg.Description,
 		Address:          c.server.advertisedAddress(),
-		Hash:             c.server.TCP.Hash,
-		TCPPort:          c.server.TCP.Port,
-		TCPFlags:         c.server.TCP.Flags,
-		IPv6:             c.server.TCP.ServerIPv6,
-		NatPort:          c.server.TCP.NatRendezvousPort,
+		Hash:             cfg.Hash,
+		TCPPort:          cfg.Port,
+		TCPFlags:         cfg.Flags,
+		IPv6:             cfg.ServerIPv6,
+		NatPort:          cfg.NatRendezvousPort,
 		ClientIPv6:       clientV6,
 		ClientIPv6Status: v6Status,
-		MetaAPI:          c.server.TCP.MetaAPI,
+		MetaAPI:          cfg.MetaAPI,
 	})
 	if err != nil {
 		logging.Warnf("tcp server ident not sent remote=%s err=%v", c.remoteHost, err)
@@ -2171,7 +2199,7 @@ func (s *ServerRuntime) probeFirewalled(client *tcpClient) bool {
 	if client == nil {
 		return true
 	}
-	if s.TCP.SupportCrypt {
+	if s.tcp().SupportCrypt {
 		ok, err := s.probeClient(client, true, "tcp4", client.remoteHost)
 		if err == nil && ok {
 			return false
@@ -2205,7 +2233,7 @@ func (s *ServerRuntime) probeIPv6Reachable(client *tcpClient) bool {
 		return false
 	}
 	host := net.IP(info.IPv6).String()
-	if s.TCP.SupportCrypt {
+	if s.tcp().SupportCrypt {
 		if ok, err := s.probeClient(client, true, "tcp6", host); err == nil && ok {
 			return true
 		}
@@ -2220,10 +2248,10 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network
 		return false, fmt.Errorf("client port is 0")
 	}
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", info.Port))
-	dialer := net.Dialer{Timeout: s.TCP.ConnectionTimeout}
+	dialer := net.Dialer{Timeout: s.tcp().ConnectionTimeout}
 	// Only bind a local source address whose family matches the dial network;
 	// binding a v4 LocalAddr to a tcp6 dial (or vice versa) fails outright.
-	if local := localBindForNetwork(network, s.TCP.Address); local != nil {
+	if local := localBindForNetwork(network, s.tcp().Address); local != nil {
 		dialer.LocalAddr = &net.TCPAddr{IP: local}
 	}
 	conn, err := dialer.Dial(network, addr)
@@ -2234,10 +2262,10 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network
 
 	cli := NewClient(ClientConfig{
 		EnableCrypt:       enableCrypt,
-		Address:           s.TCP.Address,
-		TCPPort:           s.TCP.Port,
-		ConnectionTimeout: int(s.TCP.ConnectionTimeout / time.Millisecond),
-		Hash:              s.TCP.Hash,
+		Address:           s.tcp().Address,
+		TCPPort:           s.tcp().Port,
+		ConnectionTimeout: int(s.tcp().ConnectionTimeout / time.Millisecond),
+		Hash:              s.tcp().Hash,
 	})
 	cli.Hash = client.snapshotInfo().Hash
 
@@ -2251,10 +2279,10 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network
 		if err != nil {
 			return false, err
 		}
-		if err := writeWithDeadline(conn, handshake, s.TCP.ConnectionTimeout); err != nil {
+		if err := writeWithDeadline(conn, handshake, s.tcp().ConnectionTimeout); err != nil {
 			return false, err
 		}
-		if leftover, err = readHandshake(cli, conn, s.TCP.ConnectionTimeout); err != nil {
+		if leftover, err = readHandshake(cli, conn, s.tcp().ConnectionTimeout); err != nil {
 			return false, err
 		}
 	}
@@ -2267,10 +2295,10 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network
 	if enableCrypt && cli.CryptStatus == CsEncrypting {
 		helloBytes = RC4Crypt(helloBytes, len(helloBytes), cli.SendKey)
 	}
-	if err := writeWithDeadline(conn, helloBytes, s.TCP.ConnectionTimeout); err != nil {
+	if err := writeWithDeadline(conn, helloBytes, s.tcp().ConnectionTimeout); err != nil {
 		return false, err
 	}
-	return readHelloAnswer(cli, conn, s.TCP.ConnectionTimeout, cli.Hash, leftover)
+	return readHelloAnswer(cli, conn, s.tcp().ConnectionTimeout, cli.Hash, leftover)
 }
 
 // readHandshake reads the obfuscation handshake answer, however TCP splits it, and
@@ -2499,17 +2527,18 @@ func (s *ServerRuntime) buildStatRes(challenge uint32, udpKey uint32, remote *ne
 	if remote != nil {
 		observed = NormalizeIP(remote.IP)
 	}
+	cfg := s.udp()
 	return BuildGlobServStatResPacket(challenge, UDPConfig{
-		Name:           s.UDP.Name,
-		Description:    s.UDP.Description,
-		DynIP:          s.UDP.DynIP,
-		UDPFlags:       s.UDP.UDPFlags,
-		UDPPortObf:     s.UDP.UDPPortObf,
-		TCPPortObf:     s.UDP.TCPPortObf,
+		Name:           cfg.Name,
+		Description:    cfg.Description,
+		DynIP:          cfg.DynIP,
+		UDPFlags:       cfg.UDPFlags,
+		UDPPortObf:     cfg.UDPPortObf,
+		TCPPortObf:     cfg.TCPPortObf,
 		UDPServerKey:   udpKey,
-		MaxConnections: s.UDP.MaxConnections,
-		SoftFiles:      s.UDP.SoftFiles,
-		HardFiles:      s.UDP.HardFiles,
+		MaxConnections: cfg.MaxConnections,
+		SoftFiles:      cfg.SoftFiles,
+		HardFiles:      cfg.HardFiles,
 		ObservedIP:     observed,
 	}, s.advertisedUsers(clients), s.advertisedFiles(files), s.advertisedLowIDs(int(s.LowIDs.Count())))
 }
@@ -2541,7 +2570,7 @@ func (s *ServerRuntime) udpCryptPingReply(data []byte, remote *net.UDPAddr, conn
 }
 
 func (s *ServerRuntime) udpServDescResOld(remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
-	packet, err := BuildServerDescResOldPacket(s.UDP.Name, s.UDP.Description)
+	packet, err := BuildServerDescResOldPacket(s.udp().Name, s.udp().Description)
 	if err != nil {
 		return
 	}
@@ -2554,9 +2583,9 @@ func (s *ServerRuntime) udpServDescRes(b *Buffer, remote *net.UDPAddr, conn UDPR
 		return
 	}
 	packet, err := BuildServerDescResPacket(challenge, UDPConfig{
-		Name:        s.UDP.Name,
-		Description: s.UDP.Description,
-		DynIP:       s.UDP.DynIP,
+		Name:        s.udp().Name,
+		Description: s.udp().Description,
+		DynIP:       s.udp().DynIP,
 	})
 	if err != nil {
 		return
@@ -2868,7 +2897,7 @@ func loginIPv6(tags []NamedTag) (addr []byte, present bool) {
 // turning probing off skips the dial. Shared with ipv6Reflection so the
 // IPv6StatusProbed bit cannot drift away from what the login path actually did.
 func (c *tcpClient) v6ProbeRequired(v6Len int) bool {
-	return c.server.publishV6Sources() && v6Len == 16 && c.server.TCP.ProbeIPv6
+	return c.server.publishV6Sources() && v6Len == 16 && c.server.tcp().ProbeIPv6
 }
 
 // ipv6Reflection returns the two per-session IPv6 fields of OP_SERVERIDENT: the
@@ -3025,8 +3054,8 @@ func capUDPSearchResults(files []storage.File) []storage.File {
 // udpSecret is the secret client UDP keys are derived from: UDPSecret, or the legacy
 // UDPServerKey when none was loaded.
 func (s *ServerRuntime) udpSecret() []byte {
-	if len(s.UDP.UDPSecret) > 0 {
-		return s.UDP.UDPSecret
+	if len(s.udp().UDPSecret) > 0 {
+		return s.udp().UDPSecret
 	}
-	return LegacyUDPSecret(s.UDP.UDPServerKey)
+	return LegacyUDPSecret(s.udp().UDPServerKey)
 }

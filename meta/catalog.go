@@ -141,6 +141,7 @@ func (src *source) loadChunk(ctx context.Context, base *metav1.SearchRequest, k 
 		if err != nil {
 			return Chunk{}, err
 		}
+		src.noteLiveOK()
 		if calls == 0 {
 			out.Total, out.TotalExact = resp.GetTotal(), resp.GetTotalExact()
 		}

@@ -20,6 +20,11 @@ const defaultInfoInterval = time.Minute
 // infoTimeout bounds one GetInfo call.
 const infoTimeout = 5 * time.Second
 
+// staleWindow is how recent a Search answer must be for a failed GetInfo to count
+// as stale figures rather than an unreachable daemon: two polls, so one answer
+// covers the poll that follows it.
+const staleWindow = 2 * defaultInfoInterval
+
 // maxStatusFiles caps one network's contribution to the status file total, so the
 // int conversion cannot overflow on a 32-bit build. The wire field is a uint32 and
 // the ed2k side clamps the sum.
@@ -43,6 +48,11 @@ type NetworkStats struct {
 	// Down is whether live searches are paused after an answer that will not change
 	// between searches (unavailable, unimplemented, unauthenticated).
 	Down bool
+	// LiveOKAt is when the daemon last answered a Search, zero for never.
+	LiveOKAt time.Time
+	// StatsStale is whether the last GetInfo failed although the daemon answered a
+	// Search within staleWindow: it is up and only its figures are old.
+	StatsStale bool
 
 	Daemon          string
 	Version         string
@@ -238,7 +248,12 @@ func (src *source) stats() NetworkStats {
 	st.Reachable = src.daemon.reachable
 	st.LastError = src.daemon.lastErr
 	st.InfoAt = src.daemon.at
+	pollFailed := src.daemon.polled && !src.daemon.reachable
 	src.daemon.mu.Unlock()
+	if ok := src.liveOK.Load(); ok != 0 {
+		st.LiveOKAt = time.Unix(0, ok)
+		st.StatsStale = pollFailed && time.Since(st.LiveOKAt) < staleWindow
+	}
 	st.Daemon = info.GetDaemon()
 	st.Version = info.GetVersion()
 	st.Indexer = info.GetIndexer()

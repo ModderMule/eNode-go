@@ -118,6 +118,6 @@ func (s *ServerRuntime) advertisedFiles(ed2kFiles int) int {
 	if s.meta != nil {
 		total += uint64(max(s.meta.AdvertisedFiles(), 0))
 	}
-	total += uint64(max(s.boost.Files, 0))
+	total += uint64(max(s.statsBoost().Files, 0))
 	return int(min(total, math.MaxUint32))
 }

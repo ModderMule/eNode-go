@@ -13,20 +13,27 @@ type StatsBoost struct {
 	Files      int
 }
 
-// SetStatsBoost sets the advertised-count offsets. Like SetMetaSearcher it must be
-// called before the listeners bind: the field is read without a lock.
+// SetStatsBoost sets the advertised-count offsets. Safe to call with the listeners live.
 func (s *ServerRuntime) SetStatsBoost(b StatsBoost) {
-	s.boost = b
+	s.boost.Store(&b)
+}
+
+// statsBoost returns the current offsets, zero when none were set.
+func (s *ServerRuntime) statsBoost() StatsBoost {
+	if b := s.boost.Load(); b != nil {
+		return *b
+	}
+	return StatsBoost{}
 }
 
 // advertisedUsers adds the statsBoost users offset to the online-client count.
 func (s *ServerRuntime) advertisedUsers(clients int) int {
-	return addClampedUint32(clients, s.boost.Users)
+	return addClampedUint32(clients, s.statsBoost().Users)
 }
 
 // advertisedLowIDs adds the statsBoost LowID offset to the LowID-client count.
 func (s *ServerRuntime) advertisedLowIDs(lowIDs int) int {
-	return addClampedUint32(lowIDs, s.boost.LowIDUsers)
+	return addClampedUint32(lowIDs, s.statsBoost().LowIDUsers)
 }
 
 // addClampedUint32 sums two non-negative counts into the uint32 range the status

@@ -63,6 +63,8 @@ type source struct {
 	cache         *Cache[[]storage.File]
 	// downUntil is a unix-nano deadline before which live calls are skipped.
 	downUntil atomic.Int64
+	// liveOK is the unix-nano time the daemon last answered a Search, 0 for never.
+	liveOK atomic.Int64
 
 	counters sourceCounters
 	daemon   daemonInfo
@@ -280,6 +282,7 @@ func (src *source) fetch(ctx context.Context, q Query) ([]storage.File, error) {
 		if err != nil {
 			return nil, err
 		}
+		src.noteLiveOK()
 		rows := make([]storage.File, 0, len(resp.GetEntries()))
 		for _, entry := range resp.GetEntries() {
 			file, err := EntryToFile(entry)
@@ -328,6 +331,11 @@ var errNotCached = errors.New("not cached")
 
 func (src *source) isDown() bool {
 	return time.Now().UnixNano() < src.downUntil.Load()
+}
+
+// noteLiveOK records that the daemon just answered a Search.
+func (src *source) noteLiveOK() {
+	src.liveOK.Store(time.Now().UnixNano())
 }
 
 // noteError logs a failed live call and, for an answer that will not change on the

@@ -46,10 +46,10 @@ func TestSendServerIdentPrefersAdvertisedIP(t *testing.T) {
 			}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
 
 			packet, err := BuildServerIdentPacket(ServerConfig{
-				Name:    rt.TCP.Name,
+				Name:    rt.tcp().Name,
 				Address: rt.advertisedAddress(),
-				Hash:    rt.TCP.Hash,
-				TCPPort: rt.TCP.Port,
+				Hash:    rt.tcp().Hash,
+				TCPPort: rt.tcp().Port,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -81,11 +81,11 @@ func TestAdvertisedIPDoesNotChangeBindAddress(t *testing.T) {
 		Port:         4661,
 	}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
 
-	t.Logf("input: address=%q advertisedIP=%q", rt.TCP.Address, rt.TCP.AdvertisedIP)
-	t.Logf("output: bind address=%q advertised=%q", rt.TCP.Address, rt.advertisedAddress())
+	t.Logf("input: address=%q advertisedIP=%q", rt.tcp().Address, rt.tcp().AdvertisedIP)
+	t.Logf("output: bind address=%q advertised=%q", rt.tcp().Address, rt.advertisedAddress())
 
-	if rt.TCP.Address != "0.0.0.0" {
-		t.Fatalf("bind address was changed to %q", rt.TCP.Address)
+	if rt.tcp().Address != "0.0.0.0" {
+		t.Fatalf("bind address was changed to %q", rt.tcp().Address)
 	}
 	if rt.advertisedAddress() != "198.51.100.4" {
 		t.Fatalf("advertised address is %q", rt.advertisedAddress())

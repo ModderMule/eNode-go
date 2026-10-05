@@ -121,6 +121,70 @@ func TestStatsKeepsFiguresWhenUnreachable(t *testing.T) {
 	}
 }
 
+// TestStatsStaleWhenSearchStillAnswers: a daemon whose GetInfo fails while it still
+// answers searches is up with old figures, not unreachable. Without a recent search
+// answer there is no such evidence, and an answer older than staleWindow is none.
+func TestStatsStaleWhenSearchStillAnswers(t *testing.T) {
+	d := &fakeDaemon{
+		info:    &metav1.GetInfoResponse{Files: 321},
+		entries: []*metav1.MetaEntry{torrentEntry("stale.mkv", 1)},
+	}
+	s := searcherFor(testConfig(t, true, false), map[string]*fakeDaemon{NetworkTorrent: d})
+	src := s.sources[0]
+
+	src.refreshInfo(context.Background())
+	_ = s.Search(context.Background(), text("stale"), false)
+	healthy := s.Stats()[0]
+
+	d.mu.Lock()
+	d.infoErr = connect.NewError(connect.CodeDeadlineExceeded, "counting files: context deadline exceeded")
+	d.mu.Unlock()
+	src.refreshInfo(context.Background())
+	stale := s.Stats()[0]
+
+	src.liveOK.Store(time.Now().Add(-staleWindow - time.Second).UnixNano())
+	old := s.Stats()[0]
+
+	t.Logf("input: poll ok + search ok, then poll deadline_exceeded, then the search answer aged past %s", staleWindow)
+	t.Logf("output: healthy reachable=%t stale=%t; failed poll reachable=%t stale=%t liveOKAt=%s files=%d; aged reachable=%t stale=%t",
+		healthy.Reachable, healthy.StatsStale, stale.Reachable, stale.StatsStale,
+		stale.LiveOKAt.Format(time.RFC3339), stale.Files, old.Reachable, old.StatsStale)
+	if !healthy.Reachable || healthy.StatsStale || healthy.LiveOKAt.IsZero() {
+		t.Errorf("a good poll is reachable and not stale, with the search answer timed: %+v", healthy)
+	}
+	if stale.Reachable || !stale.StatsStale || stale.Files != 321 {
+		t.Errorf("a failed poll with a recent search answer is stale, keeping its figures: %+v", stale)
+	}
+	if old.Reachable || old.StatsStale {
+		t.Errorf("a search answer older than staleWindow is no evidence: %+v", old)
+	}
+}
+
+// TestStatsNotStaleWithoutSearchAnswer: a failed poll with no search ever answered,
+// or with searches failing, stays unreachable; and nothing is stale before a poll.
+func TestStatsNotStaleWithoutSearchAnswer(t *testing.T) {
+	d := &fakeDaemon{
+		infoErr:   connect.NewError(connect.CodeUnavailable, "daemon restarting"),
+		searchErr: errors.New("boom"),
+	}
+	s := searcherFor(testConfig(t, true, false), map[string]*fakeDaemon{NetworkTorrent: d})
+	src := s.sources[0]
+
+	unpolled := s.Stats()[0]
+	src.refreshInfo(context.Background())
+	_ = s.Search(context.Background(), text("failing"), false)
+	failed := s.Stats()[0]
+
+	t.Logf("input: no poll yet, then poll unavailable + search error; output: unpolled stale=%t, failed reachable=%t stale=%t liveOKAt.zero=%t liveErrors=%d",
+		unpolled.StatsStale, failed.Reachable, failed.StatsStale, failed.LiveOKAt.IsZero(), failed.LiveErrors)
+	if unpolled.StatsStale {
+		t.Errorf("nothing is stale before the first poll: %+v", unpolled)
+	}
+	if failed.Reachable || failed.StatsStale || !failed.LiveOKAt.IsZero() {
+		t.Errorf("a failed poll with no search answer is unreachable: %+v", failed)
+	}
+}
+
 // TestStatsShutdownIsNotAFailure: a poll cut short by the process stopping leaves the
 // daemon's state alone.
 func TestStatsShutdownIsNotAFailure(t *testing.T) {

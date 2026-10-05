@@ -45,19 +45,20 @@ func IsLocalRequest(r *http.Request) bool {
 func (s *Server) guard(sensitive bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !IsLocalRequest(r) {
+			username, password := s.credentials()
 			if !s.authLimit.Allow(ratelimit.PeerIP(r.RemoteAddr)) {
 				http.Error(w, "too many requests", http.StatusTooManyRequests)
 				return
 			}
 			switch {
-			case s.cfg.Username != "":
-				if !s.checkBasic(r) {
+			case username != "":
+				if !checkBasic(r, username, password) {
 					w.Header().Set("WWW-Authenticate", `Basic realm="eNode admin", charset="UTF-8"`)
 					http.Error(w, "authentication required", http.StatusUnauthorized)
 					return
 				}
 			case sensitive:
-				http.Error(w, "account administration is available from loopback, or with admin.username and admin.password configured",
+				http.Error(w, "administration is available from loopback, or with admin.username and admin.password configured",
 					http.StatusForbidden)
 				return
 			}
@@ -70,14 +71,14 @@ func (s *Server) guard(sensitive bool, next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) checkBasic(r *http.Request) bool {
+func checkBasic(r *http.Request, username, password string) bool {
 	user, pass, ok := r.BasicAuth()
 	if !ok {
 		return false
 	}
 	// Hashing first makes the comparison constant-time regardless of length.
-	u1, u2 := sha256.Sum256([]byte(user)), sha256.Sum256([]byte(s.cfg.Username))
-	p1, p2 := sha256.Sum256([]byte(pass)), sha256.Sum256([]byte(s.cfg.Password))
+	u1, u2 := sha256.Sum256([]byte(user)), sha256.Sum256([]byte(username))
+	p1, p2 := sha256.Sum256([]byte(pass)), sha256.Sum256([]byte(password))
 	good := subtle.ConstantTimeCompare(u1[:], u2[:]) & subtle.ConstantTimeCompare(p1[:], p2[:])
 	if good != 1 {
 		logging.Warnf("admin dashboard: failed login from %s", r.RemoteAddr)

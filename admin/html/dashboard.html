@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Name}} — admin</title>
 <style>
-:root{color-scheme:light dark;--bg:#0f1216;--card:#1a1f27;--fg:#e6e9ef;--muted:#8b94a3;--accent:#4ea1ff;--ok:#3ecf8e;--err:#ff6b6b;--line:#2a313c}
-@media (prefers-color-scheme:light){:root{--bg:#f4f6fa;--card:#ffffff;--fg:#1a1f27;--muted:#5c6675;--accent:#1769d1;--ok:#149a63;--err:#c53030;--line:#e2e6ee}}
+:root{color-scheme:light dark;--bg:#0f1216;--card:#1a1f27;--fg:#e6e9ef;--muted:#8b94a3;--accent:#4ea1ff;--ok:#3ecf8e;--warn:#e3b341;--err:#ff6b6b;--line:#2a313c}
+@media (prefers-color-scheme:light){:root{--bg:#f4f6fa;--card:#ffffff;--fg:#1a1f27;--muted:#5c6675;--accent:#1769d1;--ok:#149a63;--warn:#9a6700;--err:#c53030;--line:#e2e6ee}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 .wrap{max-width:920px;margin:0 auto;padding:28px 20px 48px}
@@ -15,6 +15,7 @@ h1{font-size:22px;margin:0}
 .desc{color:var(--muted);margin:2px 0 20px}
 .badge{font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;border:1px solid var(--line)}
 .badge.ok{color:var(--ok);border-color:var(--ok)}
+.badge.warn{color:var(--warn);border-color:var(--warn)}
 .badge.err{color:var(--err);border-color:var(--err)}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
@@ -38,6 +39,9 @@ td.v{font-variant-numeric:tabular-nums}
 .addr b{color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600}
 footer{margin-top:24px;color:var(--muted);font-size:12px}
 a{color:var(--accent)}
+button{font:inherit;font-size:13px;padding:4px 10px;border-radius:8px;border:1px solid var(--accent);background:var(--card);color:var(--accent);cursor:pointer}
+button:disabled{opacity:.6;cursor:default}
+#msg{min-height:1.5em;margin:0 0 4px}
 </style>
 </head>
 <body>
@@ -46,7 +50,9 @@ a{color:var(--accent)}
 <h1>{{.Name}}</h1>
 <span id="status" class="badge">connecting…</span>
 <span id="updated" class="desc" style="margin:0"></span>
+{{if .Reload}}<button id="reload" title="Re-read the config file and apply what can change without a restart">Reload config</button>{{end}}
 </header>
+{{if .Reload}}<p id="msg" class="desc"></p>{{end}}
 <p class="desc" style="margin-bottom:4px">{{.Description}} · {{.Version}}<span id="update"></span> · storage: {{.Engine}}</p>
 <p class="desc addr">IPv4: {{if .AdvertisedIP}}<b>{{.AdvertisedIP}}</b>{{else}}<span class="off">unresolved</span>{{end}} · IPv6: {{if .AdvertisedIPv6}}<b>{{.AdvertisedIPv6}}</b>{{else if .IPv6}}<span class="off">unresolved</span>{{else}}<span class="off">off</span>{{end}}</p>
 
@@ -128,6 +134,11 @@ function renderUpdate(u){
 }
 function setText(id, val){ var el = document.getElementById(id); if(el){ el.textContent = val; } }
 function num(n){ return Number(n || 0).toLocaleString(); }
+// fmtAge renders how long ago an RFC 3339 time was, in the uptime's units.
+function fmtAge(at){
+  return fmtUptime((Date.now() - Date.parse(at)) / 1000);
+}
+
 // metaCard builds one network's card. Everything a daemon reported is inserted as
 // text, never as markup: the daemon name and version are its own strings.
 function metaCard(m){
@@ -139,10 +150,16 @@ function metaCard(m){
   name.className = 'name';
   name.textContent = m.network;
   var badge = document.createElement('span');
-  var ok = m.reachable && !m.down;
-  badge.className = 'badge ' + (ok ? 'ok' : 'err');
-  badge.textContent = !m.reachable ? 'unreachable' : (m.down ? 'search paused' : 'reachable');
+  // A failed info poll alone does not make the daemon unreachable: while it still
+  // answers searches only its figures are old, and the card says how old.
+  var state = m.down ? ['err', 'search paused']
+    : m.reachable ? ['ok', 'reachable']
+    : m.statsStale ? ['warn', 'stats stale']
+    : ['err', 'unreachable'];
+  badge.className = 'badge ' + state[0];
+  badge.textContent = state[1];
   if(m.lastError){ badge.title = m.lastError; }
+  var asOf = m.reachable ? '' : (m.infoAt ? ' · as of ' + fmtAge(m.infoAt) + ' ago' : ' · never read');
   head.appendChild(name);
   head.appendChild(badge);
   card.appendChild(head);
@@ -151,7 +168,7 @@ function metaCard(m){
   var lag = m.lastSeq > m.feedCursor ? m.lastSeq - m.feedCursor : 0;
   var rows = [
     ['Daemon', m.daemon ? m.daemon + (m.version ? ' ' + m.version : '') : '—'],
-    ['Catalogue', num(m.catalogued) + ' releases · ' + num(m.files) + ' files'],
+    ['Catalogue', num(m.catalogued) + ' releases · ' + num(m.files) + ' files' + asOf],
     ['Published', num(m.published)],
     ['Live search', !m.liveSearch ? 'off' : (m.searchAvailable ? 'on' : 'on, daemon has no index')],
     ['Feed', !m.feedEnabled ? 'off' : num(m.feedRows) + ' rows · ' + num(m.feedReleases) + ' releases · '
@@ -248,6 +265,42 @@ async function refresh(){
     setStatus('offline', 'err');
   }
 }
+// reloadConfig asks the server to re-read its config file. The answer lists config
+// key paths only, inserted as text.
+function reloadMsg(t, bad){ var m = document.getElementById('msg'); if(m){ m.textContent = t || ''; m.style.color = bad ? 'var(--err)' : ''; } }
+async function reloadConfig(){
+  var btn = document.getElementById('reload');
+  btn.disabled = true;
+  reloadMsg('Reloading config…');
+  try{
+    var r = await fetch('/api/reload-config', {method:'POST', headers:{'X-Enode-Admin':'1'}});
+    var d = await r.json().catch(function(){ return {}; });
+    if(!r.ok){ throw new Error(d.error || ('HTTP ' + r.status)); }
+    var parts = [];
+    if(d.applied.length){ parts.push('Applied: ' + d.applied.join(', ')); }
+    if(d.restartRequired.length){ parts.push('Needs restart: ' + d.restartRequired.join(', ')); }
+    var text = parts.length ? parts.join(' · ') : 'Config reloaded, no changes';
+    reloadMsg(text);
+    // The name, description and feature rows are rendered by the server, so an applied
+    // change shows only after the page is fetched again. The result line is carried
+    // across in sessionStorage; where that is unavailable the page is left as it is.
+    if(d.applied.length){
+      try{ sessionStorage.setItem('reloadMsg', text); location.reload(); }catch(e){}
+    }
+  }catch(e){
+    reloadMsg('Reload failed: ' + e.message, true);
+  }
+  btn.disabled = false;
+}
+(function(){
+  var btn = document.getElementById('reload');
+  if(!btn){ return; }
+  btn.onclick = reloadConfig;
+  try{
+    var t = sessionStorage.getItem('reloadMsg');
+    if(t){ sessionStorage.removeItem('reloadMsg'); reloadMsg(t); }
+  }catch(e){}
+})();
 refresh();
 setInterval(refresh, 5000);
 </script>

@@ -38,14 +38,14 @@ func (m *mockConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 func TestNewServerRuntimeSetsDefaultServerStatusInterval(t *testing.T) {
 	rt := NewServerRuntime(TCPRuntimeConfig{}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
-	if rt.TCP.ServerStatusInterval != defaultServerStatusInterval {
-		t.Fatalf("default interval=%v want=%v", rt.TCP.ServerStatusInterval, defaultServerStatusInterval)
+	if rt.tcp().ServerStatusInterval != defaultServerStatusInterval {
+		t.Fatalf("default interval=%v want=%v", rt.tcp().ServerStatusInterval, defaultServerStatusInterval)
 	}
 
 	custom := 2 * time.Minute
 	rt2 := NewServerRuntime(TCPRuntimeConfig{ServerStatusInterval: custom}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
-	if rt2.TCP.ServerStatusInterval != custom {
-		t.Fatalf("custom interval=%v want=%v", rt2.TCP.ServerStatusInterval, custom)
+	if rt2.tcp().ServerStatusInterval != custom {
+		t.Fatalf("custom interval=%v want=%v", rt2.tcp().ServerStatusInterval, custom)
 	}
 }
 

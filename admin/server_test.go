@@ -50,6 +50,7 @@ func testServer(t *testing.T) (string, LiveStats) {
 		Meta: []MetaNetworkStats{{
 			Network: "torrent", URL: "http://127.0.0.1:9701", LiveSearch: true, CountInServerStatus: true,
 			Reachable: true, InfoAt: "2026-07-22T09:59:00Z", Daemon: "torrent-crawler-1", Version: "v1.2.3",
+			StatsStale: true, LiveOKAt: "2026-07-22T09:59:30Z",
 			SearchAvailable: true, Catalogued: 1200, Published: 300, Files: 5000, LastSeq: 42,
 			SearchesTCP: 9, SearchesUDP: 4, RowsServed: 30, LiveCalls: 6, LiveErrors: 1, LiveTimeouts: 2,
 			CacheHits: 5, CacheMisses: 6, UDPSkipped: 1, Counted: 5000,
@@ -121,7 +122,7 @@ func TestStatsJSONReturnsSnapshot(t *testing.T) {
 		first, _ = list[0].(map[string]any)
 	}
 	for _, key := range []string{
-		"network", "reachable", "down", "lastError", "daemon", "version", "searchAvailable",
+		"network", "reachable", "down", "statsStale", "liveOkAt", "infoAt", "lastError", "daemon", "version", "searchAvailable",
 		"catalogued", "published", "files", "lastSeq", "liveSearch", "feedEnabled", "feedRows",
 		"feedReleases", "feedCursor", "feedCaughtUp", "searchesTCP", "searchesUDP", "rowsServed",
 		"liveCalls", "liveErrors", "liveTimeouts", "cacheHits", "cacheMisses", "udpSkipped",

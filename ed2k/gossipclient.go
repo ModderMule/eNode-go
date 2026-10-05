@@ -144,7 +144,8 @@ func (g *GossipHandler) contactPeer(cfg GossipClientConfig, p PeerServer) {
 // ServerKey — the extended form only ever arrives on the obfuscated channel, which is
 // why phase 2 exists at all and why phase 1 alone can never key a peer.
 func (g *GossipHandler) sendPhase1(cfg GossipClientConfig, p PeerServer) {
-	if cfg.Main == nil || g.cfg.SelfIPv4 == nil {
+	self := g.Config()
+	if cfg.Main == nil || self.SelfIPv4 == nil {
 		// With no routable IPv4 of our own there is nothing truthful to put in 0xA0's
 		// address field, so registration is skipped; the peer can still learn about us
 		// from our obfuscated frames.
@@ -153,7 +154,7 @@ func (g *GossipHandler) sendPhase1(cfg GossipClientConfig, p PeerServer) {
 	dst := &net.UDPAddr{IP: p.Addr.IP, Port: int(p.Addr.Port) + peerMainUDPOffset}
 	challenge := 0x55AA0000 | uint32(Rand(0xffff))
 
-	if pkt, err := BuildServerListReqPacket(g.cfg.SelfIPv4, g.cfg.SelfPort, challenge); err == nil {
+	if pkt, err := BuildServerListReqPacket(self.SelfIPv4, self.SelfPort, challenge); err == nil {
 		g.writeTo(cfg.Main, dst, pkt.Bytes(), "phase1 0xA0", p)
 	}
 	if pkt, err := MakeUDPPacket(PrED2K, []PacketItem{
@@ -225,9 +226,10 @@ func (g *GossipHandler) sendPhase3(cfg GossipClientConfig, p PeerServer) {
 	}
 	dst := &net.UDPAddr{IP: p.Addr.IP, Port: int(gossipDestPort(p))}
 	crypt := NewUDPCrypt(true, p.ServerKey)
+	self := g.Config()
 
-	if g.cfg.SelfIPv4 != nil {
-		if pkt, err := BuildServerListReqPacket(g.cfg.SelfIPv4, g.cfg.SelfPort, p.OurChallenge); err == nil {
+	if self.SelfIPv4 != nil {
+		if pkt, err := BuildServerListReqPacket(self.SelfIPv4, self.SelfPort, p.OurChallenge); err == nil {
 			g.writeObf(cfg.Gossip, dst, crypt, pkt.Bytes(), "phase3 0xA0", p)
 		}
 	}
@@ -236,7 +238,7 @@ func (g *GossipHandler) sendPhase3(cfg GossipClientConfig, p PeerServer) {
 	}
 	// Only ask for v6 peers from a peer that advertised IPv6 support. A stock eserver
 	// would log 0xA7 as an unknown opcode; there is no value in making it do that.
-	if g.cfg.PublishIPv6 && p.UDPFlags&FlagIPv6 != 0 {
+	if self.PublishIPv6 && p.UDPFlags&FlagIPv6 != 0 {
 		if pkt, err := BuildServerListReqIPv6Packet(); err == nil {
 			g.writeObf(cfg.Gossip, dst, crypt, pkt.Bytes(), "phase3 0xA7", p)
 		}

@@ -77,6 +77,8 @@ type PaymentRow struct {
 
 // SetAccounts enables the account pages. Call before Start.
 func (s *Server) SetAccounts(a AccountAdmin) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.accounts = a
 	s.static.Accounts = a != nil
 }
@@ -96,7 +98,7 @@ func (s *Server) handleAccountsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	if err := accountsTemplate.Execute(w, s.static); err != nil {
+	if err := accountsTemplate.Execute(w, s.staticInfo()); err != nil {
 		logging.Warnf("admin accounts page render error: %v", err)
 	}
 }

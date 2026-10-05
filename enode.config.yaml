@@ -121,9 +121,18 @@ files:
 # instead of only from the static `servers:` list above. See docs/server-gossip.md.
 gossip:
   enabled: true
-  # Servers to bootstrap from. Empty falls back to the top-level `servers:` list, so
-  # no new keys are needed to participate.
-  seeds: []
+  # Servers to bootstrap from: a handful of large public servers that answered the
+  # obfuscated bootstrap ping on 2026-10-05; the rest of the mesh is learned from their
+  # lists. Empty falls back to the top-level `servers:` list.
+  seeds:
+    - { ip: "176.123.5.89",    port: 4725 }   # eMule Sunrise
+    - { ip: "91.208.162.55",   port: 4235 }   # Sharing-Devils No.3
+    - { ip: "85.121.5.137",    port: 4232 }   # Sharing-Devils No.2
+    - { ip: "213.141.198.207", port: 4232 }   # Mazinga Server
+    - { ip: "57.131.35.107",   port: 4232 }   # MO-ad-free
+    - { ip: "85.17.116.222",   port: 6082 }   # ed2k-rust
+    - { ip: "143.246.192.192", port: 4232 }   # eMule Nordic
+    - { ip: "195.62.47.224",   port: 5555 }   # littlemule eNode
   # How often each peer is re-contacted. Lugdunum's own keepalive is ~165 s, so 150
   # keeps our entry from lapsing on a peer between rounds.
   intervalSeconds: 150
