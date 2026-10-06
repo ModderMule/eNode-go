@@ -186,6 +186,11 @@ metaApi:
     timeoutMs: 5000                # daemon calls behind one page
     maxLimit: 100                  # releases per page
     window: 1000                   # deepest release reachable by paging
+    # Also search the eD2K files servers know, as a network of its own
+    # (META_NETWORK_SERVERS): the files this server's users share, and the files
+    # of the servers in serverSearch when it asks them (search or mirror on).
+    # Needs no metaSearch network. See docs/meta-api.md.
+    servers: false
     cache:
       maxEntries: 2000             # chunks of 100 releases per network and search
       ttlSeconds: 600              # pages stay stable this long
@@ -238,6 +243,81 @@ metaApi:
             allowInsecureStore: false  # permit a plain-HTTP shop that is not on loopback
             title: "Shop checkout"
             timeoutSeconds: 15
+# Server-to-server search: other eD2K servers search and browse this server's own
+# file catalogue, and this server theirs. Off by default. An answer carries files
+# and source counts and never a source: no client is identified to another server.
+# Changing anything here needs a restart. See docs/server-search.md.
+serverSearch:
+  # On, in gossip mode, so that every interop case runs with the ST_SERVER_SEARCH tag
+  # in OP_SERVER_DESC_RES: the original eserver has to keep admitting us, and naming
+  # us to its peers, with it present. (The contract's flag bit is never sent: it is
+  # what this suite caught breaking eserver's peer lists.)
+  enabled: true
+  # Who may call. "allowlist": only the peers below, each by its token. "gossip":
+  # also any server the gossip peer table has verified, without a token; the
+  # service is then advertised in the UDP server description reply.
+  mode: gossip
+  listen: 0.0.0.0:4673
+  # Base URL other servers reach the listener on, advertised in gossip mode. ""
+  # derives it from the advertised server IP and the listener's port.
+  advertiseURL: ""
+  # Tokens without tls cross the network in clear text. Only set this behind a TLS
+  # reverse proxy, or for peers on a private network.
+  allowInsecureAuth: false
+  # Take the caller's address from X-Forwarded-For. Only behind a reverse proxy
+  # that sets it: gossip mode admits a caller by its address.
+  trustForwardedFor: false
+  # Certificate of the listener. A self-signed one is enough: give its fingerprint
+  # (logged at startup) to the peers, or let gossip mode advertise it.
+  tls:
+    certFile: ""
+    keyFile: ""
+  # What this server answers for other servers.
+  serve:
+    search: true
+    browse: true
+    # Most files in one answer.
+    maxSearchLimit: 200
+    maxBrowseLimit: 1000
+    # Pause asked of a server between two browse calls; 0 asks for none.
+    browseMinIntervalSeconds: 1
+    # Search answers are kept this long so that paging one is stable.
+    cache:
+      maxEntries: 500
+      ttlSeconds: 300
+    # Calls per minute; 0 disables a limit. perIP counts every caller by address
+    # before it is identified, perPeer an admitted server.
+    rateLimit:
+      perIPPerMinute: 120
+      perPeerPerMinute: 600
+  # The servers to exchange searches with. A token is agreed by both operators and
+  # serves both directions. url may be left out for a peer that only calls in.
+  #   - url: https://server.example.org:4673
+  #     token: "a-long-random-string"
+  #     fingerprint: "sha256/..."   # pins a self-signed certificate
+  peers: []
+  # Ask the peers on a client's search and add their files to the answer.
+  search:
+    enabled: false
+    # A peer slower than this is left out of the answer.
+    timeoutMs: 1500
+    # Most files taken from one peer for one search.
+    maxResults: 50
+    cache:
+      maxEntries: 1000
+      ttlSeconds: 300
+  # Keep a copy of each peer's catalogue in memory by browsing it, so a search is
+  # answered without calling the peer. The copy is rebuilt after a restart.
+  mirror:
+    enabled: false
+    # Minutes between two walks of one peer.
+    intervalMinutes: 60
+    # Most files kept, across all peers.
+    maxFiles: 500000
+    # Files asked for per browse call.
+    pageSize: 1000
+    # Drop a peer's files when no walk of it completed for this many hours.
+    staleHours: 24
 
 natTraversal:
   enabled: false

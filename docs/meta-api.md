@@ -4,7 +4,7 @@ eNode-go merges torrent and Usenet releases into eD2K search results
 (see [meta-search.md](meta-search.md)). A row carries a meta hash and `FT_META_*`
 tags, but not the `.torrent` or `.nzb` itself. The **Meta API** serves those files to
 a client such as eMuleQt. It also searches the torrent, Usenet and Kad catalogues
-directly, with paging (`MetaApi.Search`). These are phases 4 and 7 of
+directly, with paging (`MetaApi.Search`), and optionally the eD2K files servers know. These are phases 4 and 7 of
 `docs/meta-search-torrent-usenet-plan.local.md`.
 
 The operator can require an **account** to use the API. Accounts are off by default,
@@ -136,7 +136,9 @@ Rate limits: `rateLimit.perIPPerMinute` for every download, and
 `MetaApi.Search(SearchRequest)` searches the catalogue daemons directly: the whole
 catalogue, not only the rows an eD2K search blended in. It is on whenever the API is
 (`metaApi.search.enabled`, default on) and covers every `metaSearch` network with
-`liveSearch` on. `Caps.search_available` and `Caps.networks` say what a server offers.
+`liveSearch` on. With `metaApi.search.servers` it also covers the
+[servers network](#the-servers-network), which has no daemon. `Caps.search_available`
+and `Caps.networks` say what a server offers.
 
 **Request.** `query` is required: keywords that must all match, at most 256 bytes.
 The other fields are optional filters passed to the daemons: `exclude`, `kinds`,
@@ -149,11 +151,13 @@ The other fields are optional filters passed to the daemons: `exclude`, `kinds`,
 | `META_NETWORK_TORRENT` | torrent only |
 | `META_NETWORK_USENET` | Usenet only |
 | `META_NETWORK_KAD` | Kad only: eD2K files |
+| `META_NETWORK_SERVERS` | servers only: eD2K files shared on this server and on its peers |
 
 A network the server does not offer gives an empty result, not an error. `kinds`
 narrows further within the chosen networks, for example BT v2 only. Each network
-has kinds of its own (torrent: BT v1 and v2, Usenet: NZB, Kad: ED2K), so `kinds`
-alone also selects: torrent and Usenet without Kad is `kinds` = BT v1, BT v2, NZB.
+has kinds of its own (torrent: BT v1 and v2, Usenet: NZB, Kad and servers: ED2K), so
+`kinds` alone also selects: torrent and Usenet without eD2K files is `kinds` = BT v1,
+BT v2, NZB.
 
 **Paging counts releases, not rows.** A multi-file release is several entries with
 one `catalog_id` (the whole-set row and one per file), and they always arrive on
@@ -215,6 +219,49 @@ row of the server's to send in its place.
 The Kad daemon answers from its index and queues the words of a first page for a
 Kad lookup of its own, so the first search of a new term is sparse. That answer is
 cached like any other for `search.cache.ttlSeconds`.
+
+### The servers network
+
+`META_NETWORK_SERVERS` is the eD2K files servers know. It is off by default
+(`metaApi.search.servers: false`) and needs no `metaSearch` network and no daemon.
+With it on, a search answers with:
+
+- **this server's own files**: what its connected users share now, and
+- **its peers' files**, when [server-to-server search](server-search.md) asks them:
+  from the mirror (`serverSearch.mirror.enabled`), and by a live `SearchFiles` call
+  to each peer that is not mirrored (`serverSearch.search.enabled`). With neither
+  on, or `serverSearch` off, the network is this server's own files alone.
+
+An entry is an eD2K file with the shape of a Kad entry, described above:
+`meta_hash` and `identity` are the MD4, `seeders` the complete sources, `peers` the
+sources, `catalog_id` is `ed2k:<MD4 hex>:<size>`. A peer's source count is capped at
+99, like every count this server has no source of its own to back.
+
+- **No entry names a client.** An entry is built from a file's description and its
+  two counts. No address, port, client id, user hash or source list is in it, for
+  this server's users or a peer's. `TestCatalogIdentifiesNoClient` checks the bytes.
+- **The server's own file wins** over a peer's with the same hash and size, with its
+  own counts. Two peers with the same file give one entry with the larger counts,
+  never the sum.
+- **A file comes once per search.** The networks answer in the order torrent,
+  Usenet, servers, Kad, and an eD2K file an earlier network had is dropped from a
+  later one. A file both a server and Kad know is the server's entry. `total` is then
+  an upper bound: `total_exact` is false whenever servers and Kad are both searched.
+- **Order.** Most sources first, then by hash. `SEARCH_SORT_SIZE` sorts by size.
+  Every other sort is the default order: a server scores no relevance and knows no
+  age, so `age_days` is 0 and `max_age_days` is ignored.
+- **`min_seeders` compares sources**, as it does for Kad. For a peer's file it
+  compares the capped count, so a value above 99 still matches a file a peer
+  reports 99 or more sources for.
+- **One answer per search.** The whole list, up to `search.window`, is computed once
+  and cached for `search.cache.ttlSeconds`. Paging it makes no further call to a
+  peer. A live peer is asked within `search.timeoutMs`; one that is down or late
+  costs the answer its files and makes `total_exact` false, and the rest is served.
+
+```sh
+grpcurl -plaintext -d '{"query":"debian","network":"META_NETWORK_SERVERS"}' \
+  localhost:4671 enode.meta.v1.MetaApi/Search
+```
 
 **Failures.** If one network is down or slow (`search.timeoutMs`, 5 s), the page
 comes from the others and `total` is 0. If every selected network fails, the call
@@ -489,8 +536,10 @@ when it is up only for the account website. The gRPC listener does not serve the
 `lowIDUsers`, `files`, `maxUsers` and the two file limits are the values of
 `OP_SERVERSTATUS` and `OP_GLOBSERVSTATRES`, read from the same cached counters
 (`ServerRuntime.PublicStatus` in `ed2k/statsboost.go`), so `files` includes the meta
-search networks set to `countInServerStatus`. `servers` is the number of peers sent in
-`OP_SERVERLIST`. A reload of `name`, `description` or `files.*` shows up at once.
+search networks set to `countInServerStatus`. `users` likewise includes whatever the
+operator's local `statsBoost` adds, the estimated users of the Kad network or the
+BitTorrent DHT among it; the estimates themselves are not listed here. `servers` is the
+number of peers sent in `OP_SERVERLIST`. A reload of `name`, `description` or `files.*` shows up at once.
 
 The gossip, filter, Meta API and account counters are not here. They stay on the
 admin dashboard's `/stats.json`, which is loopback-only by default; see

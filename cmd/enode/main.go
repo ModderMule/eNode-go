@@ -211,9 +211,18 @@ func run(ctx context.Context, configPath string) error {
 		logging.Infof("advertising server IP %s (address=%q is not routable)", advertisedIP, cfg.Address)
 	}
 
-	// The client-facing Meta API, built before the runtime so OP_SERVERIDENT can
-	// advertise it; its listeners start below. See docs/meta-api.md.
-	metaAPI, err := buildMetaAPI(ctx, cfg, engine, metaSearcher, advertisedIP)
+	// The server-to-server search service, built before the runtime: in gossip
+	// mode the UDP description reply advertises it. See docs/server-search.md.
+	serverSearch, err := buildServerSearch(cfg, engine, advertisedIP)
+	if err != nil {
+		return fmt.Errorf("server search: %w", err)
+	}
+
+	// The client-facing Meta API, built before the runtime for the same reason:
+	// OP_SERVERIDENT advertises it. Its listeners start below. It comes after the
+	// server search, whose files its own search can answer with. See
+	// docs/meta-api.md.
+	metaAPI, err := buildMetaAPI(ctx, cfg, engine, metaSearcher, serverSearch.peerSearcher(), advertisedIP)
 	if err != nil {
 		return fmt.Errorf("meta api: %w", err)
 	}
@@ -234,6 +243,7 @@ func run(ctx context.Context, configPath string) error {
 		udpSecret:    udpSecret,
 		metaSearch:   metaSearcher != nil,
 		metaAPI:      metaAPI.advertisement(),
+		serverSearch: serverSearch.advertisement(),
 	}
 	runtimeTCP, runtimeUDP := buildRuntimeConfigs(cfg, derived)
 	runtime := ed2k.NewServerRuntime(runtimeTCP, runtimeUDP, engine)
@@ -277,9 +287,21 @@ func run(ctx context.Context, configPath string) error {
 
 	// Same ordering rule as the gossip handler: the searcher is read without a lock by
 	// every search, so it is attached before any listener binds.
+	//
+	// Other servers' files reach a search the same way, through the one searcher the
+	// runtime holds, so the two are combined when both are on.
+	var rowSearcher ed2k.MetaSearcher
+	if metaSearcher != nil {
+		rowSearcher = metaSearcher
+	}
+	if serverSearch != nil {
+		rowSearcher = newCombinedSearcher(rowSearcher, serverSearch.searcher)
+	}
+	if rowSearcher != nil {
+		runtime.SetMetaSearcher(rowSearcher, cfg.MetaSearch.AdvertiseToLegacyClientsOrDefault())
+	}
 	if metaSearcher != nil {
 		warnMetaTokens(cfg.MetaSearch)
-		runtime.SetMetaSearcher(metaSearcher, cfg.MetaSearch.AdvertiseToLegacyClientsOrDefault())
 		stopMeta := metaSearcher.Start(ctx)
 		defer stopMeta()
 		logging.Infof("meta search enabled: networks=%v advertiseToLegacyClients=%t cache=%t",
@@ -289,10 +311,7 @@ func run(ctx context.Context, configPath string) error {
 	// Offsets added to the counts in OP_SERVERSTATUS and OP_GLOBSERVSTATRES. Local-only
 	// config; absent means the real counts are advertised.
 	runtime.SetStatsBoost(statsBoostFromConfig(cfg))
-	if b := cfg.StatsBoost; b.Users != 0 || b.LowIDUsers != 0 || b.Files != 0 {
-		logging.Warnf("statsBoost active: advertising users+%d lowIDUsers+%d files+%d over the real counts",
-			b.Users, b.LowIDUsers, b.Files)
-	}
+	warnStatsBoost(cfg)
 
 	startTime := time.Now()
 	if metaAPI != nil {
@@ -302,6 +321,16 @@ func run(ctx context.Context, configPath string) error {
 			return fmt.Errorf("meta api: %w", err)
 		}
 		defer stopMetaAPI()
+	}
+
+	if serverSearch != nil {
+		warnServerSearch(cfg)
+		serverSearch.attach(runtime, accessFilter)
+		stopServerSearch, err := serverSearch.start(ctx)
+		if err != nil {
+			return fmt.Errorf("server search: %w", err)
+		}
+		defer stopServerSearch()
 	}
 
 	// Local admin status dashboard. Default on and bound to loopback; a bind
@@ -353,6 +382,7 @@ func run(ctx context.Context, configPath string) error {
 					MetaCacheEntries: metaCacheEntries,
 					Meta:             metaStats,
 					MetaAPI:          metaAPI.adminStats(),
+					ServerSearch:     serverSearch.adminStats(),
 					Update:           updateChecker.Info(),
 				}
 			},
@@ -927,23 +957,28 @@ func adminMetaStats(s *meta.Searcher) (cacheEntries int, out []admin.MetaNetwork
 			Published:           st.Published,
 			Files:               st.Files,
 			LastSeq:             st.LastSeq,
-			FeedReleases:        st.FeedReleases,
-			FeedRows:            st.FeedRows,
-			FeedCursor:          st.FeedCursor,
-			FeedCaughtUp:        st.FeedCaughtUp,
-			SearchesTCP:         st.SearchesTCP,
-			SearchesUDP:         st.SearchesUDP,
-			RowsServed:          st.RowsServed,
-			LiveCalls:           st.LiveCalls,
-			LiveErrors:          st.LiveErrors,
-			LiveTimeouts:        st.LiveTimeouts,
-			CacheHits:           st.CacheHits,
-			CacheMisses:         st.CacheMisses,
-			UDPSkipped:          st.UDPSkipped,
-			CatalogCalls:        st.CatalogCalls,
-			CatalogErrors:       st.CatalogErrors,
-			CatalogCacheHits:    st.CatalogCacheHits,
-			Counted:             st.Counted,
+
+			NetworkUsers:             st.NetworkUsers,
+			NetworkUsersExperimental: st.NetworkUsersExperimental,
+			NetworkFiles:             st.NetworkFiles,
+
+			FeedReleases:     st.FeedReleases,
+			FeedRows:         st.FeedRows,
+			FeedCursor:       st.FeedCursor,
+			FeedCaughtUp:     st.FeedCaughtUp,
+			SearchesTCP:      st.SearchesTCP,
+			SearchesUDP:      st.SearchesUDP,
+			RowsServed:       st.RowsServed,
+			LiveCalls:        st.LiveCalls,
+			LiveErrors:       st.LiveErrors,
+			LiveTimeouts:     st.LiveTimeouts,
+			CacheHits:        st.CacheHits,
+			CacheMisses:      st.CacheMisses,
+			UDPSkipped:       st.UDPSkipped,
+			CatalogCalls:     st.CatalogCalls,
+			CatalogErrors:    st.CatalogErrors,
+			CatalogCacheHits: st.CatalogCacheHits,
+			Counted:          st.Counted,
 		})
 	}
 	return s.CacheEntries(), out

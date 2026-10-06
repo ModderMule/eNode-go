@@ -67,6 +67,10 @@ type MetaAPISearchConfig struct {
 	MaxLimit int `yaml:"maxLimit"`
 	// Window is the deepest release paging reaches.
 	Window int `yaml:"window"`
+	// Servers adds the servers network (META_NETWORK_SERVERS): the eD2K files this
+	// server's own users share, and with serverSearch asking peers, theirs too.
+	// Off by default. It needs no metaSearch network.
+	Servers bool `yaml:"servers"`
 
 	Cache MetaAPISearchCacheConfig `yaml:"cache"`
 	// RateLimit caps searches, separately from metafile downloads. 0 disables a limit.

@@ -25,8 +25,8 @@ const infoTimeout = 5 * time.Second
 // covers the poll that follows it.
 const staleWindow = 2 * defaultInfoInterval
 
-// maxStatusFiles caps one network's contribution to the status file total, so the
-// int conversion cannot overflow on a 32-bit build. The wire field is a uint32 and
+// maxStatusFiles caps one network's contribution to the status file total, and to
+// the user total, so the int conversion cannot overflow on a 32-bit build. The wire field is a uint32 and
 // the ed2k side clamps the sum.
 const maxStatusFiles = 1<<31 - 1
 
@@ -62,6 +62,14 @@ type NetworkStats struct {
 	Published       uint64
 	Files           uint64
 	LastSeq         uint64
+
+	// NetworkUsers and NetworkUsersExperimental are the daemon's two estimates of
+	// how many users its whole network has, eMule's routing-table figure and its
+	// experimental one, and NetworkFiles its estimate of the files that network
+	// holds. They are not what the daemon catalogued, and 0 is no estimate.
+	NetworkUsers             uint64
+	NetworkUsersExperimental uint64
+	NetworkFiles             uint64
 
 	FeedReleases int
 	FeedRows     int
@@ -111,6 +119,20 @@ func (s *Searcher) AdvertisedFiles() int {
 		}
 	}
 	return total
+}
+
+// NetworkUsers is the daemon's routing-table estimate of how many users a network
+// has, for statsBoost.kadUsers and statsBoost.torrentUsers. It is 0 for a network
+// that is not enabled, has not been polled, reports no estimate, or whose last good
+// GetInfo is older than staleWindow: a stopped daemon must not keep its users in the
+// server status. Like AdvertisedFiles it reads only what the poller holds.
+func (s *Searcher) NetworkUsers(network string) int {
+	for _, src := range s.sources {
+		if src.network == network {
+			return src.usersForStatus()
+		}
+	}
+	return 0
 }
 
 // CacheEntries reports how many queries the shared result cache holds; 0 when the
@@ -220,6 +242,17 @@ func (src *source) filesForStatus() int {
 	return 0
 }
 
+// usersForStatus is the network's estimated user count, 0 once the figure is older
+// than staleWindow.
+func (src *source) usersForStatus() int {
+	src.daemon.mu.Lock()
+	defer src.daemon.mu.Unlock()
+	if src.daemon.info == nil || time.Since(src.daemon.at) > staleWindow {
+		return 0
+	}
+	return int(min(src.daemon.info.GetNetworkUsers(), uint64(maxStatusFiles)))
+}
+
 func (src *source) stats() NetworkStats {
 	st := NetworkStats{
 		Network:             src.network,
@@ -262,6 +295,9 @@ func (src *source) stats() NetworkStats {
 	st.Published = info.GetPublished()
 	st.Files = info.GetFiles()
 	st.LastSeq = info.GetLastSeq()
+	st.NetworkUsers = info.GetNetworkUsers()
+	st.NetworkUsersExperimental = info.GetNetworkUsersExperimental()
+	st.NetworkFiles = info.GetNetworkFiles()
 
 	if src.feed != nil {
 		fs := src.feed.Stats()

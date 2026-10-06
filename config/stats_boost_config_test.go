@@ -34,6 +34,31 @@ func TestStatsBoostParsed(t *testing.T) {
 	}
 }
 
+// TestStatsBoostNetworkUsersParsed checks the two network switches load, and that
+// they are off when the section sets only the offsets.
+func TestStatsBoostNetworkUsersParsed(t *testing.T) {
+	cases := []struct {
+		block string
+		want  StatsBoostConfig
+	}{
+		{"statsBoost:\n  users: 5\n", StatsBoostConfig{Users: 5}},
+		{"statsBoost:\n  kadUsers: true\n", StatsBoostConfig{KadUsers: true}},
+		{"statsBoost:\n  torrentUsers: true\n", StatsBoostConfig{TorrentUsers: true}},
+		{"statsBoost:\n  users: 5\n  kadUsers: true\n  torrentUsers: true\n",
+			StatsBoostConfig{Users: 5, KadUsers: true, TorrentUsers: true}},
+	}
+	for _, tc := range cases {
+		cfg, err := Load(writeFileLimitsConfig(t, tc.block))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("input: %q -> output: statsBoost=%+v", tc.block, cfg.StatsBoost)
+		if cfg.StatsBoost != tc.want {
+			t.Errorf("%q: statsBoost = %+v, want %+v", tc.block, cfg.StatsBoost, tc.want)
+		}
+	}
+}
+
 // TestStatsBoostRejectsNegative: a negative offset would make the advertised count
 // smaller than the real one, which is never what the section is for.
 func TestStatsBoostRejectsNegative(t *testing.T) {

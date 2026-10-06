@@ -311,6 +311,108 @@ func (m *MongoDBEngine) SharedFiles(hashes [][]byte) []File {
 	return decodeMongoSearchFiles(ctx, cur)
 }
 
+// BrowseFiles pages over the files collection by _id, which is a keyset, and joins
+// each file to one of its online sources for the name and the media tags. The
+// cursor is the last _id read.
+func (m *MongoDBEngine) BrowseFiles(cursor []byte, limit int) ([]File, []byte, error) {
+	match := bson.M{"sources": bson.M{"$gt": 0}}
+	if len(cursor) != 0 {
+		var after struct {
+			ID bson.RawValue `bson:"id"`
+		}
+		if err := bson.Unmarshal(cursor, &after); err != nil || after.ID.Type == 0 {
+			return nil, nil, ErrBrowseCursor
+		}
+		match["_id"] = bson.M{"$gt": after.ID}
+	}
+	if err := m.ensureDB(); err != nil {
+		return nil, nil, err
+	}
+	limit = browseLimit(limit)
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
+	defer cancel()
+	// The limit comes before the join, so a page reads limit files and at most one
+	// source each. files.sources counts the sources of clients that have gone too,
+	// until the cleanup sweep takes them, so a file without an online source is
+	// kept through the join and dropped below: the cursor still has to pass it.
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: match}},
+		{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
+		{{Key: "$limit", Value: int64(limit)}},
+		{{Key: "$lookup", Value: bson.M{
+			"from": "sources",
+			"let":  bson.M{"h": "$hash", "s": "$size"},
+			"pipeline": mongo.Pipeline{
+				{{Key: "$match", Value: bson.M{
+					"$expr": bson.M{
+						"$and": []bson.M{
+							{"$eq": []any{"$file_hash", "$$h"}},
+							{"$eq": []any{"$file_size", "$$s"}},
+							{"$eq": []any{"$online", true}},
+						},
+					},
+				}}},
+				{{Key: "$limit", Value: int64(1)}},
+			},
+			"as": "src",
+		}}},
+	}
+	cur, err := m.db.Collection("files").Aggregate(ctx, pipeline,
+		options.Aggregate().SetBatchSize(int32(limit+1)))
+	if err != nil {
+		logging.Errorf("mongodb browse files failed: %v", err)
+		return nil, nil, err
+	}
+	defer cur.Close(ctx)
+	out := make([]File, 0, min(limit, 256))
+	var last bson.RawValue
+	read := 0
+	for cur.Next(ctx) {
+		var doc struct {
+			ID        bson.RawValue `bson:"_id"`
+			Hash      []byte        `bson:"hash"`
+			Size      uint64        `bson:"size"`
+			Sources   uint32        `bson:"sources"`
+			Completed uint32        `bson:"completed"`
+			Src       []struct {
+				Name    string `bson:"name"`
+				Type    string `bson:"type"`
+				Title   string `bson:"title"`
+				Artist  string `bson:"artist"`
+				Album   string `bson:"album"`
+				Runtime uint32 `bson:"length"`
+				Bitrate uint32 `bson:"bitrate"`
+				Codec   string `bson:"codec"`
+			} `bson:"src"`
+		}
+		if err := cur.Decode(&doc); err != nil {
+			logging.Errorf("mongodb browse files decode failed: %v", err)
+			return nil, nil, err
+		}
+		last, read = doc.ID, read+1
+		if len(doc.Src) == 0 {
+			continue
+		}
+		src := doc.Src[0]
+		out = append(out, File{
+			Hash: doc.Hash, Name: src.Name, Size: doc.Size, Type: src.Type,
+			Sources: doc.Sources, Completed: doc.Completed, Title: src.Title, Artist: src.Artist,
+			Album: src.Album, Runtime: src.Runtime, Bitrate: src.Bitrate, Codec: src.Codec,
+		})
+	}
+	if err := cur.Err(); err != nil {
+		return nil, nil, err
+	}
+	if read < limit {
+		return out, nil, nil
+	}
+	next, err := bson.Marshal(bson.D{{Key: "id", Value: last}})
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, next, nil
+}
+
 func (m *MongoDBEngine) FindByNameContains(term string) []File {
 	if err := m.ensureDB(); err != nil {
 		return nil

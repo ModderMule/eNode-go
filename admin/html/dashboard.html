@@ -76,6 +76,12 @@ button:disabled{opacity:.6;cursor:default}
 <table id="metaApiTable"></table>
 </section>
 
+<section id="serverSearchSection" hidden>
+<h2>Server search</h2>
+<table id="serverSearchTable"></table>
+<table id="serverSearchPeers"></table>
+</section>
+
 <h2>Listeners</h2>
 <table>
 <tr><td class="k">TCP</td><td class="v">{{.TCPPort}}</td></tr>
@@ -170,6 +176,9 @@ function metaCard(m){
     ['Daemon', m.daemon ? m.daemon + (m.version ? ' ' + m.version : '') : '—'],
     ['Catalogue', num(m.catalogued) + ' releases · ' + num(m.files) + ' files' + asOf],
     ['Published', num(m.published)],
+    ['Network', m.networkUsers || m.networkUsersExperimental || m.networkFiles
+      ? '~' + num(m.networkUsers) + ' users (experimental ' + num(m.networkUsersExperimental) + ') · ~' + num(m.networkFiles) + ' files'
+      : 'no estimate'],
     ['Live search', !m.liveSearch ? 'off' : (m.searchAvailable ? 'on' : 'on, daemon has no index')],
     ['Feed', !m.feedEnabled ? 'off' : num(m.feedRows) + ' rows · ' + num(m.feedReleases) + ' releases · '
       + (m.feedCaughtUp ? (lag ? 'lag ' + num(lag) : 'caught up') : 'catching up')],
@@ -233,6 +242,47 @@ function renderMetaAPI(d){
     var v = tr.insertCell(); v.className = 'v'; v.textContent = r[1];
   });
 }
+// renderServerSearch fills the server-to-server search tables; hidden when the
+// service is off. A peer's name and last error are its own strings and are inserted
+// as text, never as markup.
+function renderServerSearch(d){
+  var a = d.serverSearch;
+  var section = document.getElementById('serverSearchSection');
+  if(!section){ return; }
+  section.hidden = !a;
+  if(!a){ return; }
+  var serves = [a.serveSearch ? 'search' : '', a.serveBrowse ? 'browse' : ''].filter(Boolean).join(' + ') || 'nothing';
+  var asks = [a.liveSearch ? 'live search' : '', a.mirror ? 'mirror' : ''].filter(Boolean).join(' + ') || 'off';
+  var rows = [
+    ['Mode', a.mode === 'gossip' ? 'gossip: any verified server, advertised' : 'allowlist: configured peers only'],
+    ['Listener', a.url || 'not advertised'],
+    ['Fingerprint', a.fingerprint || 'no TLS'],
+    ['Serves', serves + ' · ' + num(a.searches) + ' searches · ' + num(a.browses) + ' browse pages · '
+      + num(a.filesServed) + ' files · ' + num(a.resets) + ' resets'],
+    ['Refused', num(a.authFailures) + ' not accepted · ' + num(a.rateLimited) + ' rate limited'],
+    ['Asks peers', asks + (a.mirror ? ' · ' + num(a.mirrorFiles) + ' of ' + num(a.mirrorMaxFiles) + ' files mirrored' : '')]
+  ];
+  var table = document.getElementById('serverSearchTable');
+  table.replaceChildren();
+  rows.forEach(function(r){
+    var tr = table.insertRow();
+    var k = tr.insertCell(); k.className = 'k'; k.textContent = r[0];
+    var v = tr.insertCell(); v.className = 'v'; v.textContent = r[1];
+  });
+  var peers = document.getElementById('serverSearchPeers');
+  peers.replaceChildren();
+  (a.peers || []).forEach(function(p){
+    var state = p.down ? 'paused' : 'ok';
+    var mirror = !a.mirror ? '' : (p.mirrored ? num(p.mirrorFiles) + ' mirrored ' + fmtAge(p.mirrorAt) + ' ago'
+      : (p.mirrorTrimmed ? num(p.mirrorFiles) + ' mirrored, mirror full' : 'not mirrored yet'));
+    var live = num(p.liveCalls) + ' calls · ' + num(p.liveErrors) + ' errors · ' + num(p.liveTimeouts) + ' timeouts';
+    var parts = [state, p.static ? 'configured' : 'gossip', p.name ? p.name + ' (' + num(p.files) + ' files)' : '',
+      mirror, live, p.lastError ? 'last error: ' + p.lastError : ''].filter(Boolean);
+    var tr = peers.insertRow();
+    var k = tr.insertCell(); k.className = 'k'; k.textContent = p.url;
+    var v = tr.insertCell(); v.className = 'v'; v.textContent = parts.join(' · ');
+  });
+}
 function setStatus(text, cls){
   var el = document.getElementById('status');
   if(el){ el.textContent = text; el.className = 'badge ' + cls; }
@@ -270,6 +320,7 @@ async function refresh(){
     setText('uptime', fmtUptime(d.uptimeSeconds));
     renderMeta(d);
     renderMetaAPI(d);
+    renderServerSearch(d);
     renderUpdate(d.update);
     setText('updated', 'updated ' + new Date(d.time).toLocaleTimeString());
     setStatus('live', 'ok');

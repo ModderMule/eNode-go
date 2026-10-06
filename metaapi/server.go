@@ -2,10 +2,7 @@ package metaapi
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +14,7 @@ import (
 	"time"
 
 	"enode/accounts"
+	"enode/internal/connectsrv"
 	"enode/internal/ratelimit"
 	"enode/logging"
 
@@ -91,17 +89,17 @@ type Server struct {
 
 // grpcContentTypes are what the gRPC listener accepts. The Connect protocol and its
 // JSON form belong on the HTTP listener, which the operator may keep off.
-var grpcContentTypes = []string{"application/grpc", "application/grpc-web"}
+var grpcContentTypes = connectsrv.GRPCContentTypes
 
 // NewServer builds the listeners. web may be nil when accounts are off.
 func NewServer(cfg ServerConfig, svc *Service, web *accounts.Web) (*Server, error) {
 	s := &Server{cfg: cfg, svc: svc, web: web, statusLimit: ratelimit.New(statusPerMinute)}
 	if cfg.CertFile != "" {
-		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+		tlsCfg, err := connectsrv.LoadTLS(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("metaApi.tls: %w", err)
 		}
-		s.tls = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+		s.tls = tlsCfg
 	}
 	if cfg.GRPCListen != "" {
 		s.grpc = s.newHTTPServer(cfg.GRPCListen, onlyContentTypes(s.connectHandler(), grpcContentTypes))
@@ -161,15 +159,7 @@ func (s *Server) Close() {
 // Fingerprint returns "sha256/<base64>" of the certificate's SPKI, the pin sent as
 // ST_META_API_FP, or "" without TLS.
 func (s *Server) Fingerprint() string {
-	if s.tls == nil || len(s.tls.Certificates) == 0 || len(s.tls.Certificates[0].Certificate) == 0 {
-		return ""
-	}
-	leaf, err := x509.ParseCertificate(s.tls.Certificates[0].Certificate[0])
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
-	return "sha256/" + base64.StdEncoding.EncodeToString(sum[:])
+	return connectsrv.Fingerprint(s.tls)
 }
 
 // SetStatus attaches the source of GET /status. It is separate from NewServer
@@ -260,45 +250,13 @@ func (s *Server) handleRawMetaFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) newHTTPServer(addr string, h http.Handler) *http.Server {
-	var protocols http.Protocols
-	protocols.SetHTTP1(true)
-	if s.tls != nil {
-		protocols.SetHTTP2(true)
-	} else {
-		// gRPC needs HTTP/2; without TLS that is h2c.
-		protocols.SetUnencryptedHTTP2(true)
-	}
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           h,
-		Protocols:         &protocols,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-		MaxHeaderBytes:    32 << 10,
-	}
-	if s.tls != nil {
-		cfg := s.tls.Clone()
-		cfg.NextProtos = []string{"h2", "http/1.1"}
-		srv.TLSConfig = cfg
-	}
-	return srv
+	return connectsrv.NewHTTPServer(addr, h, s.tls)
 }
 
 // onlyContentTypes lets through requests whose Content-Type starts with one of
 // types, and answers anything else 415.
 func onlyContentTypes(next http.Handler, types []string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ct := r.Header.Get("Content-Type")
-		for _, t := range types {
-			if strings.HasPrefix(ct, t) {
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
-		http.Error(w, "this listener speaks gRPC and gRPC-Web only", http.StatusUnsupportedMediaType)
-	})
+	return connectsrv.OnlyContentTypes(next, types, "this listener speaks gRPC and gRPC-Web only")
 }
 
 // writeHTTPError answers a raw route with the connect error's HTTP status and its

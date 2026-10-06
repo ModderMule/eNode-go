@@ -30,6 +30,9 @@ type bootDerived struct {
 	// in both advertised flag words.
 	metaSearch bool
 	metaAPI    ed2k.MetaAPIAdvert
+	// serverSearch is advertised to other servers in gossip mode; a zero value
+	// advertises nothing and leaves FlagServerSearch clear.
+	serverSearch ed2k.ServerSearchAdvert
 }
 
 // reloader applies config reloads. One exists per process; run() creates it once every
@@ -109,6 +112,9 @@ func (r *reloader) Reload() (admin.ReloadResult, error) {
 
 	r.runtime.ApplyRuntimeConfig(buildRuntimeConfigs(effective, r.derived))
 	r.runtime.SetStatsBoost(statsBoostFromConfig(effective))
+	if effective.StatsBoost != old.StatsBoost {
+		warnStatsBoost(effective)
+	}
 	if added := missingServers(old.Servers, effective.Servers); len(added) > 0 {
 		seedServers(r.engine, added)
 	}
@@ -237,6 +243,9 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		tcpFlags |= ed2k.FlagMetaSearch
 		udpFlags |= ed2k.FlagMetaSearch
 	}
+	// ed2k.FlagServerSearch is deliberately not set, even when the service is
+	// advertised: the original eserver stops naming a peer that sets it. The
+	// description reply's tag is the whole advertisement. See the constant.
 	dualStack := cfg.IPv6.EnabledOrDefault()
 	natRendezvousPort := uint16(0)
 	if tcpCfg.NatRendezvous {
@@ -292,6 +301,7 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		HardFiles: uint32(cfg.Files.HardLimitOrDefault()),
 
 		RateLimitPerIPPerMinute: cfg.UDP.RateLimitPerIPPerMinuteOrDefault(),
+		ServerSearch:            d.serverSearch,
 	}
 	return tcp, udp
 }
@@ -353,6 +363,26 @@ func statsBoostFromConfig(cfg config.Config) ed2k.StatsBoost {
 		Users:      cfg.StatsBoost.Users,
 		LowIDUsers: cfg.StatsBoost.LowIDUsers,
 		Files:      cfg.StatsBoost.Files,
+
+		KadUsers:     cfg.StatsBoost.KadUsers,
+		TorrentUsers: cfg.StatsBoost.TorrentUsers,
+	}
+}
+
+// warnStatsBoost says in the log that the advertised counts are not the real ones,
+// and that a network-users switch is on for a network no daemon is configured for,
+// which adds nothing.
+func warnStatsBoost(cfg config.Config) {
+	b := cfg.StatsBoost
+	if b.Users != 0 || b.LowIDUsers != 0 || b.Files != 0 || b.KadUsers || b.TorrentUsers {
+		logging.Warnf("statsBoost active: advertising users+%d lowIDUsers+%d files+%d kadUsers=%t torrentUsers=%t over the real counts",
+			b.Users, b.LowIDUsers, b.Files, b.KadUsers, b.TorrentUsers)
+	}
+	if b.KadUsers && !cfg.MetaSearch.Kad.Enabled {
+		logging.Warnf("statsBoost.kadUsers is on but metaSearch.kad is not enabled; it adds no users")
+	}
+	if b.TorrentUsers && !cfg.MetaSearch.Torrent.Enabled {
+		logging.Warnf("statsBoost.torrentUsers is on but metaSearch.torrent is not enabled; it adds no users")
 	}
 }
 

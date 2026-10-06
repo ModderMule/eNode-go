@@ -113,6 +113,9 @@ type LiveStats struct {
 	// MetaAPI is the client-facing Meta API; nil when it is off.
 	MetaAPI *MetaAPIStats `json:"metaApi"`
 
+	// ServerSearch is the server-to-server search service; nil when it is off.
+	ServerSearch *ServerSearchStats `json:"serverSearch"`
+
 	// Update is the last successful GitHub release check (updatecheck.go); nil when
 	// the check is off or has not succeeded yet.
 	Update *UpdateInfo `json:"update"`
@@ -147,6 +150,58 @@ type MetaAPIStats struct {
 	AccountsDisabled int `json:"accountsDisabled"`
 }
 
+// ServerSearchStats are the server-to-server search figures (docs/server-search.md):
+// what this server answered for others, and what it knows of its peers.
+type ServerSearchStats struct {
+	// Mode is "allowlist" or "gossip".
+	Mode        string `json:"mode"`
+	URL         string `json:"url"`
+	Fingerprint string `json:"fingerprint"`
+	ServeSearch bool   `json:"serveSearch"`
+	ServeBrowse bool   `json:"serveBrowse"`
+
+	InfoCalls    int64 `json:"infoCalls"`
+	Searches     int64 `json:"searches"`
+	Browses      int64 `json:"browses"`
+	FilesServed  int64 `json:"filesServed"`
+	Resets       int64 `json:"resets"`
+	RateLimited  int64 `json:"rateLimited"`
+	AuthFailures int64 `json:"authFailures"`
+
+	// LiveSearch and Mirror say what this server asks of its peers.
+	LiveSearch     bool `json:"liveSearch"`
+	Mirror         bool `json:"mirror"`
+	MirrorFiles    int  `json:"mirrorFiles"`
+	MirrorMaxFiles int  `json:"mirrorMaxFiles"`
+
+	Peers []ServerSearchPeerStats `json:"peers"`
+}
+
+// ServerSearchPeerStats is one server this one searches. Name is the peer's own
+// string and LastError may quote it, so the page inserts both as text.
+type ServerSearchPeerStats struct {
+	URL string `json:"url"`
+	// Static is a configured peer; false is one gossip advertised.
+	Static    bool   `json:"static"`
+	Name      string `json:"name"`
+	Files     uint64 `json:"files"`
+	Down      bool   `json:"down"`
+	LastError string `json:"lastError"`
+
+	Mirrored      bool   `json:"mirrored"`
+	MirrorFiles   int    `json:"mirrorFiles"`
+	MirrorAt      string `json:"mirrorAt"`
+	MirrorTrimmed bool   `json:"mirrorTrimmed"`
+	Walks         int64  `json:"walks"`
+	WalkErrors    int64  `json:"walkErrors"`
+	Resets        int64  `json:"resets"`
+
+	LiveCalls    int64 `json:"liveCalls"`
+	LiveErrors   int64 `json:"liveErrors"`
+	LiveTimeouts int64 `json:"liveTimeouts"`
+	RowsServed   int64 `json:"rowsServed"`
+}
+
 // MetaNetworkStats is one torrent, Usenet or Kad network's figures: the meta.NetworkStats
 // fields the page shows. The caller maps one to the other so this package keeps no
 // dependency on the meta package.
@@ -178,6 +233,13 @@ type MetaNetworkStats struct {
 	Published       uint64 `json:"published"`
 	Files           uint64 `json:"files"`
 	LastSeq         uint64 `json:"lastSeq"`
+
+	// NetworkUsers and NetworkUsersExperimental are the daemon's two estimates of the
+	// users of its whole network, and NetworkFiles of that network's files; 0 is no
+	// estimate. statsBoost.kadUsers and torrentUsers add the first to the users.
+	NetworkUsers             uint64 `json:"networkUsers"`
+	NetworkUsersExperimental uint64 `json:"networkUsersExperimental"`
+	NetworkFiles             uint64 `json:"networkFiles"`
 
 	FeedReleases int    `json:"feedReleases"`
 	FeedRows     int    `json:"feedRows"`

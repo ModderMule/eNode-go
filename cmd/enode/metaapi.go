@@ -17,6 +17,7 @@ import (
 	"enode/logging"
 	"enode/meta"
 	"enode/metaapi"
+	"enode/serverlink"
 	"enode/storage"
 )
 
@@ -31,7 +32,7 @@ type metaAPIRuntime struct {
 	advert   ed2k.MetaAPIAdvert
 	grpcURL  string
 	httpURL  string
-	// searcher backs MetaApi.Search; nil when search is off.
+	// searcher backs MetaApi.Search's daemon networks; nil when it has none.
 	searcher *meta.Searcher
 	// searchMode is "off", "public" or "account", for the dashboard.
 	searchMode string
@@ -42,7 +43,11 @@ type metaAPIRuntime struct {
 }
 
 // buildMetaAPI builds the Meta API when metaApi.enabled is on, or returns nil.
-func buildMetaAPI(ctx context.Context, cfg config.Config, engine storage.Engine, searcher *meta.Searcher, advertisedIP string) (*metaAPIRuntime, error) {
+//
+// servers is the searcher that asks other servers, or nil. With
+// metaApi.search.servers on, MetaApi.Search answers with their files and this
+// server's own as the servers network.
+func buildMetaAPI(ctx context.Context, cfg config.Config, engine storage.Engine, searcher *meta.Searcher, servers *serverlink.Searcher, advertisedIP string) (*metaAPIRuntime, error) {
 	c := cfg.MetaAPI
 	if !c.Enabled {
 		return nil, nil
@@ -96,18 +101,36 @@ func buildMetaAPI(ctx context.Context, cfg config.Config, engine storage.Engine,
 		TrustForwardedFor:   c.TrustForwardedFor,
 	}
 	rt.searchMode = "off"
-	if c.SearchEnabled() && searcher != nil {
-		if len(searcher.CatalogNetworks()) == 0 {
-			logging.Warnf("meta api: search is enabled but no metaSearch network has liveSearch on; MetaApi.Search finds nothing")
-		}
+	if c.SearchEnabled() && (searcher != nil || c.Search.Servers) {
 		s := c.Search
-		searcher.EnableCatalog(meta.CatalogConfig{
-			Timeout:    time.Duration(s.TimeoutMs) * time.Millisecond,
-			MaxEntries: s.Cache.MaxEntries,
-			TTL:        time.Duration(s.Cache.TTLSeconds) * time.Second,
-		})
+		catalog := &combinedCatalog{meta: searcher}
+		if searcher != nil {
+			searcher.EnableCatalog(meta.CatalogConfig{
+				Timeout:    time.Duration(s.TimeoutMs) * time.Millisecond,
+				MaxEntries: s.Cache.MaxEntries,
+				TTL:        time.Duration(s.Cache.TTLSeconds) * time.Second,
+			})
+		}
+		if s.Servers {
+			if servers == nil {
+				// Nobody to ask: the network is this server's own files.
+				servers = serverlink.NewSearcher(serverlink.SearcherConfig{})
+			}
+			servers.EnableCatalog(serverlink.CatalogConfig{
+				Own:     engine,
+				Window:  s.Window,
+				Timeout: time.Duration(s.TimeoutMs) * time.Millisecond,
+				// The cache is sized in chunks; an answer here is a whole search.
+				MaxEntries: max(1, s.Cache.MaxEntries/max(1, s.Window/meta.ChunkSize)),
+				TTL:        time.Duration(s.Cache.TTLSeconds) * time.Second,
+			})
+			catalog.servers = servers
+		}
+		if len(catalog.CatalogNetworks()) == 0 {
+			logging.Warnf("meta api: search is enabled but no metaSearch network has liveSearch on and metaApi.search.servers is off; MetaApi.Search finds nothing")
+		}
 		svcCfg.Search = &metaapi.SearchConfig{
-			Catalog:             searcher,
+			Catalog:             catalog,
 			OwnFiles:            engine,
 			RequireAccount:      c.SearchRequiresAccount(),
 			MaxLimit:            s.MaxLimit,

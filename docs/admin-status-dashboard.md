@@ -127,6 +127,23 @@ route with the advertised figures only are served by the Meta API HTTP listener
 The `gossip*` fields are explained in `server-gossip.md` §5; the response carries
 further sections (filters, meta search, update check) not shown here.
 
+Each entry of the `meta` array, one per enabled meta search network, carries the
+daemon's estimate of its whole network next to its catalogue figures:
+`networkUsers`, `networkUsersExperimental` and `networkFiles`, 0 when the daemon has
+none. They are shown as reported, whether or not `statsBoost` adds the users to the
+advertised count; see [meta-search.md](meta-search.md#network-estimates).
+
+With server-to-server search on, `serverSearch` carries its figures and the page shows a
+**Server search** section: the mode (`allowlist` or `gossip`), the listener URL and the
+certificate fingerprint to hand to peers, what was served to other servers (`searches`,
+`browses`, `filesServed`, `resets`) and refused (`authFailures`, `rateLimited`), whether
+this server asks its peers (`liveSearch`, `mirror`, `mirrorFiles` of `mirrorMaxFiles`),
+and a `peers` array with one entry per server it asks: `url`, `static` (configured, as
+opposed to found through gossip), the peer's own `name` and `files`, `down` and
+`lastError`, the mirror state (`mirrored`, `mirrorFiles`, `mirrorAt`, `mirrorTrimmed`,
+`walks`, `walkErrors`, `resets`) and the live-search counters. The field is `null` when
+the service is off. See [server-search.md](server-search.md).
+
 The client and file totals come from the same briefly cached reading that backs the
 eD2K `OP_SERVERSTATUS` / `OP_GLOBSERVSTATRES` responses (see `ed2k/countercache.go`),
 so a dashboard left open polling every few seconds cannot turn into a flood of

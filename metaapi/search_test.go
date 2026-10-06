@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"connectrpc.com/connect/v2"
 	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // fakeCatalog serves each network's releases in chunks of meta.ChunkSize, as
@@ -36,7 +38,8 @@ func newFakeCatalog() *fakeCatalog {
 
 func (c *fakeCatalog) CatalogNetworks() []string {
 	var out []string
-	for _, n := range []string{networkTorrent, networkUsenet, networkKad} {
+	// Kad before the servers, as the real source lists them: the service orders them.
+	for _, n := range []string{networkTorrent, networkUsenet, networkKad, networkServers} {
 		if _, ok := c.releases[n]; ok {
 			out = append(out, n)
 		}
@@ -692,5 +695,94 @@ func TestSearchAsksTheFileStoreOnlyAboutED2KRows(t *testing.T) {
 	}
 	if len(own.asked) != 0 {
 		t.Fatalf("the file store was asked %d time(s) about a page with no eD2K row", len(own.asked))
+	}
+}
+
+// TestSearchServersNetwork: the servers network is a fourth one. It answers before
+// Kad, and a file both know comes once, as the servers' row, on whichever page it
+// falls. The total of two eD2K networks is then a bound.
+func TestSearchServersNetwork(t *testing.T) {
+	cat := newFakeCatalog()
+	cat.releases[networkTorrent] = releases("t", 2)
+	// The servers know k1 and k3 of Kad's five files, with other counts, and one
+	// file Kad lacks.
+	kad := kadRows("k", 5)
+	var servers []meta.Release
+	for _, i := range []int{3, 1} {
+		row := proto.Clone(kad[i][0]).(*metav1.MetaEntry)
+		row.Peers, row.Seeders = 7, 2
+		servers = append(servers, meta.Release{row})
+	}
+	servers = append(servers, kadRows("s", 1)...)
+	cat.releases[networkServers] = servers
+	cat.releases[networkKad] = kad
+	svc := searchService(cat)
+
+	caps, err := svc.GetCaps(context.Background(), &metav1.GetCapsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("input:  caps of a server with torrent, servers and Kad")
+	t.Logf("output: networks=%v", caps.GetNetworks())
+	wantNetworks := []metav1.MetaNetwork{metav1.MetaNetwork_META_NETWORK_TORRENT, metav1.MetaNetwork_META_NETWORK_SERVERS, metav1.MetaNetwork_META_NETWORK_KAD}
+	if !slices.Equal(caps.GetNetworks(), wantNetworks) {
+		t.Errorf("networks %v, want %v", caps.GetNetworks(), wantNetworks)
+	}
+
+	all, err := svc.Search(context.Background(), &metav1.SearchRequest{Query: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("input:  every network; servers hold k3, k1, s0 and Kad k0..k4")
+	t.Logf("output: total=%d exact=%t %v", all.GetTotal(), all.GetTotalExact(), describe(all))
+	want := []string{"t0/0/0", "k3/7/2", "k0/40/4", "t1/0/0", "k1/7/2", "k2/40/4", "s0/40/4", "k4/40/4"}
+	if !slices.Equal(describe(all), want) {
+		t.Errorf("got  %v\nwant %v", describe(all), want)
+	}
+	if all.GetTotal() != 10 || all.GetTotalExact() {
+		t.Errorf("total %d exact %t, want the bound 10 and not exact", all.GetTotal(), all.GetTotalExact())
+	}
+
+	var paged []string
+	for offset := uint32(0); ; {
+		page, err := svc.Search(context.Background(), &metav1.SearchRequest{Query: "x", Limit: 3, Offset: offset})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("input:  offset=%d limit=3", offset)
+		t.Logf("output: %v next=%d", describe(page), page.GetNextOffset())
+		paged = append(paged, describe(page)...)
+		if offset = page.GetNextOffset(); offset == 0 {
+			break
+		}
+	}
+	if !slices.Equal(paged, want) {
+		t.Errorf("paged %v\nwant  %v", paged, want)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		req   *metav1.SearchRequest
+		want  []string
+		exact bool
+	}{
+		{"servers only", &metav1.SearchRequest{Query: "x", Network: metav1.MetaNetwork_META_NETWORK_SERVERS},
+			[]string{"k3/7/2", "k1/7/2", "s0/40/4"}, true},
+		{"Kad only keeps its own rows", &metav1.SearchRequest{Query: "x", Network: metav1.MetaNetwork_META_NETWORK_KAD},
+			[]string{"k0/40/4", "k1/40/4", "k2/40/4", "k3/40/4", "k4/40/4"}, true},
+		{"torrent kinds leave the servers out", &metav1.SearchRequest{Query: "x", Kinds: []metav1.MetaKind{metav1.MetaKind_META_KIND_BT_V1}},
+			[]string{"t0/0/0", "t1/0/0"}, true},
+		{"servers with a kind they lack", &metav1.SearchRequest{Query: "x", Network: metav1.MetaNetwork_META_NETWORK_SERVERS, Kinds: []metav1.MetaKind{metav1.MetaKind_META_KIND_NZB}},
+			nil, false},
+	} {
+		resp, err := svc.Search(context.Background(), tc.req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("input:  %s: %v", tc.name, tc.req)
+		t.Logf("output: total=%d exact=%t %v", resp.GetTotal(), resp.GetTotalExact(), describe(resp))
+		if !slices.Equal(describe(resp), tc.want) || resp.GetTotalExact() != tc.exact {
+			t.Errorf("%s: got %v exact=%t, want %v exact=%t", tc.name, describe(resp), resp.GetTotalExact(), tc.want, tc.exact)
+		}
 	}
 }

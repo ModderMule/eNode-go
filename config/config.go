@@ -63,6 +63,8 @@ type Config struct {
 	MetaSearch MetaSearchConfig `yaml:"metaSearch"`
 	MetaAPI    MetaAPIConfig    `yaml:"metaApi"`
 
+	ServerSearch ServerSearchConfig `yaml:"serverSearch"`
+
 	Storage StorageConfig `yaml:"storage"`
 	Debug   DebugConfig   `yaml:"debug"`
 
@@ -97,10 +99,18 @@ type DebugConfig struct {
 //
 // Local-only on purpose: TestShippedConfigDocumentsEveryKey and
 // TestConfigFilesHaveMatchingKeys exempt it (localOnlyConfigKeys).
+//
+// KadUsers and TorrentUsers are switches, off by default: each adds the number of
+// users the metaSearch daemon of that network estimates the whole network to have
+// (kademlia-crawler for Kad, torrent-crawler for the BitTorrent DHT) to the user
+// count. They need that network enabled under metaSearch and add nothing without it.
 type StatsBoostConfig struct {
 	Users      int `yaml:"users"`
 	LowIDUsers int `yaml:"lowIDUsers"`
 	Files      int `yaml:"files"`
+
+	KadUsers     bool `yaml:"kadUsers"`
+	TorrentUsers bool `yaml:"torrentUsers"`
 }
 
 // ServerEntry is one advertised peer server in OP_SERVERLIST. IP may be an IPv4
@@ -816,6 +826,9 @@ func setDefaults(cfg *Config) error {
 		return err
 	}
 	if err := setMetaAPIDefaults(&cfg.MetaAPI); err != nil {
+		return err
+	}
+	if err := setServerSearchDefaults(&cfg.ServerSearch, cfg.Gossip.EnabledOrDefault()); err != nil {
 		return err
 	}
 	if cfg.Storage.MongoDB.Port == 0 {

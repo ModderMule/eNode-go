@@ -57,6 +57,16 @@ func testServer(t *testing.T) (string, LiveStats) {
 			SearchesTCP: 9, SearchesUDP: 4, RowsServed: 30, LiveCalls: 6, LiveErrors: 1, LiveTimeouts: 2,
 			CacheHits: 5, CacheMisses: 6, UDPSkipped: 1, Counted: 5000,
 		}},
+		ServerSearch: &ServerSearchStats{
+			Mode: "allowlist", URL: "https://203.0.113.7:4673", Fingerprint: "sha256/abc=", ServeSearch: true, ServeBrowse: true,
+			InfoCalls: 3, Searches: 11, Browses: 40, FilesServed: 900, Resets: 1, RateLimited: 2, AuthFailures: 4,
+			LiveSearch: true, Mirror: true, MirrorFiles: 800, MirrorMaxFiles: 500000,
+			Peers: []ServerSearchPeerStats{{
+				URL: "https://198.51.100.9:4673", Static: true, Name: "peer-server", Files: 800,
+				Mirrored: true, MirrorFiles: 800, MirrorAt: "2026-07-22T09:58:00Z", Walks: 3, WalkErrors: 1, Resets: 1,
+				LiveCalls: 5, LiveErrors: 1, LiveTimeouts: 1, RowsServed: 20,
+			}},
+		},
 		Update: &UpdateInfo{
 			Latest: "v0.2.0", URL: ReleaseRepoURL + "/releases/tag/v0.2.0",
 			Available: true, CheckedAt: "2026-07-22T09:30:00Z",
@@ -114,10 +124,32 @@ func TestStatsJSONReturnsSnapshot(t *testing.T) {
 		"gossipRejectedBad", "gossipRejectedSelf", "gossipRejectedClient",
 		"gossipRejectedFull", "gossipRejectedUnsolicited", "gossipRejectedPlaintext",
 		"filterBlockedIP", "filterBlockedGeo",
-		"advertisedFiles", "metaCacheEntries", "meta", "update",
+		"advertisedFiles", "metaCacheEntries", "meta", "serverSearch", "update",
 	} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("stats.json missing key %q", key)
+		}
+	}
+	// The server search keys renderServerSearch reads.
+	search, _ := raw["serverSearch"].(map[string]any)
+	for _, key := range []string{
+		"mode", "url", "fingerprint", "serveSearch", "serveBrowse", "searches", "browses", "filesServed",
+		"resets", "rateLimited", "authFailures", "liveSearch", "mirror", "mirrorFiles", "mirrorMaxFiles", "peers",
+	} {
+		if _, ok := search[key]; !ok {
+			t.Errorf("stats.json serverSearch missing key %q", key)
+		}
+	}
+	var searchPeer map[string]any
+	if list, _ := search["peers"].([]any); len(list) > 0 {
+		searchPeer, _ = list[0].(map[string]any)
+	}
+	for _, key := range []string{
+		"url", "static", "name", "files", "down", "lastError", "mirrored", "mirrorFiles", "mirrorAt",
+		"mirrorTrimmed", "liveCalls", "liveErrors", "liveTimeouts",
+	} {
+		if _, ok := searchPeer[key]; !ok {
+			t.Errorf("stats.json serverSearch.peers[0] missing key %q", key)
 		}
 	}
 	// The per-network keys the dashboard script reads.
@@ -131,6 +163,7 @@ func TestStatsJSONReturnsSnapshot(t *testing.T) {
 		"feedReleases", "feedCursor", "feedCaughtUp", "searchesTCP", "searchesUDP", "rowsServed",
 		"liveCalls", "liveErrors", "liveTimeouts", "cacheHits", "cacheMisses", "udpSkipped",
 		"countInServerStatus", "counted",
+		"networkUsers", "networkUsersExperimental", "networkFiles",
 	} {
 		if _, ok := first[key]; !ok {
 			t.Errorf("stats.json meta[0] missing key %q", key)

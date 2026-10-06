@@ -19,9 +19,14 @@ import (
 // AdvertisedFiles is the file count the searcher adds to the server status total
 // (metaSearch.<network>.countInServerStatus). It is read on every status reply, so
 // it must answer from memory, never from a daemon.
+//
+// NetworkUsers is a daemon's estimate of how many users its whole network has,
+// by network name ("kad", "torrent"), 0 when there is none. It is read on every
+// status reply too, when a statsBoost switch asks for it.
 type MetaSearcher interface {
 	Search(ctx context.Context, expr *storage.SearchExpr, udp, nativeOnly bool) []storage.File
 	AdvertisedFiles() int
+	NetworkUsers(network string) int
 }
 
 // SetMetaSearcher attaches the meta searcher. advertiseToLegacy sends its torrent and

@@ -27,6 +27,19 @@ func (s *ServerRuntime) GossipStats() GossipStats {
 	return s.gossip().Stats()
 }
 
+// IsGossipServer reports whether ip is a server the peer table has admitted. False
+// while gossip is disabled. Read through the runtime because a config reload can
+// replace the handler.
+func (s *ServerRuntime) IsGossipServer(ip net.IP) bool {
+	return s.gossip().IsServer(ip)
+}
+
+// GossipSearchPeers returns the admitted peers that advertise a server-to-server
+// search service; none while gossip is disabled.
+func (s *ServerRuntime) GossipSearchPeers() []PeerServer {
+	return s.gossip().SearchPeers()
+}
+
 // decryptPeerReply makes the two extra decryption attempts a reply from a *peer server*
 // needs, returning the plaintext frame or the input unchanged.
 //
@@ -172,13 +185,18 @@ func (s *ServerRuntime) udpGlobServStatRes(b *Buffer, remote *net.UDPAddr, modul
 // probe. A valid reply is the admission test that promotes the peer; a malformed one
 // leaves it where it is, matching eserver's "(bad name)"/"(bad desc)" rejections.
 func (s *ServerRuntime) udpServerDescRes(b *Buffer, remote *net.UDPAddr, module string) {
-	name, desc, err := ParseServerDescRes(b)
+	d, err := ParseServerDesc(b)
 	if err != nil {
 		logging.Debugf("[module=%s] malformed OP_SERVER_DESC_RES from %s: %v", module, remote, err)
 		return
 	}
 	if g := s.gossip(); g != nil {
-		g.NoteDescription(remote.IP, name, desc)
+		// Only a reply that passed the admission test may say where the peer's search
+		// service is, and every reply says it afresh: a peer that stops advertising
+		// stops being called.
+		if g.NoteDescription(remote.IP, d.Name, d.Desc) {
+			g.NoteServerSearch(remote.IP, d.ServerSearch)
+		}
 	}
 }
 
@@ -230,7 +248,23 @@ func GossipSeedsFromServers(servers []storage.Server) []PeerAddr {
 	return out
 }
 
-// ParseServerDescRes decodes OP_SERVER_DESC_RES (0xA3) in either form.
+// ServerDesc is what an OP_SERVER_DESC_RES said of the server that sent it.
+type ServerDesc struct {
+	Name string
+	Desc string
+	// ServerSearch is where its server-to-server search service is, when the reply
+	// carried the tags. Only the extended form can.
+	ServerSearch ServerSearchAdvert
+}
+
+// ParseServerDescRes decodes the name and the description of an OP_SERVER_DESC_RES.
+// See ParseServerDesc.
+func ParseServerDescRes(b *Buffer) (name, desc string, err error) {
+	d, err := ParseServerDesc(b)
+	return d.Name, d.Desc, err
+}
+
+// ParseServerDesc decodes OP_SERVER_DESC_RES (0xA3) in either form.
 //
 // Two shapes exist and a peer chooses without announcing which:
 //
@@ -242,12 +276,13 @@ func GossipSeedsFromServers(servers []storage.Server) []PeerAddr {
 // string-length bytes into the challenge and then reads a tag count from name bytes,
 // which is essentially never a small plausible count. Trying the old form first would be
 // worse — an extended payload's challenge can look like a valid short string length.
-func ParseServerDescRes(b *Buffer) (name, desc string, err error) {
+func ParseServerDesc(b *Buffer) (ServerDesc, error) {
 	start := b.Pos()
 
 	if b.Remaining() >= 8 {
 		if _, e := b.GetUInt32LE(); e == nil {
 			if tags, e := b.GetTags(); e == nil {
+				var d ServerDesc
 				var gotName bool
 				for _, t := range tags {
 					s, ok := t.Value.(string)
@@ -256,13 +291,17 @@ func ParseServerDescRes(b *Buffer) (name, desc string, err error) {
 					}
 					switch t.Name {
 					case "name":
-						name, gotName = s, true
+						d.Name, gotName = s, true
 					case "description":
-						desc = s
+						d.Desc = s
+					case tagName(TagServerSearch):
+						d.ServerSearch.URL = s
+					case tagName(TagServerSearchFingerprint):
+						d.ServerSearch.Fingerprint = s
 					}
 				}
 				if gotName {
-					return name, desc, nil
+					return d, nil
 				}
 			}
 		}
@@ -270,12 +309,12 @@ func ParseServerDescRes(b *Buffer) (name, desc string, err error) {
 
 	// Fall back to the old form.
 	b.Pos(start)
-	name, err = b.GetString()
+	name, err := b.GetString()
 	if err != nil {
-		return "", "", err
+		return ServerDesc{}, err
 	}
 	// A missing description is tolerated: plenty of servers set none, and the name alone
 	// is what the admission test actually requires.
-	desc, _ = b.GetString()
-	return name, desc, nil
+	desc, _ := b.GetString()
+	return ServerDesc{Name: name, Desc: desc}, nil
 }

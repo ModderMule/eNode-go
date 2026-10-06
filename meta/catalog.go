@@ -126,6 +126,13 @@ func (s *Searcher) SearchCatalog(ctx context.Context, network string, req *metav
 	return chunk, err
 }
 
+// CatalogKey is req's cache key: equal for two requests that ask the same search,
+// whatever their paging, network, keyword order or case. A catalogue source with no
+// daemon behind it keys its own cache with it.
+func CatalogKey(req *metav1.SearchRequest) string {
+	return requestKey(normalizeRequest(req))
+}
+
 // loadChunk asks the daemon for chunk k, following its next_offset when it caps a
 // page below ChunkSize.
 func (src *source) loadChunk(ctx context.Context, base *metav1.SearchRequest, k int) (Chunk, error) {

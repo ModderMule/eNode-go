@@ -24,9 +24,10 @@ import (
 type fakeMeta struct {
 	mu          sync.Mutex
 	rows        []storage.File
-	calls       []bool // the udp argument of each call for every network
-	nativeCalls int    // calls limited to the native networks
-	files       int    // what AdvertisedFiles reports
+	calls       []bool         // the udp argument of each call for every network
+	nativeCalls int            // calls limited to the native networks
+	files       int            // what AdvertisedFiles reports
+	users       map[string]int // what NetworkUsers reports, by network
 }
 
 func (f *fakeMeta) Search(_ context.Context, _ *storage.SearchExpr, udp, nativeOnly bool) []storage.File {
@@ -47,6 +48,8 @@ func (f *fakeMeta) Search(_ context.Context, _ *storage.SearchExpr, udp, nativeO
 }
 
 func (f *fakeMeta) AdvertisedFiles() int { return f.files }
+
+func (f *fakeMeta) NetworkUsers(network string) int { return f.users[network] }
 
 func (f *fakeMeta) callCount() int {
 	f.mu.Lock()

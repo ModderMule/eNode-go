@@ -176,11 +176,14 @@ type MemoryEngine struct {
 	// files holds an id into recs rather than the record itself, so the name index can
 	// list a file as a uint32. A removed file's slot has a nil Hash; its id waits in
 	// dead until CleanupStale has purged it from the index, then in free for reuse.
-	files   map[string]uint32
-	recs    fileSlab
-	dead    []uint32
-	free    []uint32
-	names   nameIndex
+	files map[string]uint32
+	recs  fileSlab
+	dead  []uint32
+	free  []uint32
+	names nameIndex
+	// layout counts how often the records were renumbered, which is what makes a
+	// BrowseFiles cursor from before unusable.
+	layout  uint64
 	sources map[string][]Source
 	servers []Server
 
@@ -392,6 +395,41 @@ func (m *MemoryEngine) SharedFiles(hashes [][]byte) []File {
 		}
 	}
 	return out
+}
+
+// BrowseFiles walks the file records in id order. The cursor is the layout the
+// walk started in and the next id to read: rebuilding the index renumbers the
+// records, after which an id no longer says where the walk stood.
+func (m *MemoryEngine) BrowseFiles(cursor []byte, limit int) ([]File, []byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	from := uint32(0)
+	if len(cursor) != 0 {
+		if len(cursor) != 12 || binary.BigEndian.Uint64(cursor) != m.layout {
+			return nil, nil, ErrBrowseCursor
+		}
+		from = binary.BigEndian.Uint32(cursor[8:])
+	}
+	limit = browseLimit(limit)
+	out := make([]File, 0, min(limit, 256))
+	n := uint32(m.recs.len())
+	for id := from; id < n; id++ {
+		f := *m.recs.at(id)
+		if f.Hash == nil {
+			continue
+		}
+		m.liveFieldsLocked(&f)
+		if f.Sources == 0 {
+			continue
+		}
+		f.SourceID, f.SourcePort = 0, 0
+		out = append(out, f)
+		if len(out) == limit && id+1 < n {
+			next := binary.BigEndian.AppendUint64(make([]byte, 0, 12), m.layout)
+			return out, binary.BigEndian.AppendUint32(next, id+1), nil
+		}
+	}
+	return out, nil, nil
 }
 
 func (m *MemoryEngine) FindByNameContains(term string) []File {
@@ -687,6 +725,7 @@ func (m *MemoryEngine) setFilesLocked(recs fileSlab) {
 	m.files = make(map[string]uint32, recs.len())
 	m.names = newNameIndex()
 	m.dead, m.free = nil, nil
+	m.layout++
 	for id := range recs.len() {
 		f := recs.at(uint32(id))
 		m.files[fileMapKey(f.Hash, f.Size)] = uint32(id)
@@ -702,4 +741,9 @@ func (m *MemoryEngine) fileByKey(key string) (File, bool) {
 		return File{}, false
 	}
 	return *m.recs.at(id), true
+}
+
+// browseLimit bounds a BrowseFiles page: at least one file, at most MaxBrowsePage.
+func browseLimit(limit int) int {
+	return min(max(limit, 1), MaxBrowsePage)
 }

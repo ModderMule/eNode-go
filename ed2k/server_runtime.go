@@ -104,6 +104,9 @@ type UDPRuntimeConfig struct {
 	// RateLimitPerIPPerMinute caps UDP searches and source requests per address
 	// (IPv6 per /64); 0 is off. See config udp.rateLimitPerIPPerMinute.
 	RateLimitPerIPPerMinute int
+	// ServerSearch is advertised in the extended OP_SERVER_DESC_RES when
+	// serverSearch.mode is "gossip". An empty URL omits the tags.
+	ServerSearch ServerSearchAdvert
 }
 
 type ServerRuntime struct {
@@ -151,6 +154,8 @@ type ServerRuntime struct {
 	// boost is added to the counts in both status packets. Swapped by SetStatsBoost,
 	// which a config reload may call with the listeners live. nil advertises real counts.
 	boost atomic.Pointer[StatsBoost]
+	// usersCeilingWarned is when warnUsersOverCeiling last logged, in Unix nanoseconds.
+	usersCeilingWarned atomic.Int64
 }
 
 // ipv6Enabled reports whether IPv6 is on at all (dual-stack accept, CT_MOD_IP_V6
@@ -2583,9 +2588,10 @@ func (s *ServerRuntime) udpServDescRes(b *Buffer, remote *net.UDPAddr, conn UDPR
 		return
 	}
 	packet, err := BuildServerDescResPacket(challenge, UDPConfig{
-		Name:        s.udp().Name,
-		Description: s.udp().Description,
-		DynIP:       s.udp().DynIP,
+		Name:         s.udp().Name,
+		Description:  s.udp().Description,
+		DynIP:        s.udp().DynIP,
+		ServerSearch: s.udp().ServerSearch,
 	})
 	if err != nil {
 		return

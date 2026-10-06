@@ -267,6 +267,19 @@ const (
 	TagMetaAPIVersion     uint8 = 0x9f
 )
 
+// TagServerSearch and TagServerSearchFingerprint are string tags in the extended
+// OP_SERVER_DESC_RES that tell another server where the server-to-server search
+// service is, and the SPKI pin of its certificate. They go in the description
+// reply because servers never log into each other: it is what one already asks of
+// another. Values are the contract's ST_SERVER_SEARCH* (enodemeta/tags), pinned by
+// a test. Both client trees walk that tag list by name id and skip one they do not
+// know (srchybrid/UDPSocket.cpp:457-485, eMuleQt core/server/ServerList.cpp).
+// Emitted only when serverSearch.mode is "gossip".
+const (
+	TagServerSearch            uint8 = 0xa0
+	TagServerSearchFingerprint uint8 = 0xa1
+)
+
 // TagMeta* are the FT_META_* search-result tags of the enode.meta.v1 contract, carried
 // by a row that stands for a torrent or Usenet release (docs/meta-search.md). The
 // 0x60-0x6F block is free in every surveyed eMule tree; the values are pinned against
@@ -359,6 +372,15 @@ const (
 	// FlagNatRendezvous; clients ignore unknown bits. Set on both the TCP and UDP word
 	// when a catalogue daemon is configured.
 	FlagMetaSearch uint32 = 0x10000
+	// FlagServerSearch is the contract's bit (enodemeta/tags) for "this server offers
+	// server-to-server search" (docs/server-search.md). It is reserved and NEVER SENT.
+	// Measured against eserver 17.14 on 2026-10-07 (tests/interop,
+	// TestGossipPropagatesThroughEserver): a peer that sets 0x20000 in the UDP flags
+	// word of its status reply is still held and pinged, but eserver answers every
+	// peer-list request with an empty list from then on, so the peer and everything
+	// behind it drop out of the mesh. With the bit clear and the ST_SERVER_SEARCH tags
+	// still sent, the same case passes. The tags alone are the advertisement.
+	FlagServerSearch uint32 = 0x20000
 	// SrvCapMetaSearch is the client's CT_SERVER_FLAGS login bit asking for meta rows;
 	// SrvCapUDPMetaSearch is the same request in OP_GLOBSEARCHREQ3's
 	// CT_SERVER_UDPSEARCH_FLAGS tag (0x0e, decoded under TagSearchTree's name).

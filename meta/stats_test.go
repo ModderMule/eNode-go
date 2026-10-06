@@ -245,3 +245,38 @@ func TestStatsSearchCounters(t *testing.T) {
 		t.Errorf("cache entries=%d, want 1 (failures are not cached)", s.CacheEntries())
 	}
 }
+
+// TestNetworkUsersFromDaemonInfo: the daemon's network estimates reach Stats, and
+// NetworkUsers answers the routing-table figure for an enabled network alone. A
+// figure older than staleWindow counts for nothing, so a stopped daemon's users
+// leave the server status, while Stats keeps showing the last ones.
+func TestNetworkUsersFromDaemonInfo(t *testing.T) {
+	d := &fakeDaemon{info: &metav1.GetInfoResponse{
+		NetworkUsers: 412000, NetworkUsersExperimental: 365000, NetworkFiles: 44496000,
+	}}
+	s := searcherFor(testConfig(t, true, false), map[string]*fakeDaemon{NetworkTorrent: d})
+	src := s.sources[0]
+
+	never := s.NetworkUsers(NetworkTorrent)
+	src.refreshInfo(context.Background())
+	st := s.Stats()[0]
+	fresh, other := s.NetworkUsers(NetworkTorrent), s.NetworkUsers(NetworkKad)
+
+	src.daemon.mu.Lock()
+	src.daemon.at = time.Now().Add(-staleWindow - time.Second)
+	src.daemon.mu.Unlock()
+	stale, kept := s.NetworkUsers(NetworkTorrent), s.Stats()[0].NetworkUsers
+
+	t.Logf("input: torrent daemon reports users=412000 experimental=365000 files=44496000; kad not enabled")
+	t.Logf("output: before poll=%d, fresh=%d, kad=%d, stats=%d/%d/%d, after staleWindow=%d (stats still %d)",
+		never, fresh, other, st.NetworkUsers, st.NetworkUsersExperimental, st.NetworkFiles, stale, kept)
+	if st.NetworkUsers != 412000 || st.NetworkUsersExperimental != 365000 || st.NetworkFiles != 44496000 {
+		t.Errorf("network estimates not carried: %+v", st)
+	}
+	if never != 0 || fresh != 412000 || other != 0 {
+		t.Errorf("NetworkUsers before=%d fresh=%d kad=%d, want 0/412000/0", never, fresh, other)
+	}
+	if stale != 0 || kept != 412000 {
+		t.Errorf("stale NetworkUsers=%d stats=%d, want 0 and 412000", stale, kept)
+	}
+}

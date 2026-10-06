@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -428,6 +429,68 @@ func (m *MySQLEngine) SharedFiles(hashes [][]byte) []File {
 		}
 	}
 	return out
+}
+
+// BrowseFiles pages over files by primary key, which is a keyset: a page costs the
+// rows it returns however far the walk has come. The cursor is the last id read.
+// It survives anything short of the table being emptied, so it is never stale.
+func (m *MySQLEngine) BrowseFiles(cursor []byte, limit int) ([]File, []byte, error) {
+	after := uint64(0)
+	if len(cursor) != 0 {
+		if len(cursor) != 8 {
+			return nil, nil, ErrBrowseCursor
+		}
+		after = binary.BigEndian.Uint64(cursor)
+	}
+	if err := m.ensureDB(); err != nil {
+		return nil, nil, err
+	}
+	limit = browseLimit(limit)
+	// The joins are what make a file "offered now", as in SharedFiles. MIN picks
+	// one name where the dialects have no common "any"; MAX picks the type and the
+	// media tags so that a source that sent none does not blank them.
+	rows, err := m.db.Query(
+		`SELECT f.id, MIN(s.name), f.completed, f.sources, f.hash, f.size,
+		        MAX(s.type), MAX(s.title), MAX(s.artist), MAX(s.album),
+		        MAX(s.length), MAX(s.bitrate), MAX(s.codec)
+		 FROM files f
+		 INNER JOIN sources s ON s.id_file = f.id
+		 INNER JOIN clients c ON c.id = s.id_client
+		 WHERE f.id > ? AND s.online = 1 AND c.online = 1
+		 GROUP BY f.id, f.completed, f.sources, f.hash, f.size
+		 ORDER BY f.id
+		 LIMIT `+strconv.Itoa(limit),
+		after,
+	)
+	if err != nil {
+		logging.Errorf("mysql browse files after id %d failed: %v", after, err)
+		return nil, nil, err
+	}
+	defer rows.Close()
+	out := make([]File, 0, min(limit, 256))
+	last, read := after, 0
+	for rows.Next() {
+		var f File
+		var id uint64
+		var typ string
+		if err := rows.Scan(&id, &f.Name, &f.Completed, &f.Sources, &f.Hash, &f.Size,
+			&typ, &f.Title, &f.Artist, &f.Album, &f.Runtime, &f.Bitrate, &f.Codec); err != nil {
+			logging.Errorf("mysql browse files scan failed: %v", err)
+			return nil, nil, err
+		}
+		// Past the scan, so a row that fails to decode cannot be skipped silently
+		// by a cursor that moved over it.
+		last, read = id, read+1
+		f.Type = typ
+		out = append(out, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	if read < limit {
+		return out, nil, nil
+	}
+	return out, binary.BigEndian.AppendUint64(nil, last), nil
 }
 
 func (m *MySQLEngine) FindByNameContains(term string) []File {

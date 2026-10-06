@@ -2,7 +2,9 @@ package ed2k
 
 import (
 	"net"
+	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,6 +97,9 @@ type PeerServer struct {
 	UDPPortObf uint16
 	TCPPortObf uint16
 	UDPFlags   uint32
+	// ServerSearch is where the peer says its server-to-server search service is,
+	// from its last description reply. Empty when it advertises none.
+	ServerSearch ServerSearchAdvert
 
 	// OurChallenge is the random_part we used for this peer's phase-2 bootstrap ping. Its
 	// reply is RC4-keyed on exactly this value, so it must survive until the reply
@@ -521,6 +526,59 @@ func (g *GossipHandler) NoteDescription(from net.IP, name, desc string) bool {
 	return true
 }
 
+// NoteServerSearch records where a peer says its server-to-server search service is.
+// An advert that is not a plain http(s) URL of a sane length is taken as none: the
+// value comes from the peer and is later dialled.
+func (g *GossipHandler) NoteServerSearch(from net.IP, advert ServerSearchAdvert) {
+	if g == nil || from == nil {
+		return
+	}
+	if !validServerSearchAdvert(advert) {
+		advert = ServerSearchAdvert{}
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	p := g.findByIPLocked(from)
+	if p == nil || p.ServerSearch == advert {
+		return
+	}
+	if advert.URL != "" {
+		logging.Infof("gossip: server %s offers server search at %s", p.Addr, advert.URL)
+	}
+	p.ServerSearch = advert
+}
+
+// IsServer reports whether ip is a peer that passed the admission test and is not
+// parked: the servers this one would itself advertise.
+func (g *GossipHandler) IsServer(ip net.IP) bool {
+	if g == nil || ip == nil {
+		return false
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	p := g.findByIPLocked(ip)
+	return p != nil && g.advertisableLocked(p)
+}
+
+// SearchPeers returns copies of the admitted peers that advertise a server-to-server
+// search service: those whose description reply carried its URL. The flags word is
+// not consulted, since the service is never advertised there (see FlagServerSearch).
+func (g *GossipHandler) SearchPeers() []PeerServer {
+	if g == nil {
+		return nil
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var out []PeerServer
+	for _, p := range g.peers {
+		if p.ServerSearch.URL != "" && g.advertisableLocked(p) {
+			out = append(out, *p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Addr.String() < out[j].Addr.String() })
+	return out
+}
+
 // NoteVerified marks a peer as having completed the obfuscated list exchange, the last
 // step before it may be advertised.
 func (g *GossipHandler) NoteVerified(from net.IP) {
@@ -846,4 +904,21 @@ func hasControlChars(s string) bool {
 		}
 	}
 	return false
+}
+
+// maxServerSearchURL bounds an advertised search URL.
+const maxServerSearchURL = 255
+
+// validServerSearchAdvert reports whether an advert is usable: an http(s) URL with a
+// host and nothing but a path after it, and a fingerprint of the expected form or none.
+func validServerSearchAdvert(a ServerSearchAdvert) bool {
+	if a.URL == "" || len(a.URL) > maxServerSearchURL || len(a.Fingerprint) > 64 {
+		return false
+	}
+	u, err := url.Parse(a.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	return a.Fingerprint == "" || strings.HasPrefix(a.Fingerprint, "sha256/")
 }

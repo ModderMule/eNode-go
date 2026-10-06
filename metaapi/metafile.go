@@ -26,6 +26,10 @@ const (
 	// networkKad has no metafiles: its rows are eD2K files. It is a network of
 	// MetaApi.Search only.
 	networkKad = "kad"
+	// networkServers has no daemon and no metafiles: it is the eD2K files this
+	// server's users share and those of the servers it exchanges searches with
+	// (serverlink.NetworkServers). It too is a network of MetaApi.Search only.
+	networkServers = "servers"
 )
 
 // MetaFileSource fetches metafiles from the catalogue daemons. *meta.Searcher is one.

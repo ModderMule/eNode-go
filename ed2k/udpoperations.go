@@ -26,6 +26,16 @@ type UDPConfig struct {
 	// byte-identical to the pre-reflection form for any caller that does not set it.
 	// See BuildGlobServStatResPacket.
 	ObservedIP net.IP
+	// ServerSearch is appended to the extended OP_SERVER_DESC_RES when its URL is set.
+	ServerSearch ServerSearchAdvert
+}
+
+// ServerSearchAdvert is where a server's server-to-server search service is: the
+// TagServerSearch / TagServerSearchFingerprint pair of OP_SERVER_DESC_RES.
+type ServerSearchAdvert struct {
+	URL string
+	// Fingerprint is "sha256/<base64>" of the service certificate's SPKI, or "".
+	Fingerprint string
 }
 
 // udpSearchDatagramBudget is the size several OP_GLOBSEARCHRES records are packed
@@ -203,20 +213,29 @@ func BuildServerDescResOldPacket(name, desc string) (*Buffer, error) {
 }
 
 func BuildServerDescResPacket(challenge uint32, cfg UDPConfig) (*Buffer, error) {
+	tags := []Tag{
+		{Type: TypeString, Code: TagName, Data: cfg.Name},
+		{Type: TypeString, Code: TagDescription, Data: cfg.Description},
+		{Type: TypeString, Code: TagDynIP, Data: cfg.DynIP},
+		// String rather than uint32, and not ENodeVersionInt. Both forms reach the same
+		// sscanf("%d.%d") in eserver, which admits a peer to its `working` set only at
+		// 17.7 or above; the string form lets the part it ignores name us honestly,
+		// since this reply answers clients as well as peer servers. See GossipVersionStr.
+		{Type: TypeString, Code: TagVersion2, Data: GossipVersionStr},
+		{Type: TypeString, Code: TagAuxPortsList, Data: ""},
+	}
+	// After the tags every reader knows, so one that stops at the first tag it cannot
+	// place has already read them.
+	if cfg.ServerSearch.URL != "" {
+		tags = append(tags, Tag{Type: TypeString, Code: TagServerSearch, Data: cfg.ServerSearch.URL})
+		if cfg.ServerSearch.Fingerprint != "" {
+			tags = append(tags, Tag{Type: TypeString, Code: TagServerSearchFingerprint, Data: cfg.ServerSearch.Fingerprint})
+		}
+	}
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpServerDescRes},
 		{Type: TypeUint32, Value: challenge},
-		{Type: TypeTags, Value: []Tag{
-			{Type: TypeString, Code: TagName, Data: cfg.Name},
-			{Type: TypeString, Code: TagDescription, Data: cfg.Description},
-			{Type: TypeString, Code: TagDynIP, Data: cfg.DynIP},
-			// String rather than uint32, and not ENodeVersionInt. Both forms reach the same
-			// sscanf("%d.%d") in eserver, which admits a peer to its `working` set only at
-			// 17.7 or above; the string form lets the part it ignores name us honestly,
-			// since this reply answers clients as well as peer servers. See GossipVersionStr.
-			{Type: TypeString, Code: TagVersion2, Data: GossipVersionStr},
-			{Type: TypeString, Code: TagAuxPortsList, Data: ""},
-		}},
+		{Type: TypeTags, Value: tags},
 	}
 	return MakeUDPPacket(PrED2K, pack)
 }

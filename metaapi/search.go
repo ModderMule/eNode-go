@@ -31,8 +31,8 @@ const (
 	ed2kHashLen = 16
 )
 
-// CatalogSource answers MetaApi.Search from the catalogue daemons. *meta.Searcher is
-// one.
+// CatalogSource answers MetaApi.Search, network by network. *meta.Searcher is one,
+// for the catalogue daemons.
 type CatalogSource interface {
 	SearchCatalog(ctx context.Context, network string, req *metav1.SearchRequest, chunk int) (meta.Chunk, error)
 	CatalogNetworks() []string
@@ -77,10 +77,17 @@ var networkKinds = map[string][]metav1.MetaKind{
 	networkTorrent: {metav1.MetaKind_META_KIND_BT_V1, metav1.MetaKind_META_KIND_BT_V2},
 	networkUsenet:  {metav1.MetaKind_META_KIND_NZB},
 	networkKad:     {metav1.MetaKind_META_KIND_ED2K},
+	networkServers: {metav1.MetaKind_META_KIND_ED2K},
 }
 
-// Search pages through the torrent, Usenet and Kad catalogues. See the contract's
-// MetaApi.Search for the paging rules.
+// networkOrder is the order the networks answer in, whatever order the source
+// lists them in: it is the order their releases alternate in, and the earlier of
+// two networks keeps a file both have. The servers come before Kad, so a file a
+// server knows is answered as the server's.
+var networkOrder = []string{networkTorrent, networkUsenet, networkServers, networkKad}
+
+// Search pages through the torrent, Usenet, server and Kad catalogues. See the
+// contract's MetaApi.Search for the paging rules.
 func (s *Service) Search(ctx context.Context, req *metav1.SearchRequest) (*metav1.SearchResponse, error) {
 	if s.search == nil {
 		return nil, s.toConnectError(&FetchError{Code: connect.CodeUnimplemented, MsgCode: CodeSearchDisabled})
@@ -104,7 +111,7 @@ func (s *Service) SearchNetworks() []metav1.MetaNetwork {
 		return nil
 	}
 	var out []metav1.MetaNetwork
-	for _, n := range s.search.cfg.Catalog.CatalogNetworks() {
+	for _, n := range s.search.networks() {
 		switch n {
 		case networkTorrent:
 			out = append(out, metav1.MetaNetwork_META_NETWORK_TORRENT)
@@ -112,6 +119,8 @@ func (s *Service) SearchNetworks() []metav1.MetaNetwork {
 			out = append(out, metav1.MetaNetwork_META_NETWORK_USENET)
 		case networkKad:
 			out = append(out, metav1.MetaNetwork_META_NETWORK_KAD)
+		case networkServers:
+			out = append(out, metav1.MetaNetwork_META_NETWORK_SERVERS)
 		}
 	}
 	return out
@@ -170,7 +179,7 @@ func (c *catalogSearch) run(ctx context.Context, req *metav1.SearchRequest) (*me
 // waits for the slowest daemon, not for each in turn.
 func (c *catalogSearch) streams(ctx context.Context, req *metav1.SearchRequest, want int) []*releaseStream {
 	var out []*releaseStream
-	for _, network := range c.cfg.Catalog.CatalogNetworks() {
+	for _, network := range c.networks() {
 		if !networkSelected(req.GetNetwork(), network) {
 			continue
 		}
@@ -188,6 +197,7 @@ func (c *catalogSearch) streams(ctx context.Context, req *metav1.SearchRequest, 
 			nreq.Kinds = kinds
 		}
 		out = append(out, &releaseStream{
+			native:    slices.Contains(kinds, metav1.MetaKind_META_KIND_ED2K),
 			maxChunks: c.cfg.Window/meta.ChunkSize + 1,
 			load: func(k int) (meta.Chunk, error) {
 				return c.cfg.Catalog.SearchCatalog(ctx, network, nreq, k)
@@ -207,14 +217,30 @@ func (c *catalogSearch) streams(ctx context.Context, req *metav1.SearchRequest, 
 	return out
 }
 
+// networks are the source's networks in networkOrder. One the order does not name
+// is not searched.
+func (c *catalogSearch) networks() []string {
+	offered := c.cfg.Catalog.CatalogNetworks()
+	var out []string
+	for _, network := range networkOrder {
+		if slices.Contains(offered, network) {
+			out = append(out, network)
+		}
+	}
+	return out
+}
+
 // releaseStream is one network's releases for one search, read chunk by chunk as
 // the merge asks for them.
 type releaseStream struct {
 	load      func(k int) (meta.Chunk, error)
 	maxChunks int
-	chunks    []meta.Chunk
-	done      bool
-	err       error
+	// native marks a stream that can hold eD2K files, which two networks may both
+	// know.
+	native bool
+	chunks []meta.Chunk
+	done   bool
+	err    error
 }
 
 // at returns the stream's i-th release, loading chunks until it is reached or the
@@ -250,34 +276,58 @@ func (st *releaseStream) at(i int) (meta.Release, bool) {
 // takes whichever stream's next release sorts first, which interleaves streams
 // that each arrive in that order into one list in that order. A tie goes to the
 // earlier stream. A stream that runs out drops out.
+//
+// An eD2K file is merged once: a release whose hash and size an earlier one had is
+// skipped. The merge always starts at the first release, so what is skipped is the
+// same on every page.
 func mergePage(streams []*releaseStream, offset, limit int, before releaseLess) (page []meta.Release, more bool) {
 	want := offset + limit
 	next := make([]int, len(streams))
+	seen := map[fileKey]bool{}
+	// peek is stream i's next release that is not a file already merged.
+	peek := func(i int) (meta.Release, bool) {
+		for {
+			release, ok := streams[i].at(next[i])
+			if !ok {
+				return nil, false
+			}
+			if key, native := releaseFile(release); !native || !seen[key] {
+				return release, true
+			}
+			next[i]++
+		}
+	}
+	take := func(i int, release meta.Release) {
+		if key, native := releaseFile(release); native {
+			seen[key] = true
+		}
+		next[i]++
+	}
 	var merged []meta.Release
 	for len(merged) < want {
 		progressed := false
 		if before != nil {
 			best := -1
 			var bestRelease meta.Release
-			for i, st := range streams {
-				release, ok := st.at(next[i])
+			for i := range streams {
+				release, ok := peek(i)
 				if ok && (best < 0 || before(release, bestRelease)) {
 					best, bestRelease = i, release
 				}
 			}
 			if best >= 0 {
 				merged = append(merged, bestRelease)
-				next[best]++
+				take(best, bestRelease)
 				progressed = true
 			}
 		} else {
-			for i, st := range streams {
+			for i := range streams {
 				if len(merged) == want {
 					break
 				}
-				if release, ok := st.at(next[i]); ok {
+				if release, ok := peek(i); ok {
 					merged = append(merged, release)
-					next[i]++
+					take(i, release)
 					progressed = true
 				}
 			}
@@ -286,8 +336,8 @@ func mergePage(streams []*releaseStream, offset, limit int, before releaseLess) 
 			break
 		}
 	}
-	for i, st := range streams {
-		if _, ok := st.at(next[i]); ok {
+	for i := range streams {
+		if _, ok := peek(i); ok {
 			more = true
 			break
 		}
@@ -296,6 +346,24 @@ func mergePage(streams []*releaseStream, offset, limit int, before releaseLess) 
 		page = merged[offset:]
 	}
 	return page, more
+}
+
+// fileKey is an eD2K file's identity: its hash and its size.
+type fileKey struct {
+	hash string
+	size uint64
+}
+
+// releaseFile is the eD2K file a release is, and false for any other release.
+func releaseFile(release meta.Release) (fileKey, bool) {
+	if len(release) != 1 {
+		return fileKey{}, false
+	}
+	hash := ed2kHash(release[0])
+	if hash == nil {
+		return fileKey{}, false
+	}
+	return fileKey{string(hash), release[0].GetSize()}, true
 }
 
 // releaseLess reports whether release a sorts before release b.
@@ -351,9 +419,20 @@ func releaseSize(release meta.Release) uint64 {
 // total adds the daemons' counts, or reports 0 ("not counted") when any stream
 // failed or returned releases without a count. The sum is exact only when every
 // daemon's count was: one lower bound makes the whole sum one, and a network
-// whose first chunk was never loaded was not counted at all.
+// whose first chunk was never loaded was not counted at all. Two networks that
+// both hold eD2K files may hold the same one, which is answered once: their sum is
+// then an upper bound.
 func total(streams []*releaseStream) (sum uint64, exact bool) {
 	exact = true
+	native := 0
+	for _, st := range streams {
+		if st.native {
+			native++
+		}
+	}
+	if native > 1 {
+		exact = false
+	}
 	for _, st := range streams {
 		if st.err != nil {
 			return 0, false
@@ -396,10 +475,6 @@ func (c *catalogSearch) ownFilesWin(page []meta.Release) {
 	}
 	if len(hashes) == 0 {
 		return
-	}
-	type fileKey struct {
-		hash string
-		size uint64
 	}
 	own := make(map[fileKey]storage.File)
 	for _, f := range c.cfg.OwnFiles.SharedFiles(hashes) {
@@ -452,6 +527,8 @@ func networkSelected(want metav1.MetaNetwork, network string) bool {
 		return network == networkUsenet
 	case metav1.MetaNetwork_META_NETWORK_KAD:
 		return network == networkKad
+	case metav1.MetaNetwork_META_NETWORK_SERVERS:
+		return network == networkServers
 	default:
 		return false
 	}

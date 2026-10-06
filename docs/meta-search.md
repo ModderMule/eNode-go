@@ -241,6 +241,19 @@ all of these hold:
 
 Counting catalogue files can push a large server past the 5 000 000 line.
 
+### Network estimates
+
+kademlia-crawler and torrent-crawler also estimate the size of the network they crawl,
+and report it in `GetInfo`: `network_users`, `network_users_experimental` and
+`network_files`. The two user counts are eMule's two ways of estimating Kad users, the
+routing-table figure it displays and the one it labels experimental. A daemon that has
+no estimate yet reports 0.
+
+These figures describe the whole network, not the catalogue, and nothing above adds
+them to the server status. They are shown on the admin dashboard. Adding the user
+estimate to the advertised user count is a separate, local-only setting
+(`statsBoost.kadUsers`, `statsBoost.torrentUsers`), off by default.
+
 ### Admin dashboard
 
 The dashboard's Files card shows the eD2K count. When counted networks add to the
@@ -257,6 +270,8 @@ total, a line under it shows the advertised total. When meta search is on, a
     unavailable/unimplemented/unauthenticated answer;
 - the daemon's name and version;
 - catalogued releases and files, and the published count;
+- the daemon's estimate of its whole network: users, the experimental user figure,
+  and files, or "no estimate";
 - the live-search state, and whether the daemon has a search index;
 - feed rows and releases held, and whether the feed has caught up, or how far its
   cursor lags the daemon's `last_seq`;
@@ -333,11 +348,21 @@ search for a new term is therefore sparse and a later one fuller. With
 `metaSearch.cache` on, the first answer is served again until `ttlSeconds` passes.
 
 `MetaApi.Search` serves Kad rows too, as a third network beside torrent and Usenet
-(see [meta-api.md](meta-api.md#searching-the-catalogues)). There is no metafile to
+(see [meta-api.md](meta-api.md#searching-the-catalogues)). A fourth,
+[the servers network](meta-api.md#the-servers-network), is the eD2K files this
+server and its peers know; it comes before Kad, and a file both have is answered
+once, as the servers' entry. There is no metafile to
 fetch for one: the client builds the eD2K link from the row. The server's own file
 wins there as well, in another form: the entry stays and takes the server's name and
 source counts (`ownFilesWin`), found by hash in the file store
 (`Engine.SharedFiles`).
+
+## Files from other servers
+
+Rows from other eD2K servers reach a search through the same hook as the catalogue rows,
+after them in the answer. They are not meta rows: each is a real eD2K file without a
+source, so it carries no `FT_META_*` tag, takes no name prefix, goes to every client and
+is not counted in the advertised file total. See [server-search.md](server-search.md).
 
 ## By design / deferred
 

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
@@ -34,6 +35,15 @@ type Engine interface {
 	// one lookup for the whole list, for a caller with a page of hashes to ask
 	// about.
 	SharedFiles(hashes [][]byte) []File
+	// BrowseFiles walks the files an online client offers now, a page at a time,
+	// for a caller that wants all of them rather than the ones matching a search.
+	// cursor is nil for the first page and then the next of the page before; a nil
+	// next ends the walk. The order is the engine's own. A file that appears or
+	// goes while the walk runs may be missed or returned twice. ErrBrowseCursor
+	// says the cursor can no longer be continued from and the walk must restart.
+	//
+	// The files name no source: SourceID and SourcePort are zero.
+	BrowseFiles(cursor []byte, limit int) (files []File, next []byte, err error)
 	FindByNameContains(string) []File
 	FindBySearch(*SearchExpr) []File
 	ServersCount() int
@@ -45,6 +55,13 @@ type Engine interface {
 	// every file they touch, or those counters overstate reality forever.
 	CleanupStale(maxAge time.Duration, opts CleanupOptions) (CleanupResult, error)
 }
+
+// ErrBrowseCursor is BrowseFiles' answer to a cursor it cannot continue from: one
+// it did not issue, or one the engine has since reorganised its files under.
+var ErrBrowseCursor = errors.New("storage: browse cursor is no longer valid")
+
+// MaxBrowsePage is the most files one BrowseFiles page holds.
+const MaxBrowsePage = 2000
 
 // CleanupOptions configures one sweep.
 type CleanupOptions struct {
