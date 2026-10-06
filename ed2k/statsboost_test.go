@@ -94,3 +94,42 @@ func readServerStatusCounts(t *testing.T, rt *ServerRuntime) (users, files uint3
 	}
 	return binary.LittleEndian.Uint32(raw[6:10]), binary.LittleEndian.Uint32(raw[10:14])
 }
+
+// TestPublicStatusMatchesStatusPackets pins that the HTTP status route's source
+// reports the advertised figures, the boost included, never the real counts.
+func TestPublicStatusMatchesStatusPackets(t *testing.T) {
+	rt := NewServerRuntime(TCPRuntimeConfig{AllowLowIDs: true},
+		UDPRuntimeConfig{Name: "eNode", Description: "test", MaxConnections: 1000, SoftFiles: 2000, HardFiles: 3000},
+		fixedCountsEngine{Engine: storage.NewMemoryEngine(), clients: 4, files: 700})
+	for i := 0; i < 2; i++ {
+		if _, ok := rt.LowIDs.AddByEndpoint(uint32(0x0a000001+i), uint16(4662+i), i); !ok {
+			t.Fatal("AddByEndpoint failed")
+		}
+	}
+	boost := StatsBoost{Users: 40001, LowIDUsers: 1000, Files: 5000001}
+	rt.SetStatsBoost(boost)
+
+	packet, err := rt.buildStatRes(0x1122, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, b := payloadAfterOpcode(t, packet)
+	udp, err := ParseGlobServStatRes(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rt.PublicStatus()
+	clients, files := rt.Counts()
+
+	t.Logf("input: boost=%+v, real users=%d lowIDs=2 files=%d", boost, clients, files)
+	t.Logf("output: PublicStatus=%+v; UDP users=%d lowIDs=%d files=%d", got, udp.Users, udp.LowIDUsers, udp.Files)
+	if uint32(got.Users) != udp.Users || uint32(got.LowIDUsers) != udp.LowIDUsers || uint32(got.Files) != udp.Files {
+		t.Fatalf("PublicStatus disagrees with OP_GLOBSERVSTATRES")
+	}
+	if got.Users != 40005 || got.LowIDUsers != 1002 || got.Files != 5000701 {
+		t.Fatalf("PublicStatus counts: %+v", got)
+	}
+	if got.Name != "eNode" || got.Description != "test" || got.MaxUsers != 1000 || got.SoftFileLimit != 2000 || got.HardFileLimit != 3000 {
+		t.Fatalf("PublicStatus identity and limits: %+v", got)
+	}
+}

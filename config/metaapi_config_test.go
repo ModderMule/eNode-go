@@ -167,3 +167,25 @@ func TestShippedConfigMetaAPI(t *testing.T) {
 		t.Fatalf("the shipped search block: %+v", c.Search)
 	}
 }
+
+func TestMetaAPIPublicStatus(t *testing.T) {
+	off, on := false, true
+	cases := []struct {
+		name string
+		cfg  MetaAPIConfig
+		want bool
+	}{
+		{"api off", MetaAPIConfig{HTTP: MetaAPIHTTPConfig{Enabled: &on}}, false},
+		{"api on, no http listener", MetaAPIConfig{Enabled: true}, false},
+		{"http listener, key absent", MetaAPIConfig{Enabled: true, HTTP: MetaAPIHTTPConfig{Enabled: &on}}, true},
+		{"website-only listener", MetaAPIConfig{Enabled: true, Accounts: AccountsConfig{Enabled: true}}, true},
+		{"status: false", MetaAPIConfig{Enabled: true, HTTP: MetaAPIHTTPConfig{Enabled: &on, Status: &off}}, false},
+	}
+	for _, tc := range cases {
+		got := tc.cfg.PublicStatusEnabled()
+		t.Logf("input: %s output: PublicStatusEnabled=%t", tc.name, got)
+		if got != tc.want {
+			t.Errorf("%s: PublicStatusEnabled=%t, want %t", tc.name, got, tc.want)
+		}
+	}
+}

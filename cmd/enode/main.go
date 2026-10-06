@@ -294,7 +294,9 @@ func run(ctx context.Context, configPath string) error {
 			b.Users, b.LowIDUsers, b.Files)
 	}
 
+	startTime := time.Now()
 	if metaAPI != nil {
+		metaAPI.setStatus(runtime, startTime)
 		stopMetaAPI, err := metaAPI.start(ctx)
 		if err != nil {
 			return fmt.Errorf("meta api: %w", err)
@@ -307,7 +309,6 @@ func run(ctx context.Context, configPath string) error {
 	// captured once; the live counters come from a snapshot read per request.
 	var adminSrv *admin.Server
 	if cfg.Admin.EnabledOrDefault() {
-		startTime := time.Now()
 		// Daily GitHub release check; Info() is nil-receiver safe, so a disabled
 		// checker simply leaves the dashboard without an update hint.
 		var updateChecker *admin.UpdateChecker

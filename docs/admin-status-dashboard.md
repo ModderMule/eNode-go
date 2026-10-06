@@ -119,6 +119,11 @@ ever baked into the served HTML.
 }
 ```
 
+`/stats.json` is the operator's view and is not meant to be public: it needs a login
+from off-box once credentials are set. A public liveness probe and a public status
+route with the advertised figures only are served by the Meta API HTTP listener
+(`GET /healthz`, `GET /status`); see [meta-api.md](meta-api.md#health-and-status).
+
 The `gossip*` fields are explained in `server-gossip.md` §5; the response carries
 further sections (filters, meta search, update check) not shown here.
 

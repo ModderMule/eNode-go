@@ -60,6 +60,10 @@ involved.
   `/account`, even with `http.enabled: false`. In that case it serves only the
   website, not the API.
 
+  Whenever this listener runs it also serves `GET /healthz` and, unless
+  `http.status: false`, the public `GET /status`. See
+  [Health and status](#health-and-status).
+
 `tls.certFile` / `tls.keyFile` serve both listeners over TLS. With
 `tls.advertiseFingerprint`, the SPKI pin of the certificate
 (`sha256/<base64>`) is sent as `ST_META_API_FP` (0x9C), so a client can trust a
@@ -452,6 +456,53 @@ Accounts are stored by the configured storage engine, behind
 | `memory` | In process | Lost on restart, which is logged as a warning. Durable (paid) steps refuse to start on it. |
 
 Nothing is created unless accounts are enabled.
+
+## Health and status
+
+Two unauthenticated routes on the HTTP listener, for a supervisor, a monitoring
+system or a server list. They are served whenever that listener runs, including
+when it is up only for the account website. The gRPC listener does not serve them.
+
+| Route | Returns |
+|---|---|
+| `GET /healthz` | `{"status":"ok","now":<unix seconds>}`. Liveness only: it answers as long as the listener does and reads nothing. |
+| `GET /status` | The server's public figures, below. At most 60 requests per minute per client address, then `429`. Off with `metaApi.http.status: false`. |
+
+```json
+{
+  "name": "eNode",
+  "description": "...",
+  "version": "v0.3.6",
+  "users": 0,
+  "lowIDUsers": 0,
+  "files": 0,
+  "servers": 0,
+  "maxUsers": 0,
+  "softFileLimit": 0,
+  "hardFileLimit": 0,
+  "uptimeSeconds": 6,
+  "now": 1790000000
+}
+```
+
+`/status` carries only what the server already tells every eD2K client. `users`,
+`lowIDUsers`, `files`, `maxUsers` and the two file limits are the values of
+`OP_SERVERSTATUS` and `OP_GLOBSERVSTATRES`, read from the same cached counters
+(`ServerRuntime.PublicStatus` in `ed2k/statsboost.go`), so `files` includes the meta
+search networks set to `countInServerStatus`. `servers` is the number of peers sent in
+`OP_SERVERLIST`. A reload of `name`, `description` or `files.*` shows up at once.
+
+The gossip, filter, Meta API and account counters are not here. They stay on the
+admin dashboard's `/stats.json`, which is loopback-only by default; see
+[admin-status-dashboard.md](admin-status-dashboard.md).
+
+Client addresses for the rate limit follow `metaApi.trustForwardedFor`. Both routes
+send `Cache-Control: no-store`.
+
+```bash
+curl -s localhost:4672/healthz
+curl -s localhost:4672/status
+```
 
 ## Dashboard
 

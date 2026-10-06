@@ -296,6 +296,9 @@ metaApi:
     # this listener also serves the account website (/account), even with this off.
     enabled: false
     listen: "0.0.0.0:4672"
+    # Public GET /status on this listener: name, version, uptime and the user, file
+    # and server counts clients are already sent. GET /healthz is served either way.
+    status: true
   metafileCache:
     maxBytes: 268435456            # 256 MiB of verified metafiles, least recently used evicted
     ttlSeconds: 3600

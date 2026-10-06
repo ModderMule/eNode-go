@@ -27,7 +27,7 @@
 - NAT 穿透服务端（`OP_VC_NAT_HEADER`、`OP_NAT_REGISTER`、`OP_NAT_SYNC2`）：双栈 UDP 打洞，支持 LowID↔LowID 与被防火墙隔离的 IPv6↔IPv6 对端（每个客户端保存一个 v4 和一个 v6 候选端点，优先 v6）；由 `natTraversal.ipv6` 控制（默认开启，需 `ipv6.enabled`）。注册表以用户 hash 为键、与登录无关，因此 `natTraversal.serverIndependent`（默认开启）可为**位于不同服务器或未连接任何服务器**的客户端配对——跨服务器 / 无服务器 LowID↔LowID——并通过 `SRV_TCPFLG_NAT_RENDEZVOUS (0x8000)` 及 `OP_SERVERIDENT` 中的 NAT 端口标签对外通告。详见 [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md) §9。
 - IPv6 双栈：接受 IPv6 登录、记录并校验各客户端的 IPv6、发布 IPv6 源，并在 `OP_SERVERLIST` 中通告 IPv6 对端服务器（兼容 eMuleAI/eMuleQt 的 `CT_MOD_*`）。详见 [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md)。设置 `ipv6.enabled: false` 可恢复纯 IPv4 行为。
 - 支持大于 4 GiB 的文件
-- 管理状态面板：仅用 Go 标准库（零第三方依赖）通过 HTTP 提供的单页自包含 HTML，展示实时的客户端 / 文件 / LowID / 对等服务器数量、监听端口、已启用特性、版本与运行时长。默认开启且仅绑定 `127.0.0.1`；实时数据轮询 `/stats.json` 接口。详见 [`docs/admin-status-dashboard.md`](docs/admin-status-dashboard.md)。
+- 管理状态面板：仅用 Go 标准库（零第三方依赖）通过 HTTP 提供的单页自包含 HTML，展示实时的客户端 / 文件 / LowID / 对等服务器数量、监听端口、已启用特性、版本与运行时长。默认开启且仅绑定 `127.0.0.1`；实时数据轮询 `/stats.json` 接口。详见 [`docs/admin-status-dashboard.md`](docs/admin-status-dashboard.md)。公开的 `GET /healthz` 与 `GET /status` 由 Meta API 的 HTTP 监听端口提供，详见 [`docs/meta-api.md`](docs/meta-api.md#health-and-status)。
 - 内存引擎快照：可将内存中的索引按周期及关闭时持久化为 gob 文件，并在启动时重新载入，
   重启后无需再依赖客户端重新上报来重建索引。默认关闭；恢复后的状态与 mysql 引擎重启后
   完全一致。详见 [`docs/storage-snapshot.md`](docs/storage-snapshot.md)。

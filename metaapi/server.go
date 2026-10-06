@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"enode/accounts"
@@ -43,7 +44,34 @@ type ServerConfig struct {
 	TrustForwardedFor bool
 	// MaxMetafileBytes bounds a response.
 	MaxMetafileBytes int
+	// PublicStatus serves GET /status on the HTTP listener. GET /healthz is served
+	// whenever that listener runs.
+	PublicStatus bool
 }
+
+// Status is the body of GET /status. It carries only what the server already tells
+// every eD2K client: the counts are the advertised ones of OP_SERVERSTATUS and
+// OP_GLOBSERVSTATRES, not the dashboard's.
+type Status struct {
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	Version       string `json:"version"`
+	Users         int    `json:"users"`
+	LowIDUsers    int    `json:"lowIDUsers"`
+	Files         int    `json:"files"`
+	Servers       int    `json:"servers"`
+	MaxUsers      uint32 `json:"maxUsers"`
+	SoftFileLimit uint32 `json:"softFileLimit"`
+	HardFileLimit uint32 `json:"hardFileLimit"`
+	UptimeSeconds int64  `json:"uptimeSeconds"`
+	// Now is Unix seconds, generated per request: a body a proxy kept shows as a
+	// timestamp that does not move.
+	Now int64 `json:"now"`
+}
+
+// statusPerMinute caps GET /status per client address. The figures are cached, so
+// this bounds noise, not cost.
+const statusPerMinute = 60
 
 // Server runs the listeners.
 type Server struct {
@@ -55,6 +83,10 @@ type Server struct {
 	http *http.Server
 
 	grpcAddr, httpAddr net.Addr
+
+	// status is the source behind GET /status; see SetStatus.
+	status      atomic.Pointer[func() Status]
+	statusLimit *ratelimit.Limiter
 }
 
 // grpcContentTypes are what the gRPC listener accepts. The Connect protocol and its
@@ -63,7 +95,7 @@ var grpcContentTypes = []string{"application/grpc", "application/grpc-web"}
 
 // NewServer builds the listeners. web may be nil when accounts are off.
 func NewServer(cfg ServerConfig, svc *Service, web *accounts.Web) (*Server, error) {
-	s := &Server{cfg: cfg, svc: svc, web: web}
+	s := &Server{cfg: cfg, svc: svc, web: web, statusLimit: ratelimit.New(statusPerMinute)}
 	if cfg.CertFile != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
@@ -140,6 +172,13 @@ func (s *Server) Fingerprint() string {
 	return "sha256/" + base64.StdEncoding.EncodeToString(sum[:])
 }
 
+// SetStatus attaches the source of GET /status. It is separate from NewServer
+// because the server is built before the eD2K runtime the figures come from. Until
+// it is called the route answers 503. fn must not block on I/O.
+func (s *Server) SetStatus(fn func() Status) {
+	s.status.Store(&fn)
+}
+
 // connectHandler serves both services over every protocol connect speaks.
 func (s *Server) connectHandler() http.Handler {
 	srv := connect.NewServer()
@@ -154,9 +193,13 @@ func (s *Server) connectHandler() http.Handler {
 }
 
 // httpHandler is the plain-HTTP listener: the API when enabled, the account
-// website when accounts are on.
+// website when accounts are on, and the health and status routes either way.
 func (s *Server) httpHandler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	if s.cfg.PublicStatus {
+		mux.HandleFunc("GET /status", s.handleStatus)
+	}
 	if s.cfg.HTTPAPI {
 		api := s.connectHandler()
 		mux.Handle("/enode.meta.v1.MetaApi/", api)
@@ -303,4 +346,32 @@ func httpStatus(code connect.Code) int {
 	default:
 		return http.StatusServiceUnavailable
 	}
+}
+
+// handleHealthz is liveness for a supervisor: it answers as long as the listener
+// does, and reads nothing.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"status": "ok", "now": time.Now().Unix()})
+}
+
+// handleStatus serves GET /status to anyone, rate-limited per client address.
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.statusLimit.Allow(ratelimit.ClientIP(r, s.cfg.TrustForwardedFor)) {
+		writeHTTPError(w, connect.NewError(connect.CodeResourceExhausted, "too many requests"))
+		return
+	}
+	fn := s.status.Load()
+	if fn == nil {
+		writeHTTPError(w, connect.NewError(connect.CodeUnavailable, "the server is starting"))
+		return
+	}
+	st := (*fn)()
+	st.Now = time.Now().Unix()
+	writeJSON(w, st)
+}
+
+func writeJSON(w http.ResponseWriter, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(body)
 }

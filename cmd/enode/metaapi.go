@@ -35,6 +35,8 @@ type metaAPIRuntime struct {
 	searcher *meta.Searcher
 	// searchMode is "off", "public" or "account", for the dashboard.
 	searchMode string
+	// publicStatus is whether the HTTP listener serves GET /status.
+	publicStatus bool
 }
 
 // buildMetaAPI builds the Meta API when metaApi.enabled is on, or returns nil.
@@ -77,7 +79,7 @@ func buildMetaAPI(ctx context.Context, cfg config.Config, engine storage.Engine,
 		time.Duration(c.MetafileCache.TTLSeconds)*time.Second, time.Duration(c.MetafileCache.NegativeTTLSeconds)*time.Second)
 
 	tls := c.TLSEnabled()
-	rt := &metaAPIRuntime{fetcher: fetcher, accounts: accts}
+	rt := &metaAPIRuntime{fetcher: fetcher, accounts: accts, publicStatus: c.PublicStatusEnabled()}
 	if c.GRPCEnabled() {
 		rt.grpcURL = metaAPIURL(c.AdvertiseURL, c.GRPC.Listen, tls, advertisedIP)
 	}
@@ -125,6 +127,7 @@ func buildMetaAPI(ctx context.Context, cfg config.Config, engine storage.Engine,
 		KeyFile:           c.TLS.KeyFile,
 		TrustForwardedFor: c.TrustForwardedFor,
 		MaxMetafileBytes:  c.MaxMetafileBytes,
+		PublicStatus:      c.PublicStatusEnabled(),
 	}
 	if c.GRPCEnabled() {
 		scfg.GRPCListen = c.GRPC.Listen
@@ -172,11 +175,35 @@ func (rt *metaAPIRuntime) start(ctx context.Context) (func(), error) {
 		mode = fmt.Sprintf("accounts (%d registration steps, register at %s)", len(rt.accounts.Steps()), rt.accounts.RegistrationURL())
 	}
 	logging.Infof("meta api: grpc=%s http=%s mode=%s", orOff(rt.grpcURL), orOff(rt.httpURL), mode)
+	if addr := rt.server.HTTPAddr(); addr != nil {
+		logging.Infof("meta api: /healthz on %s, public /status=%t", addr, rt.publicStatus)
+	}
 	return func() {
 		cancel()
 		<-done
 		rt.server.Close()
 	}, nil
+}
+
+// setStatus attaches the eD2K runtime as the source of the public GET /status. Read
+// through the runtime on every request, so a config reload shows up.
+func (rt *metaAPIRuntime) setStatus(runtime *ed2k.ServerRuntime, startTime time.Time) {
+	rt.server.SetStatus(func() metaapi.Status {
+		st := runtime.PublicStatus()
+		return metaapi.Status{
+			Name:          st.Name,
+			Description:   st.Description,
+			Version:       ed2k.ENodeVersionStr,
+			Users:         st.Users,
+			LowIDUsers:    st.LowIDUsers,
+			Files:         st.Files,
+			Servers:       st.Servers,
+			MaxUsers:      st.MaxUsers,
+			SoftFileLimit: st.SoftFileLimit,
+			HardFileLimit: st.HardFileLimit,
+			UptimeSeconds: int64(time.Since(startTime).Seconds()),
+		}
+	})
 }
 
 // adminStats is the dashboard's view of the API. Nil-receiver safe: nil when off.

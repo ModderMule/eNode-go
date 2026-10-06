@@ -38,7 +38,7 @@ type MetaAPIConfig struct {
 
 	TLS  MetaAPITLSConfig      `yaml:"tls"`
 	GRPC MetaAPIListenerConfig `yaml:"grpc"`
-	HTTP MetaAPIListenerConfig `yaml:"http"`
+	HTTP MetaAPIHTTPConfig     `yaml:"http"`
 
 	MetafileCache MetaAPICacheConfig `yaml:"metafileCache"`
 	// FetchTimeoutMs bounds one FetchMetaFile call to a catalogue daemon.
@@ -94,6 +94,15 @@ type MetaAPITLSConfig struct {
 type MetaAPIListenerConfig struct {
 	Enabled *bool  `yaml:"enabled"`
 	Listen  string `yaml:"listen"`
+}
+
+// MetaAPIHTTPConfig is the plain HTTP listener: a listener, plus what only it serves.
+type MetaAPIHTTPConfig struct {
+	Enabled *bool  `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
+	// Status serves the public GET /status whenever this listener runs. *bool,
+	// defaults on. GET /healthz is served either way.
+	Status *bool `yaml:"status"`
 }
 
 // MetaAPICacheConfig bounds the metafile cache by bytes rather than entries: a .nzb
@@ -152,6 +161,12 @@ func (c MetaAPIConfig) HTTPAPIEnabled() bool {
 // for the account website.
 func (c MetaAPIConfig) HTTPListenerEnabled() bool {
 	return c.HTTPAPIEnabled() || (c.Enabled && c.Accounts.Enabled)
+}
+
+// PublicStatusEnabled reports whether the HTTP listener serves GET /status,
+// defaulting to on whenever that listener runs.
+func (c MetaAPIConfig) PublicStatusEnabled() bool {
+	return c.HTTPListenerEnabled() && boolOrDefault(c.HTTP.Status, true)
 }
 
 // TLSEnabled reports whether the listeners serve TLS.

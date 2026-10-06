@@ -49,6 +49,8 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   LowID / peer-server counts, listening ports, enabled features, version and uptime.
   Default on and bound to `127.0.0.1` only; live figures poll a `/stats.json`
   endpoint. See [`docs/admin-status-dashboard.md`](docs/admin-status-dashboard.md).
+  A public `GET /healthz` and `GET /status` are served by the Meta API HTTP listener;
+  see [`docs/meta-api.md`](docs/meta-api.md#health-and-status).
 - IPv6 dual-stack: accepts IPv6 client logins, records and verifies each client's
   IPv6, publishes IPv6 sources, and advertises IPv6 peer servers in `OP_SERVERLIST`
   (eMuleAI/eMuleQt `CT_MOD_*` compatible). See

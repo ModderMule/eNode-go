@@ -391,3 +391,117 @@ func TestRateLimit(t *testing.T) {
 		t.Fatalf("want two successes then resource_exhausted, got %v", errs)
 	}
 }
+
+// startStatusServer runs a Server whose HTTP listener serves no API and no website,
+// the least a listener can be: only the health and status routes.
+func startStatusServer(t *testing.T, publicStatus bool) *Server {
+	t.Helper()
+	svc := NewService(ServiceConfig{MaxMetafileBytes: 1 << 20}, newTestFetcher(newFakeSource()), nil)
+	srv, err := NewServer(ServerConfig{GRPCListen: "127.0.0.1:0", HTTPListen: "127.0.0.1:0",
+		MaxMetafileBytes: 1 << 20, PublicStatus: publicStatus}, svc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Close)
+	t.Cleanup(http.DefaultClient.CloseIdleConnections)
+	return srv
+}
+
+func httpGet(t *testing.T, url string) (int, string, http.Header) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, strings.TrimSpace(string(b)), resp.Header
+}
+
+func TestHealthzAndStatus(t *testing.T) {
+	srv := startStatusServer(t, true)
+	base := "http://" + srv.HTTPAddr().String()
+
+	code, body, hdr := httpGet(t, base+"/healthz")
+	t.Logf("input: GET /healthz output: %d %s", code, body)
+	var health struct {
+		Status string `json:"status"`
+		Now    int64  `json:"now"`
+	}
+	if err := json.Unmarshal([]byte(body), &health); err != nil {
+		t.Fatal(err)
+	}
+	if code != 200 || health.Status != "ok" || health.Now == 0 || hdr.Get("Cache-Control") != "no-store" {
+		t.Fatalf("healthz: %d %s cache-control=%q", code, body, hdr.Get("Cache-Control"))
+	}
+
+	// No source attached yet: the server is still starting.
+	code, body, _ = httpGet(t, base+"/status")
+	t.Logf("input: GET /status before SetStatus output: %d %s", code, body)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("status before SetStatus: %d, want 503", code)
+	}
+
+	want := Status{Name: "eNode", Description: "test", Version: "v9.9.9", Users: 40005, LowIDUsers: 1002,
+		Files: 5000701, Servers: 3, MaxUsers: 1000, SoftFileLimit: 2000, HardFileLimit: 3000, UptimeSeconds: 42}
+	srv.SetStatus(func() Status { return want })
+	code, body, hdr = httpGet(t, base+"/status")
+	t.Logf("input: GET /status output: %d %s", code, body)
+	var got Status
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Now == 0 {
+		t.Fatalf("status carries no timestamp: %s", body)
+	}
+	got.Now = 0
+	if code != 200 || got != want || hdr.Get("Cache-Control") != "no-store" {
+		t.Fatalf("status: %d %+v, want %+v", code, got, want)
+	}
+	for _, key := range []string{`"lowIDUsers"`, `"softFileLimit"`, `"uptimeSeconds"`} {
+		if !strings.Contains(body, key) {
+			t.Fatalf("status JSON lacks %s: %s", key, body)
+		}
+	}
+
+	// The listener serves nothing else: no API was enabled on it.
+	if code, _, _ = httpGet(t, base+"/caps"); code != http.StatusNotFound {
+		t.Fatalf("/caps on a listener without the API: %d, want 404", code)
+	}
+
+	// The gRPC listener stays gRPC only.
+	for _, path := range []string{"/healthz", "/status"} {
+		code, _, _ = httpGet(t, "http://"+srv.GRPCAddr().String()+path)
+		t.Logf("input: GET %s on the gRPC listener output: %d", path, code)
+		if code != http.StatusUnsupportedMediaType {
+			t.Fatalf("%s on the gRPC listener: %d, want 415", path, code)
+		}
+	}
+
+	// Two requests were spent above; the rest of the minute's budget, then one more.
+	last := 0
+	for i := 2; i <= statusPerMinute; i++ {
+		last, _, _ = httpGet(t, base+"/status")
+	}
+	health429, _, _ := httpGet(t, base+"/healthz")
+	t.Logf("input: request %d to /status within a minute output: %d; /healthz after it: %d", statusPerMinute+1, last, health429)
+	if last != http.StatusTooManyRequests || health429 != 200 {
+		t.Fatalf("rate limit: /status %d (want 429), /healthz %d (want 200)", last, health429)
+	}
+}
+
+func TestStatusRouteOff(t *testing.T) {
+	srv := startStatusServer(t, false)
+	srv.SetStatus(func() Status { return Status{Name: "eNode"} })
+	base := "http://" + srv.HTTPAddr().String()
+
+	status, _, _ := httpGet(t, base+"/status")
+	health, _, _ := httpGet(t, base+"/healthz")
+	t.Logf("input: PublicStatus=false output: /status %d, /healthz %d", status, health)
+	if status != http.StatusNotFound || health != 200 {
+		t.Fatalf("/status %d (want 404), /healthz %d (want 200)", status, health)
+	}
+}
