@@ -37,6 +37,8 @@ type metaAPIRuntime struct {
 	searchMode string
 	// publicStatus is whether the HTTP listener serves GET /status.
 	publicStatus bool
+	// tls is whether the listeners serve TLS, for the logged local URLs.
+	tls bool
 }
 
 // buildMetaAPI builds the Meta API when metaApi.enabled is on, or returns nil.
@@ -79,7 +81,7 @@ func buildMetaAPI(ctx context.Context, cfg config.Config, engine storage.Engine,
 		time.Duration(c.MetafileCache.TTLSeconds)*time.Second, time.Duration(c.MetafileCache.NegativeTTLSeconds)*time.Second)
 
 	tls := c.TLSEnabled()
-	rt := &metaAPIRuntime{fetcher: fetcher, accounts: accts, publicStatus: c.PublicStatusEnabled()}
+	rt := &metaAPIRuntime{fetcher: fetcher, accounts: accts, publicStatus: c.PublicStatusEnabled(), tls: tls}
 	if c.GRPCEnabled() {
 		rt.grpcURL = metaAPIURL(c.AdvertiseURL, c.GRPC.Listen, tls, advertisedIP)
 	}
@@ -176,7 +178,12 @@ func (rt *metaAPIRuntime) start(ctx context.Context) (func(), error) {
 	}
 	logging.Infof("meta api: grpc=%s http=%s mode=%s", orOff(rt.grpcURL), orOff(rt.httpURL), mode)
 	if addr := rt.server.HTTPAddr(); addr != nil {
-		logging.Infof("meta api: /healthz on %s, public /status=%t", addr, rt.publicStatus)
+		base := metaAPILocalURL(addr, rt.tls)
+		status := "off"
+		if rt.publicStatus {
+			status = base + "/status (public server name, user and file counts, uptime)"
+		}
+		logging.Infof("meta api: health %s/healthz (liveness probe), status %s", base, status)
 	}
 	return func() {
 		cancel()
@@ -291,4 +298,21 @@ func orOff(s string) string {
 		return "off"
 	}
 	return s
+}
+
+// metaAPILocalURL is the bound HTTP listener as a URL to open from this machine:
+// a wildcard bind becomes localhost, so the logged link is clickable.
+func metaAPILocalURL(addr net.Addr, tls bool) string {
+	hostPort := addr.String()
+	if host, port, err := net.SplitHostPort(hostPort); err == nil {
+		if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+			host = "localhost"
+		}
+		hostPort = net.JoinHostPort(host, port)
+	}
+	scheme := "http"
+	if tls {
+		scheme = "https"
+	}
+	return scheme + "://" + hostPort
 }
