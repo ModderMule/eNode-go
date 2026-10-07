@@ -445,6 +445,11 @@ func run(ctx context.Context, configPath string) error {
 		if cfg.SupportCrypt && cfg.UDP.PortObfuscated != 0 {
 			natHandler.SetRegisterEndpointForLocalPort(cfg.UDP.PortObfuscated, cfg.UDP.PortObfuscated)
 		}
+		// Clients are told the gossip port as portUDPOBF (see advertisedUDPObfPort), and that
+		// socket runs the same obfuscated handler, so a registration can arrive there too.
+		if cfg.Gossip.EnabledOrDefault() && cfg.UDP.PortGossip != 0 && cfg.UDP.PortGossip != cfg.UDP.PortObfuscated {
+			natHandler.SetRegisterEndpointForLocalPort(cfg.UDP.PortGossip, cfg.UDP.PortGossip)
+		}
 		// Server-independent (cross-server / serverless) rendezvous. When off, the
 		// membership predicate restricts SYNC2 pairing to user hashes currently logged
 		// into this server (Storage.IsConnected, backed by a by-hash index).
@@ -516,16 +521,17 @@ func run(ctx context.Context, configPath string) error {
 		logging.Infof("listening: udp-obfuscated %s:%d", udpCryptCfg.Address, udpCryptCfg.Port)
 	}
 
-	// Server-to-server gossip normally sends from the tcp+12 obfuscated socket above
-	// rather than a socket of its own, because two of eserver's rules have to hold
-	// together: the source port of our obfuscated frames must equal the portUDPOBF we
-	// advertise ("continue because portUDPobf(%d) != sin_port(%d)"), and it recovers our
-	// TCP port from that source port by subtracting 12. Only tcp+12 satisfies both — from
-	// tcp+14 it books our frames against a server that does not exist and never counts us
-	// as working. See config.setDefaults and docs/server-gossip.md §8.
+	// Server-to-server gossip sends from a socket of its own at udp.portGossip, tcp+14 by
+	// default, which is also the portUDPOBF we advertise. Two of eserver's rules decide
+	// that: the source port of our obfuscated frames must equal the portUDPOBF we advertise
+	// ("continue because portUDPobf(%d) != sin_port(%d)"), and it decrypts a reply arriving
+	// from a peer's tcp+12 with the crypt-ping challenge rather than the ServerKey, so a
+	// name:desc reply sent from the tcp+12 socket above is dropped and we are not counted
+	// as working. See config.setDefaults and docs/server-gossip.md §1.
 	//
-	// A separate socket is still bound when the operator sets a different udp.portGossip,
-	// or when obfuscation is off and there is therefore no tcp+12 socket to share.
+	// The tcp+12 socket is shared instead only when the operator sets udp.portGossip to
+	// udp.portObfuscated. Replies to a peer server are then keyed on the challenge of its
+	// last crypt-ping, which is the key eserver expects from that port (ReplyKeyFor).
 	//
 	// The handler itself was attached to the runtime before any listener bound (see
 	// buildGossipHandler above); only the sockets and timers start here, in
@@ -707,14 +713,12 @@ func startServerMetPersistence(ctx context.Context, path string, every time.Dura
 // It must be the port gossip actually sends its obfuscated frames from, because a peer
 // checks our source port against this advertised value and skips us when the two disagree
 // — eserver logs exactly that: "continue because portUDPobf(%d) != sin_port(%d)". That
-// port is udp.portGossip, which defaults to the tcp+12 obfuscated socket for the reason
-// given in config.setDefaults: eserver also derives our TCP port from the same source port
-// by subtracting 12.
+// port is udp.portGossip, tcp+14 by default as on Lugdunum, for the reason given in
+// config.setDefaults: eserver decrypts a reply from this port with our ServerKey and one
+// from tcp+12 with the crypt-ping challenge.
 //
-// This is one place we deliberately diverge from Lugdunum's own configuration. eserver
-// advertises portUDPOBF = port+14 while sending its obfuscated frames from port+12, so its
-// advertised value and its source port do not agree — a peer that enforced its own rule
-// against it would skip it. We publish the port we really use instead.
+// Clients read the same field, so they are told this port as well; the gossip socket runs
+// the obfuscated client handler, and tcp+12 stays bound for the bootstrap crypt-ping.
 //
 // With gossip off the client obfuscated port is published exactly as before.
 func advertisedUDPObfPort(cfg config.Config) uint16 {
@@ -931,7 +935,10 @@ func adminMetaStats(s *meta.Searcher) (cacheEntries int, out []admin.MetaNetwork
 		return 0, out
 	}
 	for _, st := range s.Stats() {
-		infoAt, liveOKAt := "", ""
+		infoAt, liveOKAt, seenSince := "", "", ""
+		if !st.NetworkUsersSeenSince.IsZero() {
+			seenSince = st.NetworkUsersSeenSince.UTC().Format(time.RFC3339)
+		}
 		if !st.InfoAt.IsZero() {
 			infoAt = st.InfoAt.Format(time.RFC3339)
 		}
@@ -961,6 +968,11 @@ func adminMetaStats(s *meta.Searcher) (cacheEntries int, out []admin.MetaNetwork
 			NetworkUsers:             st.NetworkUsers,
 			NetworkUsersExperimental: st.NetworkUsersExperimental,
 			NetworkFiles:             st.NetworkFiles,
+
+			NetworkUsersSeen:       st.NetworkUsersSeen,
+			NetworkUsersSeenDay:    st.NetworkUsersSeenDay,
+			NetworkUsersSeenWindow: uint64(st.NetworkUsersSeenWindow / time.Second),
+			NetworkUsersSeenSince:  seenSince,
 
 			FeedReleases:     st.FeedReleases,
 			FeedRows:         st.FeedRows,

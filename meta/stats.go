@@ -71,6 +71,16 @@ type NetworkStats struct {
 	NetworkUsersExperimental uint64
 	NetworkFiles             uint64
 
+	// NetworkUsersSeen is how many users the daemon has seen in its network over
+	// NetworkUsersSeenWindow, and NetworkUsersSeenDay over the last 24 hours. They
+	// count node ids, so a user whose id changed is counted once for each. A zero
+	// window says the daemon does not count them. NetworkUsersSeenSince is when it
+	// began counting, the zero time when unknown.
+	NetworkUsersSeen       uint64
+	NetworkUsersSeenDay    uint64
+	NetworkUsersSeenWindow time.Duration
+	NetworkUsersSeenSince  time.Time
+
 	FeedReleases int
 	FeedRows     int
 	FeedCursor   uint64
@@ -298,6 +308,12 @@ func (src *source) stats() NetworkStats {
 	st.NetworkUsers = info.GetNetworkUsers()
 	st.NetworkUsersExperimental = info.GetNetworkUsersExperimental()
 	st.NetworkFiles = info.GetNetworkFiles()
+	st.NetworkUsersSeen = info.GetNetworkUsersSeen()
+	st.NetworkUsersSeenDay = info.GetNetworkUsersSeenDay()
+	st.NetworkUsersSeenWindow = time.Duration(info.GetNetworkUsersSeenWindow()) * time.Second
+	if since := info.GetNetworkUsersSeenSince(); since > 0 {
+		st.NetworkUsersSeenSince = time.Unix(int64(since), 0)
+	}
 
 	if src.feed != nil {
 		fs := src.feed.Stats()

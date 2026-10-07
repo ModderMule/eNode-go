@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -146,7 +147,6 @@ func TestServerSearchBetweenTwoServers(t *testing.T) {
 	b := serverSearchTestConfig{name: "asking", tcpPort: freePort(t), udpPort: freePort(t), adminPort: freePort(t),
 		searchPort: freePort(t), metaPort: freePort(t), peerPort: a.searchPort, token: token}
 	startRun(t, a.write(t))
-	startRun(t, b.write(t))
 
 	url := fmt.Sprintf("http://127.0.0.1:%d", a.searchPort)
 	client := serverlink.NewClient(serverlink.ClientConfig{URL: url, Token: token})
@@ -189,7 +189,11 @@ func TestServerSearchBetweenTwoServers(t *testing.T) {
 		t.Fatalf("a caller without a token got %v, want %s", err, serverlink.CodeUnauthorized)
 	}
 
-	// The asking server walks the serving one on its own.
+	// The asking server starts only now that the serving one answers: a first walk
+	// that is refused is not retried within the time this test waits. It then walks
+	// the serving one on its own.
+	startRun(t, b.write(t))
+	waitListening(t, b.adminPort)
 	var asking *admin.ServerSearchStats
 	deadline = time.Now().Add(15 * time.Second)
 	for {
@@ -245,6 +249,23 @@ func TestServerSearchBetweenTwoServers(t *testing.T) {
 			len(e.GetMetaHash()) != 16 || e.GetPeers() != 3 || !found.GetTotalExact() {
 			t.Errorf("%s: unexpected entry %v", srv.name, e)
 		}
+	}
+}
+
+// waitListening waits until something accepts TCP connections on the local port.
+func waitListening(t *testing.T, port uint16) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		conn, err := net.DialTimeout("tcp4", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("nothing listens on port %d: %v", port, err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

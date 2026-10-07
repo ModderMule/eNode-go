@@ -56,7 +56,8 @@ func (s *ServerRuntime) GossipSearchPeers() []PeerServer {
 //     side.
 //  2. reply to the phase-2 bootstrap ping — key = the challenge we sent, direction 0xA5.
 //     No ServerKey exists yet at that point; obtaining one is the purpose of the exchange
-//     (srchybrid/UDPSocket.cpp:159-171).
+//     (srchybrid/UDPSocket.cpp:159-171). A peer whose gossip shares its tcp+12 socket
+//     keys every reply this way (ReplyKeyFor), possibly on the previous round's value.
 //
 // Without these, both replies fell through to the crypt-ping heuristic or the
 // unsupported-protocol log and were silently dropped — so a peer never got past phase 2
@@ -71,7 +72,7 @@ func (s *ServerRuntime) decryptPeerReply(data []byte, from net.IP) []byte {
 			return reply
 		}
 	}
-	if challenge, ok := g.PingChallengeFor(from); ok {
+	for _, challenge := range g.PingChallengesFor(from) {
 		if reply := NewUDPCrypt(true, challenge).DecryptFromServer(data); len(reply) > 0 && reply[0] == PrED2K {
 			return reply
 		}
@@ -205,12 +206,16 @@ func (s *ServerRuntime) udpServerDescRes(b *Buffer, remote *net.UDPAddr, module 
 // Verified only. An unverified entry is one we have not completed a handshake with, so
 // propagating it would spread addresses we cannot vouch for — precisely the behaviour
 // that makes a stale peer list circulate around a mesh forever.
+//
+// The requester itself is left out. It learns nothing from its own address, and a peer
+// without a dependable self-check takes the entry at face value: eserver added itself to
+// its table, pinged itself and counted the result among its working servers.
 func (s *ServerRuntime) sendPeerList(remote *net.UDPAddr, conn UDPReplyConn, wantIPv6 bool, module string) {
 	g := s.gossip()
 	if g == nil {
 		return
 	}
-	peers := g.Verified()
+	peers := withoutPeerIP(g.Verified(), remote.IP)
 	var packet *Buffer
 	var err error
 	if wantIPv6 {
@@ -228,8 +233,9 @@ func (s *ServerRuntime) sendPeerList(remote *net.UDPAddr, conn UDPReplyConn, wan
 	}
 	// Sent through the same crypt the peer used to reach us: it holds the ServerKey we
 	// published for its address, so this is the key it will decrypt with. Direction 0xA5
-	// here, since on this frame we are the server answering.
-	crypt := NewUDPCrypt(true, deriveUDPKey(s.udpSecret(), remote.IP))
+	// here, since on this frame we are the server answering. peerReplyCrypt swaps the key
+	// when the reply leaves the shared tcp+12 socket.
+	crypt := s.peerReplyCrypt(remote, NewUDPCrypt(true, deriveUDPKey(s.udpSecret(), remote.IP)))
 	_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
 }
 
@@ -317,4 +323,17 @@ func ParseServerDesc(b *Buffer) (ServerDesc, error) {
 	// is what the admission test actually requires.
 	desc, _ := b.GetString()
 	return ServerDesc{Name: name, Desc: desc}, nil
+}
+
+// withoutPeerIP returns peers minus every entry at ip. Matched on the address alone, as
+// findByIPLocked does: one server per IP is what the rest of the peer table assumes.
+func withoutPeerIP(peers []PeerAddr, ip net.IP) []PeerAddr {
+	want := NormalizeIP(ip).String()
+	out := make([]PeerAddr, 0, len(peers))
+	for _, p := range peers {
+		if NormalizeIP(p.IP).String() != want {
+			out = append(out, p)
+		}
+	}
+	return out
 }

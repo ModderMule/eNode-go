@@ -457,9 +457,11 @@ for an IPv6 requester, which has no 4-byte form — those learn their address fr
 
 With `gossip.enabled`, `udpPortObf` advertises `udp.portGossip`, because a peer checks the
 source port of our obfuscated frames against this value. That port defaults to
-`udp.portObfuscated` (`tcp.port + 12`) and shares the same socket, so in practice the
-advertised value is unchanged from a gossip-less server — `tcp.port + 14` was tried and
-does not work, since Lugdunum reads a peer's TCP port as this value minus 12. See
+`tcp.port + 14` on a socket of its own, so a client of a gossiping server is told
+`tcp.port + 14` and one of a gossip-less server `tcp.port + 12`; both sockets run the same
+obfuscated handler, and `tcp.port + 12` stays bound for the bootstrap crypt-ping. The two
+were one socket for a while, which a Lugdunum peer cannot work with — it decrypts a reply
+from `tcp.port + 12` with the ping challenge instead of our ServerKey. See
 `server-gossip.md` §1.
 | `OP_SERVERDESCRES` (old) | Server -> Client | `name(string) + description(string)` |
 | `OP_SERVERDESCRES` (extended) | Server -> Client | `challenge(uint32) + tags` |

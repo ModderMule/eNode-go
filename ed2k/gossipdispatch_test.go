@@ -2,6 +2,8 @@ package ed2k
 
 import (
 	"net"
+	"reflect"
+	"sort"
 	"testing"
 
 	"enode/storage"
@@ -443,5 +445,175 @@ func TestGossipSeedsFromServersFiltersJunk(t *testing.T) {
 	t.Logf("output: %v", got)
 	if len(got) != 2 {
 		t.Fatalf("got %d seeds, want 2 (the malformed IP, port 0 and empty entries dropped)", len(got))
+	}
+}
+
+// udpRecorder is a UDPReplyConn that keeps what the dispatcher wrote, bound (as far as the
+// dispatcher can tell) to localPort.
+type udpRecorder struct {
+	localPort int
+	sent      [][]byte
+}
+
+func (c *udpRecorder) WriteToUDP(b []byte, _ *net.UDPAddr) (int, error) {
+	c.sent = append(c.sent, append([]byte(nil), b...))
+	return len(b), nil
+}
+
+func (c *udpRecorder) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.IPv4zero, Port: c.localPort}
+}
+
+// requestPeerList sends an obfuscated 0xA4 from `from` and returns the addresses in the
+// 0xA1 that comes back, decrypted with the key the requester holds for us.
+func requestPeerList(t *testing.T, rt *ServerRuntime, from string) []string {
+	t.Helper()
+	remote := &net.UDPAddr{IP: net.ParseIP(from), Port: 4675}
+	key := deriveUDPKey(LegacyUDPSecret(rt.udp().UDPServerKey), remote.IP)
+	req, err := BuildServerListReq2Packet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := &udpRecorder{localPort: 5569}
+	rt.UDPHandler(true)(NewUDPCrypt(true, key).EncryptAsClient(req.Bytes()), remote, conn)
+	if len(conn.sent) != 1 {
+		t.Fatalf("request from %s produced %d datagram(s), want 1", from, len(conn.sent))
+	}
+	plain := NewUDPCrypt(true, key).DecryptFromServer(conn.sent[0])
+	if len(plain) < 2 || plain[0] != PrED2K || plain[1] != OpServerListRes {
+		t.Fatalf("reply to %s is not a 0xA1: % x", from, plain)
+	}
+	entries, err := ParseServerListRes(NewBufferFromBytes(plain[2:]))
+	if err != nil {
+		t.Fatalf("parse the reply to %s: %v", from, err)
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.String())
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestPeerListOmitsRequester pins that a server asking for our list is not told about
+// itself. eserver takes such an entry at face value: it added itself to its own table,
+// pinged itself and counted the result among its working servers.
+func TestPeerListOmitsRequester(t *testing.T) {
+	rt, g := dispatchRuntime(t, true, nil)
+	a := PeerAddr{IP: net.ParseIP("203.0.113.20"), Port: 4661}
+	b := PeerAddr{IP: net.ParseIP("203.0.113.21"), Port: 4661}
+	g.mu.Lock()
+	for _, addr := range []PeerAddr{a, b} {
+		g.peers[addr.String()] = &PeerServer{Addr: addr, State: peerVerified, ServerKey: 1}
+	}
+	g.mu.Unlock()
+	t.Logf("input: verified peers %v", g.Verified())
+
+	for _, tc := range []struct {
+		from string
+		want []string
+	}{
+		{"203.0.113.20", []string{b.String()}},
+		{"203.0.113.21", []string{a.String()}},
+		// Not in the table at all: nothing to leave out.
+		{"203.0.113.22", []string{a.String(), b.String()}},
+	} {
+		got := requestPeerList(t, rt, tc.from)
+		t.Logf("input: obfuscated 0xA4 from %s", tc.from)
+		t.Logf("output: list names %v", got)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("list for %s = %v, want %v", tc.from, got, tc.want)
+		}
+	}
+}
+
+// TestSharedSocketRepliesUsePingChallenge covers gossip sharing the tcp+12 socket. A
+// Lugdunum peer decrypts whatever leaves that port with the challenge of its last
+// crypt-ping, so that is the key its name reply has to carry; everyone else, and every
+// layout with a gossip socket of its own, keeps the derived ServerKey.
+func TestSharedSocketRepliesUsePingChallenge(t *testing.T) {
+	const challenge = 0x0BADF00D
+	for _, tc := range []struct {
+		name          string
+		udpPortObf    uint16
+		knownPeer     bool
+		ping          bool
+		wantChallenge bool
+	}{
+		{"shared socket, peer that pinged", 5567, true, true, true},
+		{"shared socket, peer that never pinged", 5567, true, false, false},
+		{"shared socket, not a peer", 5567, false, true, false},
+		{"own gossip socket at tcp+14", 5569, true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, g := dispatchRuntime(t, true, func(c *GossipConfig) { c.UDPPortObf = tc.udpPortObf })
+			remote := &net.UDPAddr{IP: net.ParseIP("203.0.113.30"), Port: 40000}
+			derived := deriveUDPKey(LegacyUDPSecret(rt.udp().UDPServerKey), remote.IP)
+			handle := rt.UDPHandler(true)
+			conn := &udpRecorder{localPort: 5567}
+
+			if tc.ping {
+				// Before the peer is in the table, as when its ping beats its registration.
+				raw := []byte{0x0D, 0xF0, 0xAD, 0x0B}
+				handle(raw, remote, conn)
+				if len(conn.sent) != 1 {
+					t.Fatalf("crypt-ping produced %d datagram(s), want 1", len(conn.sent))
+				}
+				pong := NewUDPCrypt(true, challenge).DecryptFromServer(conn.sent[0])
+				if len(pong) < 2 || pong[1] != OpGlobServStatRes {
+					t.Fatalf("crypt-ping reply does not decrypt with the challenge: % x", pong)
+				}
+				conn.sent = nil
+			}
+			if tc.knownPeer {
+				addr := PeerAddr{IP: remote.IP, Port: 4661}
+				g.mu.Lock()
+				g.peers[addr.String()] = &PeerServer{Addr: addr, State: peerSeen}
+				g.mu.Unlock()
+			}
+
+			probe, err := MakeUDPPacket(PrED2K, []PacketItem{
+				{Type: TypeUint8, Value: OpServerDescReq},
+				{Type: TypeUint32, Value: uint32(0x7c7d7e7f)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle(NewUDPCrypt(true, derived).EncryptAsClient(probe.Bytes()), remote, conn)
+			if len(conn.sent) != 1 {
+				t.Fatalf("0xA2 produced %d datagram(s), want 1", len(conn.sent))
+			}
+			isDesc := func(key uint32) bool {
+				plain := NewUDPCrypt(true, key).DecryptFromServer(conn.sent[0])
+				return len(plain) >= 2 && plain[0] == PrED2K && plain[1] == OpServerDescRes
+			}
+			byChallenge, byDerived := isDesc(challenge), isDesc(derived)
+			t.Logf("input: portUDPOBF=%d knownPeer=%v crypt-ping(0x%08x)=%v, then an obfuscated 0xA2",
+				tc.udpPortObf, tc.knownPeer, uint32(challenge), tc.ping)
+			t.Logf("output: 0xA3 decrypts with the ping challenge=%v, with the derived ServerKey=%v",
+				byChallenge, byDerived)
+			if byChallenge != tc.wantChallenge || byDerived == tc.wantChallenge {
+				t.Errorf("reply keyed on challenge=%v derived=%v, want challenge=%v",
+					byChallenge, byDerived, tc.wantChallenge)
+			}
+		})
+	}
+}
+
+// TestInboundPingChallengesAreCapped pins that the challenge map cannot be grown by a
+// crypt-ping flood: it is writable by any sender.
+func TestInboundPingChallengesAreCapped(t *testing.T) {
+	_, g := dispatchRuntime(t, true, func(c *GossipConfig) { c.UDPPortObf = 5567 })
+	const senders = maxInboundChallenges + 500
+	for i := range senders {
+		g.NoteInboundPingChallenge(net.IPv4(10, 1, byte(i>>8), byte(i)), uint32(i+1))
+	}
+	g.mu.RLock()
+	held := len(g.inboundChallenges)
+	g.mu.RUnlock()
+	t.Logf("input: crypt-pings from %d distinct addresses", senders)
+	t.Logf("output: %d challenge(s) held, cap %d", held, maxInboundChallenges)
+	if held != maxInboundChallenges {
+		t.Errorf("held %d challenges, want exactly the cap %d", held, maxInboundChallenges)
 	}
 }

@@ -21,14 +21,14 @@ const serverVersionPrefix = "server version"
 // gate parses over UDP, our own identity over TCP — and neither string is free to move:
 //
 //	OP_SERVERIDENT 0x41         no version tag at all
-//	UDP 0xa3, challenge form    ed2k.GossipVersionStr, "17.14 (eNode-go v0.1.0)"
+//	UDP 0xa3, challenge form    ed2k.GossipVersionStr, "17.15 (eNode-go v0.1.0)"
 //	UDP 0xa3, legacy form       no tags, so no version either
 //	TCP OP_SERVERMESSAGE 0x38   "server version v0.1.0 (eNode-go)"
 //
 // The load-bearing assertion is the last one, and it is a guard rather than a description.
 // The tempting harmonisation — putting the compatibility claim in the login line too — is a
 // regression: srchybrid tries _stscanf("%u.%u") on the text after the prefix and, when that
-// *succeeds*, reformats the whole value to a bare "17.14" (ServerSocket.cpp:180-181),
+// *succeeds*, reformats the whole value to a bare "17.15" (ServerSocket.cpp:180-181),
 // dropping our name and leaving us indistinguishable from a real eserver. Our leading "v"
 // is what makes the scanf fail and the name survive. See §3.5a of
 // docs/ed2k-server-rust-comparison.local.md.

@@ -164,6 +164,7 @@ func TestStatsJSONReturnsSnapshot(t *testing.T) {
 		"liveCalls", "liveErrors", "liveTimeouts", "cacheHits", "cacheMisses", "udpSkipped",
 		"countInServerStatus", "counted",
 		"networkUsers", "networkUsersExperimental", "networkFiles",
+		"networkUsersSeen", "networkUsersSeenDay", "networkUsersSeenWindow", "networkUsersSeenSince",
 	} {
 		if _, ok := first[key]; !ok {
 			t.Errorf("stats.json meta[0] missing key %q", key)

@@ -20,8 +20,8 @@ with each port configurable.
 | `P` | 5555 | `port` | eD2K TCP — **and obfuscated TCP** |
 | `P+4` | 5559 | `serv_to_serv_sock` | main eD2K UDP: client queries **and** plain server↔server |
 | `P+8` | — | `port_4669` | wrong-port detection; not implemented here |
-| `P+12` | 5567 | `obfpingport` | obfuscated **bootstrap ping** — and our **gossip** socket |
-| `P+14` | — | `portUDPOBF` | eserver's own gossip listener; see the warning below |
+| `P+12` | 5567 | `obfpingport` | obfuscated **bootstrap ping** |
+| `P+14` | 5569 | `portUDPOBF` | obfuscated **gossip** socket, and the `portUDPOBF` we advertise |
 
 Three things about this layout are easy to get wrong:
 
@@ -39,28 +39,64 @@ pinned to it.
 (`srchybrid/ServerList.cpp:294`), and `GetServerByIPUDP` accepts a reply from `P+4`, the
 advertised port, or `P+12` (`ServerList.cpp:568-570`).
 
-**We gossip *from* `P+12`, and that is forced rather than chosen.** Two of eserver's rules
-have to hold at the same time, and only one port satisfies both:
+**We gossip *from* `P+14`, on a socket of its own, and it must not be the `P+12` one.** Two
+of eserver's rules decide this:
 
 1. It skips a peer whose obfuscated frames do not arrive from the `portUDPOBF` that peer
    advertised — `continue because portUDPobf(%d) != sin_port(%d)`. So the port we send from
    must be the port we publish.
-2. It recovers a peer's **TCP** port from the UDP source port of an obfuscated frame by
-   **subtracting 12**. Measured on a shared Docker network: a frame from our 5567 was booked
-   to 5555, one from 5569 to a nonexistent 5557, after which it logged `received a pong from
-   unknown server 203.0.113.3:5557`, its ping bookkeeping never confirmed, and we stayed out
-   of its records.
+2. It chooses the key for a reply by the reply's **source port** (`servgetrandkey`,
+   `0x42f380` in 17.15 x86_64). A datagram from the peer's `P+12` is decrypted with the
+   crypt-ping challenge it last sent that peer; one from the peer's advertised `portUDPOBF`
+   is decrypted with the peer's `ServerKey`. A sync mismatch is dropped without a log line.
 
-`P+14` — eserver's own `portUDPOBF` default — satisfies (1) and breaks (2), so it cannot be
-used. `udp.portGossip` therefore defaults to `P+12` and **shares** the obfuscated client
-socket rather than binding a second one. An explicit `udp.portGossip` still binds a separate
-socket and advertises it, for a peer implementation known to want that; against a real
-eserver it breaks the ping bookkeeping.
+Our `0xA3` name:desc reply is encrypted with our `ServerKey`. Sent from `P+12` it falls under
+the first branch of rule 2 and is dropped, and since that reply is the only thing that sets
+eserver's `working` flag, we were flagged only by accident: eserver asks for the name in
+*plaintext* on `P+4` for as long as it has no `ServerKey` for us, so we got through when our
+plain ping reply reached it before the obfuscated one and never otherwise. That race is
+what made `TestGossipPropagatesThroughEserver` fail against 17.14 and what made our name
+show up in eserver's table on "roughly one run in three".
 
-Note what this means about the reference implementation: eserver advertises `portUDPOBF =
-P+14` while sending its own obfuscated frames from `P+12`, so *its* advertised value and
-source port disagree — a peer enforcing rule (1) against it would skip it. We publish the
-port we actually use.
+From `P+14` both builds accept the obfuscated reply: whenever eserver 17.14 or 17.15 sends
+the obfuscated probe it logs `servdescreply(<ip>:5569)`, and it shows our name and version
+in `vs` and counts us in `working servers` whichever ping reply arrives first. (When the
+plain reply arrives first it is answered on the plain probe and does not ask again.)
+
+`udp.portGossip` therefore defaults to `P+14` and binds a second socket; `P+12` stays bound
+for the bootstrap crypt-ping. Operators must open the extra UDP port.
+
+#### Sharing the `P+12` socket
+
+Setting `udp.portGossip` equal to `udp.portObfuscated` still shares one socket, for a host
+that cannot open another port; the server logs a warning at startup. In that layout a
+reply to a peer server (`0x97`, `0xA3`, `0xA1`) is encrypted with the challenge of the
+crypt-ping that peer last sent us, which is the key eserver's first branch expects, and
+not with the ServerKey. The `0x97` payload still advertises the ServerKey. Measured
+2026-10-08 on 17.14 and 17.15: before, no `servdescreply(<ip>:5567)` was ever logged, ping
+counters read `7/0` and the propagation case failed on 17.14; after, both builds log it,
+counters read `0/0`, and all three gossip cases pass
+(`ENODE_INTEROP_GOSSIP_PORT=5567`).
+
+It remains the second choice, for four reasons:
+
+- it depends on having seen the peer's crypt-ping. eserver sends one when it first meets
+  us and then only every 3599 s, with its ServerKey as the challenge. We record whatever
+  arrives, so the rotation should be followed, but an hour-long link was not measured;
+- a crypt-ping is unauthenticated, so a datagram spoofed from a peer's address replaces the
+  recorded challenge and that peer cannot read our replies until it pings again;
+- an eMule *client* behind the same address as a peer server gets `0x97` and `0xA3`
+  replies it cannot decrypt;
+- an eNode peer pings every round and its workers may answer a frame before they have seen
+  that round's ping, so the receiving side also accepts the previous round's challenge.
+  A peer running a release older than this change accepts only the current one and can
+  lose a reply to that race; the next round repeats it.
+
+This default has been `P+12` before. It was moved there on a measurement that eserver
+recovers a peer's TCP port from the source port by subtracting 12 — a frame from our 5569
+was booked to a nonexistent 5557 and logged as `received a pong from unknown server`. That
+frame was the unsolicited `0x97` we used to volunteer (phase 3 below), which is gone; with
+it removed, nothing sent from `P+14` is misattributed on either build.
 
 A related invariant that has not changed: gossip must be sent through a *listener* socket,
 never a freshly dialled one. An ephemeral source port either gets us ignored or gets
@@ -187,7 +223,7 @@ Re-sent every round even for an already-keyed peer: a peer rotates its `ServerKe
 our observed address changes (`srchybrid/Server.cpp:279-291`), so re-pinging keeps it
 fresh.
 
-### Phase 3 — obfuscated gossip · our `P+12` → peer's advertised `portUDPOBF`
+### Phase 3 — obfuscated gossip · our `P+14` → peer's advertised `portUDPOBF`
 
 Every frame wrapped with the peer's `ServerKey`, direction `0x6B`:
 
@@ -197,6 +233,12 @@ E3 A4                                           SERVER_LIST_REQ2: "send me your 
 E3 A7                                           SERVER_LIST_REQ_IPV6 (ours), only if the peer advertised FlagIPv6
 ```
 
+The list we send in answer to a peer's own `0xA0`/`0xA4` holds our advertisable peers
+**minus the requester**. eserver has no dependable self-check: handed its own address it
+logged `Adding server <itself>`, pinged itself and counted the result among its working
+servers (17.14 and 17.15). It sends us lists that name us, too, which our own self-check
+rejects (§5).
+
 **No `0x97` is sent here, and its absence is deliberate.** An earlier version volunteered
 one whenever a peer had registered with us, echoing the challenge from that `0xA0`. A peer
 keeps a *separate* per-peer ping challenge, so eserver rejected every one — `server %s:%d
@@ -205,7 +247,7 @@ bookkeeping for us. A `0x97` is only ever correct as a *direct reply*, because o
 reply knows which challenge was asked; the inbound handler already sends those with the
 right value. Measured; see [`interop-docker-tests.md`](interop-docker-tests.md) §4.
 
-### Phase 4 — name:desc admission test · our `P+12`, obfuscated
+### Phase 4 — name:desc admission test · our `P+14`, obfuscated
 
 ```text
 E3 A2 │ challenge(4 LE)      OP_SERVERDESCREQ
@@ -231,12 +273,12 @@ and *both* of its peer-list replies are drawn from, so a peer below the bar is h
 memory, named in `vs`, pinged forever — and never mentioned to anyone. There is no
 rejection log for it, on either side.
 
-We therefore send `ed2k.GossipVersionStr` — `"17.14 (eNode-go v0.1.0)"` — as a **string**
+We therefore send `ed2k.GossipVersionStr` — `"17.15 (eNode-go v0.1.0)"` — as a **string**
 tag. Both tag forms end at the same `sscanf`, which stops at the space and ignores
 everything after the minor, so the compatibility claim and our real identity fit in one
 value. That matters because this reply is not gossip-only: the same handler answers a
 client's `0xA2`, and eMule shows the tag verbatim in its server-list Version column. The
-`17.14` prefix is a claim about protocol compatibility with a 2007 binary and never moves;
+`17.15` prefix is a claim about protocol compatibility with a 2007 binary and never moves;
 the rest is derived from `ENodeVersionStr` so a release carries it. See §8 and
 `interop-docker-tests.md` §5.
 
@@ -449,9 +491,9 @@ consumed so the following entries stay aligned.
 ```yaml
 udp:
   # The port obfuscated gossip is sent from, and the portUDPOBF advertised to peers.
-  # Defaults to portObfuscated (tcp.port + 12), which is then shared rather than bound
-  # twice. tcp+12 is required, not preferred — see section 1.
-  portGossip: 5567
+  # Defaults to tcp.port + 14 on a socket of its own; open it in the firewall. It must
+  # not be tcp.port + 12 — see section 1.
+  portGossip: 5569
 
 gossip:
   enabled: true
@@ -506,7 +548,7 @@ below now has a test behind it instead of a manual run.
 table. Its own `vs` output is the evidence:
 
 ```text
-[  1]  203.0.113.3:5555 {U5567}{T5565}{Kc588ddd9}  2000[1000]/1000  0  7/0 …  enode
+[  1]  203.0.113.3:5555 {U5569}{T5565}{Kc588ddd9}  0[0]/1000  0  0/0 …  [  1]dynip=203.0.113.3 version=17.15 (eNode-go v0.4.0) enode
 ```
 
 `{K…}` appears only once it holds a ServerKey for us, so phase 2 completed; `{U}`/`{T}` are
@@ -515,8 +557,8 @@ name:desc admission test was answered. None of its six refusal strings appear.
 
 Getting here cost two real defects, both invisible to unit tests and both described in
 [`interop-docker-tests.md`](interop-docker-tests.md) §4: the obfuscated source port had to
-move from `P+14` to `P+12`, and the unsolicited `0x97` echo had to go. The second was
-masked by the first.
+move from `P+14` to `P+12`, and the unsolicited `0x97` echo had to go. Only the second was
+real: with the echo gone the source port went back to `P+14`, for the reason in §1.
 
 **eserver marks us `working`, and getting there took a third defect.** It used to hold us
 in memory while refusing to write us to its `server.met` or name us to other servers — both
@@ -535,5 +577,6 @@ interop doc has the detail; the address-level derivation is in
 
 `python3 lugdunum-eserver/run/probe.py 127.0.0.1 5555` against eNode-go confirms the
 extended `0x97` still decodes on both channels, with the 4 trailing observed-IP bytes.
-`portUDPOBF` now reports 5567 whether gossip is on or off, since the gossip socket is the
-obfuscated client socket.
+`portUDPOBF` reports 5569 with gossip on and 5567 with it off: the gossip socket runs the
+same obfuscated client handler, and `P+12` stays bound for the bootstrap crypt-ping either
+way.

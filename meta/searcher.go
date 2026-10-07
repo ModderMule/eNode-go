@@ -97,9 +97,11 @@ func NewWithClients(cfg config.MetaSearchConfig, clientFor func(network string, 
 		prefix string
 		native bool
 	}{
+		// Answer order: Kad rows are real eD2K files, so they come before the
+		// pseudo-hash rows and are the last meta rows a result ceiling cuts.
+		{NetworkKad, cfg.Kad, config.DefaultKadNamePrefix, true},
 		{NetworkTorrent, cfg.Torrent, config.DefaultTorrentNamePrefix, false},
 		{NetworkUsenet, cfg.Usenet, config.DefaultUsenetNamePrefix, false},
-		{NetworkKad, cfg.Kad, config.DefaultKadNamePrefix, true},
 	} {
 		if !n.cfg.Enabled {
 			continue

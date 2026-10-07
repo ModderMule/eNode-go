@@ -144,7 +144,7 @@ func (r *reloader) startGossipIO(cfg config.Config) error {
 		gossipConn = conn
 		logging.Infof("listening: udp-gossip %s:%d", gossipUDPCfg.Address, gossipUDPCfg.Port)
 	} else {
-		logging.Infof("gossip shares the obfuscated udp socket on port %d (Lugdunum reads a peer's TCP port as this minus 12)",
+		logging.Warnf("gossip shares the obfuscated udp socket on port %d: replies to a peer server are keyed on its last crypt-ping there, which is less robust than a socket of its own, leave udp.portGossip unset to use tcp.port+14",
 			cfg.UDP.PortGossip)
 	}
 	r.gossipConn = gossipConn

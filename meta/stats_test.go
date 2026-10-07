@@ -253,6 +253,8 @@ func TestStatsSearchCounters(t *testing.T) {
 func TestNetworkUsersFromDaemonInfo(t *testing.T) {
 	d := &fakeDaemon{info: &metav1.GetInfoResponse{
 		NetworkUsers: 412000, NetworkUsersExperimental: 365000, NetworkFiles: 44496000,
+		NetworkUsersSeen: 1930000, NetworkUsersSeenDay: 587000,
+		NetworkUsersSeenWindow: 2592000, NetworkUsersSeenSince: 1791072000,
 	}}
 	s := searcherFor(testConfig(t, true, false), map[string]*fakeDaemon{NetworkTorrent: d})
 	src := s.sources[0]
@@ -272,6 +274,13 @@ func TestNetworkUsersFromDaemonInfo(t *testing.T) {
 		never, fresh, other, st.NetworkUsers, st.NetworkUsersExperimental, st.NetworkFiles, stale, kept)
 	if st.NetworkUsers != 412000 || st.NetworkUsersExperimental != 365000 || st.NetworkFiles != 44496000 {
 		t.Errorf("network estimates not carried: %+v", st)
+	}
+	t.Logf("input: the daemon has seen 1930000 users in 2592000s, 587000 in a day, since 1791072000")
+	t.Logf("output: seen=%d day=%d window=%s since=%s",
+		st.NetworkUsersSeen, st.NetworkUsersSeenDay, st.NetworkUsersSeenWindow, st.NetworkUsersSeenSince.UTC())
+	if st.NetworkUsersSeen != 1930000 || st.NetworkUsersSeenDay != 587000 ||
+		st.NetworkUsersSeenWindow != 30*24*time.Hour || st.NetworkUsersSeenSince.Unix() != 1791072000 {
+		t.Errorf("users seen not carried: %+v", st)
 	}
 	if never != 0 || fresh != 412000 || other != 0 {
 		t.Errorf("NetworkUsers before=%d fresh=%d kad=%d, want 0/412000/0", never, fresh, other)

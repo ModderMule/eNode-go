@@ -37,7 +37,11 @@ else
     SEEDS="[]"
 fi
 
+# udp.portGossip. 5569 (tcp+14) is the default layout; 5567 shares the tcp+12 socket.
+GOSSIP_PORT="${GOSSIP_PORT:-5569}"
+
 sed -e "s|__SELF_IP__|$SELF_IP|g" \
+    -e "s|__GOSSIP_PORT__|$GOSSIP_PORT|g" \
     -e "s|__SELF_IP6__|$SELF_IP6|g" \
     -e "s|__SEEDS__|$SEEDS|g" \
     -e "s|__NAME__|$ENODE_NAME|g" \

@@ -195,8 +195,9 @@ then answered from the copy without calling the peer.
 4. When a walk completes, the peer's files that walk did not stamp are removed.
    That is the only way a file leaves: it stays until a whole later walk
    completes without it.
-5. The next walk starts `mirror.intervalMinutes` later, or after five minutes
-   when the walk failed.
+5. The next walk starts `mirror.intervalMinutes` later. A walk that failed is
+   tried again after ten seconds, then after twice as long for every further
+   failure in a row, up to five minutes, and never later than the interval.
 
 **Bounds.** The mirror holds at most `mirror.maxFiles` files across all peers.
 When a peer's catalogue does not fit, the mirror is marked trimmed for that

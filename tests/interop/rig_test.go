@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -54,9 +55,7 @@ const (
 	eserverTCPPort = 4661
 	enodeTCPPort   = 5555
 	// The obfuscation ports eNode publishes in its 0x97, which eserver echoes back in its
-	// `vs` table as {U…} and {T…}. portUDPOBF is tcp+12 and shares the client obfuscated
-	// socket — see config.setDefaults for why tcp+14 cannot be used.
-	enodeUDPObfPort = 5567
+	// `vs` table as {U…} and {T…}. portUDPOBF is the gossip socket: enodeUDPObfPort below.
 	enodeTCPObfPort = 5565
 
 	enodeImage = "enode-interop:test"
@@ -71,7 +70,15 @@ const (
 
 	eserverVersionEnv     = "ENODE_INTEROP_ESERVER"
 	eserverDefaultVersion = "17.14"
+
+	// gossipPortEnv overrides udp.portGossip in every eNode container. Unset means tcp+14,
+	// the default layout; 5567 runs the suite with gossip sharing the tcp+12 socket.
+	gossipPortEnv     = "ENODE_INTEROP_GOSSIP_PORT"
+	defaultGossipPort = 5569
 )
+
+// enodeUDPObfPort is the portUDPOBF eNode advertises, which is its gossip port.
+var enodeUDPObfPort = gossipPort()
 
 // eserverBinaryPaths maps a release to its 32-bit ELF, relative to the module root. The
 // tree is gitignored, so a fresh clone will not have any of them.
@@ -325,7 +332,7 @@ func startEnode(t *testing.T, pool *dockertest.Pool, network *dockertest.Network
 	if label == "" {
 		label = "enode"
 	}
-	env := []string{"ENODE_NAME=" + label}
+	env := []string{"ENODE_NAME=" + label, fmt.Sprintf("GOSSIP_PORT=%d", enodeUDPObfPort)}
 	if opts.SeedIP != "" {
 		port := opts.SeedPort
 		if port == 0 {
@@ -583,6 +590,17 @@ func eserverVersion() string {
 		return v
 	}
 	return eserverDefaultVersion
+}
+
+// gossipPort is the udp.portGossip the rig's eNode containers run with: gossipPortEnv, or
+// the default.
+func gossipPort() int {
+	if v := strings.TrimSpace(os.Getenv(gossipPortEnv)); v != "" {
+		if port, err := strconv.Atoi(v); err == nil && port > 0 && port < 65536 {
+			return port
+		}
+	}
+	return defaultGossipPort
 }
 
 // eserverImageName tags the image by release, so switching releases never reuses a stale

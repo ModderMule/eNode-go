@@ -190,15 +190,16 @@ type UDPConfig struct {
 	// PortGossip is the socket obfuscated server-to-server frames are sent from, and the
 	// portUDPOBF value published to peers.
 	//
-	// It defaults to tcp.Port + 12 — the same socket as PortObfuscated, which is then
-	// shared rather than bound twice. tcp+12 is not a free choice: Lugdunum derives a
-	// peer's TCP port from the UDP source port of an obfuscated frame by subtracting 12,
-	// so a frame we send from any other port is attributed to a server that does not
-	// exist. Measured, see docs/server-gossip.md §8.
+	// It defaults to tcp.Port + 14, Lugdunum's own portUDPOBF default, on a socket of its
+	// own. It must not be the tcp+12 socket: eserver picks the key for an obfuscated reply
+	// by its source port, and for tcp+12 that key is the crypt-ping challenge rather than
+	// the ServerKey we encrypt with, so a name:desc reply sent from there is dropped and
+	// we are not flagged a "working" server. See docs/server-gossip.md §1.
 	//
-	// Setting it to anything else binds a separate socket and advertises that port. Only
-	// do so for a peer implementation known to want it: against a real eserver it breaks
-	// the ping bookkeeping that decides whether we count as a "working" server.
+	// Setting it equal to PortObfuscated shares that socket instead of binding a second
+	// one, for an operator who cannot open another port. Replies to a peer server are
+	// then keyed on its last crypt-ping challenge instead, which works against eserver
+	// but depends on having seen that ping; see docs/server-gossip.md §1.
 	PortGossip uint16 `yaml:"portGossip"`
 	GetSources bool   `yaml:"getSources"`
 	GetFiles   bool   `yaml:"getFiles"`
@@ -700,22 +701,24 @@ func setDefaults(cfg *Config) error {
 		}
 		cfg.UDP.PortObfuscated = cfg.TCP.Port + 12
 	}
-	// The obfuscated server-to-server channel shares the tcp+12 socket above, and tcp+12
-	// is forced by the reference implementation rather than chosen.
+	// The obfuscated server-to-server channel gets a socket of its own at tcp+14, which
+	// is eserver's own portUDPOBF default.
 	//
-	// Two of eserver's constraints have to hold at once. It skips a peer whose obfuscated
-	// frames do not arrive from the portUDPOBF that peer advertised ("continue because
-	// portUDPobf(%d) != sin_port(%d)"), so the port we send from must be the port we
-	// publish. And it recovers a peer's *TCP* port from the UDP source port of an
-	// obfuscated frame by subtracting 12 — measured directly: a frame from our 5567 was
-	// booked to 5555, one from 5569 to a nonexistent 5557, after which its ping
-	// bookkeeping never confirmed and we stayed out of its "working servers" list and
-	// therefore out of its server.met.
-	//
-	// tcp+14 (eserver's own portUDPOBF default) satisfies the first constraint and breaks
-	// the second, so it cannot be used. See docs/server-gossip.md §8.
+	// Two of eserver's rules decide this. It skips a peer whose obfuscated frames do not
+	// arrive from the portUDPOBF that peer advertised ("continue because portUDPobf(%d)
+	// != sin_port(%d)"), so the port we send from must be the port we publish. And it
+	// chooses the key for a reply by that reply's source port (servgetrandkey): from the
+	// peer's tcp+12 it decrypts with the crypt-ping challenge, from the advertised
+	// portUDPOBF with the ServerKey. Our name:desc reply is encrypted with the ServerKey,
+	// so sent from tcp+12 it is dropped and we are flagged "working" only when the plain
+	// ping reply happens to win a startup race. Measured against eserver 17.14 and 17.15,
+	// see docs/server-gossip.md §1.
 	if cfg.UDP.PortGossip == 0 {
-		cfg.UDP.PortGossip = cfg.UDP.PortObfuscated
+		// uint16: the same wrap-around guard as the tcp+12 port above.
+		if cfg.TCP.Port > 65535-14 {
+			return fmt.Errorf("tcp.port %d leaves no room for the gossip UDP port at tcp.port+14; set udp.portGossip", cfg.TCP.Port)
+		}
+		cfg.UDP.PortGossip = cfg.TCP.Port + 14
 	}
 	if cfg.NAT.Port == 0 {
 		cfg.NAT.Port = 2004

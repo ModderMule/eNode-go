@@ -241,6 +241,16 @@ type MetaNetworkStats struct {
 	NetworkUsersExperimental uint64 `json:"networkUsersExperimental"`
 	NetworkFiles             uint64 `json:"networkFiles"`
 
+	// NetworkUsersSeen is the users the daemon has seen in its network over
+	// NetworkUsersSeenWindow seconds, and NetworkUsersSeenDay over the last 24 hours:
+	// node ids, so more than the users behind them. A window of 0 says the daemon does
+	// not count them, and the page then shows the estimates alone.
+	// NetworkUsersSeenSince is when it began counting, RFC 3339, "" when unknown.
+	NetworkUsersSeen       uint64 `json:"networkUsersSeen"`
+	NetworkUsersSeenDay    uint64 `json:"networkUsersSeenDay"`
+	NetworkUsersSeenWindow uint64 `json:"networkUsersSeenWindow"`
+	NetworkUsersSeenSince  string `json:"networkUsersSeenSince"`
+
 	FeedReleases int    `json:"feedReleases"`
 	FeedRows     int    `json:"feedRows"`
 	FeedCursor   uint64 `json:"feedCursor"`

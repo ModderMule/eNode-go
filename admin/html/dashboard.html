@@ -145,6 +145,25 @@ function fmtAge(at){
   return fmtUptime((Date.now() - Date.parse(at)) / 1000);
 }
 
+// fmtWindow renders a length in seconds as whole days, or hours when it is not one.
+function fmtWindow(secs){
+  return secs % 86400 === 0 ? (secs / 86400) + 'd' : Math.round(secs / 3600) + 'h';
+}
+// seenUsers is what a daemon that counts the users it has seen adds to its estimate:
+// the node ids of the last 24 hours and of its whole window. A window of 0 is a
+// daemon that does not count, and adds nothing. While the daemon has counted for less
+// than the window the figure is still growing, and says for how long it has.
+function seenUsers(m){
+  if(!m.networkUsersSeenWindow){ return ''; }
+  var out = ', seen 24h ~' + num(m.networkUsersSeenDay)
+    + ', ' + fmtWindow(m.networkUsersSeenWindow) + ' ~' + num(m.networkUsersSeen);
+  var since = Date.parse(m.networkUsersSeenSince);
+  if(since && Date.now() - since < m.networkUsersSeenWindow * 1000){
+    out += ' in ' + fmtAge(m.networkUsersSeenSince) + ' so far';
+  }
+  return out;
+}
+
 // metaCard builds one network's card. Everything a daemon reported is inserted as
 // text, never as markup: the daemon name and version are its own strings.
 function metaCard(m){
@@ -177,7 +196,7 @@ function metaCard(m){
     ['Catalogue', num(m.catalogued) + ' releases · ' + num(m.files) + ' files' + asOf],
     ['Published', num(m.published)],
     ['Network', m.networkUsers || m.networkUsersExperimental || m.networkFiles
-      ? '~' + num(m.networkUsers) + ' users (experimental ' + num(m.networkUsersExperimental) + ') · ~' + num(m.networkFiles) + ' files'
+      ? '~' + num(m.networkUsers) + ' users (experimental ' + num(m.networkUsersExperimental) + seenUsers(m) + ') · ~' + num(m.networkFiles) + ' files'
       : 'no estimate'],
     ['Live search', !m.liveSearch ? 'off' : (m.searchAvailable ? 'on' : 'on, daemon has no index')],
     ['Feed', !m.feedEnabled ? 'off' : num(m.feedRows) + ' rows · ' + num(m.feedReleases) + ' releases · '

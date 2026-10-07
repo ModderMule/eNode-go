@@ -24,8 +24,16 @@ ENODE_INTEGRATION=1 go test ./tests/interop/ -v -timeout 30m
 
 `ENODE_INTEROP_ESERVER=17.15` runs the same cases against the 17.15 build instead (the
 default is 17.14, the release every measurement below was taken against). All six cases
-pass on both, measured 2026-10-06. `ENODE_INTEROP_LOGS=1` dumps both servers' logs from
+pass on both, measured 2026-10-08 with gossip on `tcp+14`. `ENODE_INTEROP_LOGS=1` dumps both servers' logs from
 the eserver gossip case even when it passes; they are always dumped when it fails.
+
+`ENODE_INTEROP_GOSSIP_PORT=5567` runs every eNode container with gossip sharing the
+`tcp+12` socket (`udp.portGossip` equal to `udp.portObfuscated`) and moves the expected
+`{U…}` and `servdescreply(…)` port with it. The three gossip cases pass in that layout on
+both builds, same date; see [`server-gossip.md`](server-gossip.md) §1.
+
+Both eserver gossip cases also assert that eserver never logs `Adding server <its own
+address>`: our peer lists leave out the server that asked for them.
 
 The suite skips itself unless `ENODE_INTEGRATION=1`, matching
 `storage/integration_dockertest_test.go` and the (currently commented-out) line in
@@ -108,12 +116,12 @@ eserver's side is asserted from its **live table**, read with `vs`, and the row 
 phase independently:
 
 ```
-[  1]  203.0.113.3:5555 {U5567}{T5565}{Kc588ddd9}  2000[1000]/1000  0  7/0 …  enode
-                        └ portUDPOBF  └ portTCPOBF  └ ServerKey                └ our name
+[  1]  203.0.113.3:5555 {U5569}{T5565}{Kc588ddd9}  0[0]/1000  0  0/0 …  enode
+                        └ portUDPOBF  └ portTCPOBF  └ ServerKey      └ our name
 ```
 
 `{K…}` is printed only when a ServerKey is on file, so phase 2 produced one, and `{U}`/`{T}`
-are the ports we published in our `0x97`. Those three are asserted. Its log must also carry
+are the ports we published in our `0x97`. Those three are asserted, and so is the name. Its log must also carry
 **none** of its six refusal strings (`continue because portUDPobf`, `bad name:desc`, `sent
 a bad challenge`, `from unknown server`, `ignore non obfuscated OP_SERVER_LIST_RES`, `Deny
 server`) — each names one decision that has to be right.
@@ -133,13 +141,17 @@ So the rig's default binary is the lenient outlier, not the norm. Measured both 
 logs the line, and `sflags=517` makes the Oct 2006 build log it too. The handshake
 completes regardless, because phase 3 repeats the registration obfuscated.
 
-The trailing `dynip=… version=… enode` can only have come from the tags in our `0xa3`, but
-the *name* is **reported rather than asserted**: it survives on roughly one run in three.
-Every round logs `Updating server … name= desc=` with both fields empty — its add/update
-path overwriting the strings from a round that carried no tags — and a row sampled after
-enough of those no longer shows a name it showed earlier. Re-issuing `ask` while polling
-makes it worse, not better, so `ask` is sent once and the richest row observed is the one
-kept. Phase 4 is covered instead by `servdescreply(<our ip>)` in the log.
+The trailing `dynip=… version=… enode` can only have come from the tags in our `0xa3`, and
+the name is **asserted**. Which probe it answered is logged, not asserted: eserver asks in
+plaintext on `P+4` while it holds no ServerKey for us and obfuscated on our advertised
+`portUDPOBF` afterwards, and it stops asking once either is answered, so a run where the
+plain ping reply lands first never shows `servdescreply(<our ip>:5569)`.
+
+The name used to be reported rather than asserted, because it turned up on roughly one run
+in three. That was put down to eserver's add/update path overwriting the strings. It was a
+defect of ours: with gossip on the `tcp+12` socket eserver could not decrypt the obfuscated
+reply at all, and the name arrived only over the plaintext probe, which eserver sends only
+while it has no ServerKey for us — see §4.
 
 The case then asserts eserver's own `server.met` contains us, forced with `saveServers
 server.met`. That file is written only for peers it has flagged `working`, so it is the
@@ -171,11 +183,17 @@ This was a skip until we started advertising a Lugdunum-compatible `ST_VERSION` 
 peer eserver has not flagged `working` is invisible to its peer-list builder, so it sent no
 list at all and there was nothing for A to learn.
 
-Two things have to hold, and the test checks them separately so a failure says which. B
-must reach eserver's `server.met` — same `working` gate, so that is the direct evidence the
-version tag was accepted — and eserver must then serve B to A. Failures on our side stay
-hard errors: not sending a `0xA4` is ours, and receiving a non-empty list and dropping it
-is ours.
+Two things have to hold, and the test checks each on its own evidence. eserver must flag B
+`working`: it logs `servdescreply(<B>:…)` and its `vs` row for B carries B's name. And
+eserver must then serve B to A: A's log holds `gossip: peer list from <eserver> names […]`
+with B in it. Failures on our side stay hard errors: not sending a `0xA4` is ours, and
+receiving a non-empty list and dropping it is ours.
+
+A's `server.met` holding B is not accepted as proof of either. eserver names A to B as
+well, B then registers with A directly, and A ends up holding B without eserver having
+listed it — which is how this case passed on runs where B was never `working`. eserver's
+own `server.met` is not used as the `working` evidence here either: 17.14 was seen writing a
+B it had not flagged.
 
 ### D · `TestAccessFilterDropsEserverBeforeParsing` — the filter on a live socket
 
@@ -196,7 +214,7 @@ do **not** all say the same thing:
 |---|---|---|
 | TCP `OP_SERVERMESSAGE 0x38` | log in on `5555/tcp` | `server version v0.1.0 (eNode-go)`, built from `ed2k.ENodeVersionStr` and `ed2k.ENodeName` |
 | `OP_SERVERIDENT 0x41` | same connection | **no** version tag — eMule ignores one there, so we send none |
-| UDP `0xa3`, challenge form | `e3 a2 <challenge:4>` to `5559/udp` | challenge echoed, `ST_VERSION` = `ed2k.GossipVersionStr` (`17.14 (eNode-go v0.1.0)`) |
+| UDP `0xa3`, challenge form | `e3 a2 <challenge:4>` to `5559/udp` | challenge echoed, `ST_VERSION` = `ed2k.GossipVersionStr` (`17.15 (eNode-go v0.1.0)`) |
 | UDP `0xa3`, legacy form | `e3 a2`, under 6 bytes | name and description only: no tag block, so no version at all |
 
 The case exists for the **guard on the first row**, which is asserted separately from the
@@ -204,8 +222,8 @@ equality so that it still fires if someone updates the expected string to match 
 server. srchybrid runs `_stscanf("%u.%u")` over the text after `server version` and, when
 that *succeeds*, reformats the whole value to a bare `%u.%02u`
 (`ServerSocket.cpp:180-181`). So the tempting harmonisation — claiming
-`17.14 (eNode-go v0.1.0)` on both transports — would make a real client display a plain
-`17.14` with our name discarded, which is precisely what the string form of the tag was
+`17.15 (eNode-go v0.1.0)` on both transports — would make a real client display a plain
+`17.15` with our name discarded, which is precisely what the string form of the tag was
 chosen to avoid. The leading `v` is what makes that scanf fail. The test therefore fails on
 any version part that parses as two dotted integers, and says why.
 
@@ -250,7 +268,7 @@ Those strings are now pinned on the wire, but *which* of them a user ends up see
 client-side decision no case here can reach. Both eMule trees special-case the login line
 and let it overwrite whatever the UDP tag set, so a **connected** user sees
 `v0.1.0 (eNode-go)` while someone who merely holds us in a server list sees
-`17.14 (eNode-go v0.1.0)` — and the client writes what it last saw into its own
+`17.15 (eNode-go v0.1.0)` — and the client writes what it last saw into its own
 `server.met` and re-shares that. srchybrid is MFC/Windows and not containerizable, so its
 half stays a code read (`ServerSocket.cpp:176-183`).
 
@@ -271,17 +289,22 @@ sake of one display string.
 
 Three defects, none of which a unit test could have reached, plus one design correction.
 
-**The obfuscated source port must be `tcp+12`, not `tcp+14`.** Two of eserver's rules have
-to hold together. It skips a peer whose obfuscated frames do not arrive from the
-`portUDPOBF` that peer advertised — that one was already known. But it *also* recovers a
-peer's TCP port from the same source port by subtracting 12. Measured directly: a frame
-from our 5567 was booked to 5555, one from 5569 to a nonexistent 5557, after which it
-logged `received a pong from unknown server 203.0.113.3:5557`. Only `tcp+12` satisfies
-both, so `udp.portGossip` now defaults to the obfuscated client socket and shares it.
+**The obfuscated source port must be `tcp+14`, on a socket of its own.** Two of eserver's
+rules decide it. It skips a peer whose obfuscated frames do not arrive from the `portUDPOBF`
+that peer advertised. And it picks the key for a reply by the reply's source port: from a
+peer's `tcp+12` it decrypts with the crypt-ping challenge, from the advertised `portUDPOBF`
+with the peer's ServerKey. Our `0xa3` is encrypted with the ServerKey, so from `tcp+12` it
+was dropped, silently, on 17.14 and 17.15 alike. We were flagged `working` only when our
+plain ping reply reached eserver before the obfuscated one, because it then asked for the
+name in plaintext. 17.14 i686 accepts the plaintext `0xA0` and so pings us earlier, which
+changed which reply won and made case C fail there far more often than on 17.15.
 
-This is one place we deliberately diverge from eserver's own configuration: it advertises
-`portUDPOBF = port+14` while sending its obfuscated frames from `port+12`, so its own
-advertised value and its source port disagree. We publish the port we really use.
+This corrects an earlier entry in this list, which said the port had to be `tcp+12` because
+eserver recovers a peer's TCP port by subtracting 12 from the source port. That was read
+off one frame — a `0x97` from our 5569 booked to a nonexistent 5557 — and the frame was the
+unsolicited `0x97` described next. With that gone, nothing sent from `tcp+14` is
+misattributed: no `unknown server` and no `continue because portUDPobf` line on either
+build. `udp.portGossip` defaults to `tcp+14`; see [`server-gossip.md`](server-gossip.md) §1.
 
 **A gossip round must never volunteer an `OP_GLOBSERVSTATRES`.** It used to send one
 whenever a peer had registered with us, echoing the challenge from that `0xA0`. A peer
@@ -325,12 +348,12 @@ one peer-list builder, shared by `OP_SERVERLIST 0x32` for clients and `OP_SERVER
 wrapper sends no datagram at all — which is exactly the silence case C recorded. It was
 never a missing reply path.
 
-**We now advertise `ed2k.GossipVersionStr`** — `"17.14 (eNode-go v0.1.0)"`, a *string* tag.
+**We now advertise `ed2k.GossipVersionStr`** — `"17.15 (eNode-go v0.1.0)"`, a *string* tag.
 eserver accepts either form: the uint32 branch `sprintf`s `"%d.%d"` into a buffer that the
 string branch's parse then reads, so both converge on the same `sscanf`, which stops at the
 space and ignores the rest. That is what makes the string worth using — the same reply
 answers *clients*, and eMule displays the tag verbatim in its server-list Version column, so
-the part eserver discards is where we say who we really are. The `17.14` prefix is a
+the part eserver discards is where we say who we really are. The `17.15` prefix is a
 protocol-compatibility claim, not our version; the trailing part is derived from
 `ENodeVersionStr`, so releases carry it (`scripts/publish-release.sh` checks that).
 

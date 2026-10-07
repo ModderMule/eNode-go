@@ -111,6 +111,7 @@ tcp:
 udp:
   port: 5559                 # UDP 主端口（tcp.port + 4）
   portObfuscated: 5567       # UDP 混淆端口；须为 tcp.port + 12 才能完成 crypt-ping（见 docs/server-udp-crypt-ping.md）
+  portGossip: 5569           # 服务器间混淆通信的源端口 / 对外公布的 portUDPOBF；tcp.port + 14，独立套接字，启用 gossip 时需放行（见 docs/server-gossip.md）
   getSources: true           # 允许 UDP 来源查询
   getFiles: true             # 允许 UDP 文件查询
   serverKey: 0               # 0：客户端 UDP 混淆密钥由自动生成并保存在 data/udp.secret 的 128 位密钥派生；非 0：旧式 32 位密钥（见 docs/server-udp-crypt-ping.md）

@@ -32,7 +32,7 @@ set -euo pipefail
 #
 # GossipVersionStr -- the ST_VERSION (0x91) value we advertise to peer servers
 # and to clients -- IS bumped, but by derivation: it is a const expression built
-# from ENodeVersionStr, so the single sed below carries it. Its leading "17.14"
+# from ENodeVersionStr, so the single sed below carries it. Its leading "17.15"
 # is a Lugdunum protocol-compatibility claim and must never move with a release;
 # see the guard further down.
 #

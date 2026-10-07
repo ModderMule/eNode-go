@@ -126,6 +126,21 @@ func TestGossipWithLugdunumEserver(t *testing.T) {
 		}
 	}
 
+	// Which probe eserver's name came from. Reported, not required, because eserver decides:
+	// it asks in plaintext on P+4 while it has no ServerKey for us and obfuscated on our
+	// advertised portUDPOBF once it does, and it stops asking as soon as either is answered
+	// (pingreply re-asks only after 600 s). So a run where the plain ping reply lands first
+	// never exercises the obfuscated path at all. What is required is the outcome — the name
+	// in the row, below — which gossip on the tcp+12 socket missed whenever the obfuscated
+	// probe came first: eserver decrypts a reply from tcp+12 with the crypt-ping challenge,
+	// not our ServerKey (servgetrandkey).
+	obfDesc := fmt.Sprintf("servdescreply(%s:%d)", enode.ip, enodeUDPObfPort)
+	if strings.Contains(logs, obfDesc) {
+		t.Logf("output: eserver accepted our obfuscated 0xa3 from portUDPOBF — found %q", obfDesc)
+	} else {
+		t.Logf("output: NOTE no %q this run: eserver was answered on the plain probe first and did not ask again", obfDesc)
+	}
+
 	// Its in-memory table, read through the console — the authoritative record of whether
 	// eserver accepted us, and the thing that was impossible to reach from the host.
 	//
@@ -140,19 +155,13 @@ func TestGossipWithLugdunumEserver(t *testing.T) {
 		{"our advertised portTCPOBF, from the same reply", fmt.Sprintf("{T%d}", enodeTCPObfPort)},
 		{"a ServerKey, which only the obf-ping phase can produce", "{K"},
 	}
-	// Reported, not required. Our name reaches eserver — it appears in the row as
-	// `dynip=… version=… enode`, which can only have come from the tags in our 0xa3 — but
-	// whether it is still there when the row is sampled is a coin flip: it turns up on
-	// roughly one run in three, and every round logs `Updating server … name= desc=` with
-	// both fields empty. That is eserver's add/update path (fcn.0042f7d0) overwriting the
-	// strings from a round that carried no tags, unrelated to the version gate below, so
-	// it is logged rather than asserted. Phase 4 itself is covered by the `servdescreply(`
-	// check above.
+	// Our name, which can only have come from the tags in our 0xa3: the row ends
+	// `dynip=… version=… enode`. Required. It used to turn up on roughly one run in three,
+	// which was the same defect as above — the name arrived only over the plain path, and
+	// only when that won the race.
 	const nameMarker = "enode"
-	// The richest row observed is kept rather than the latest, because eserver takes the
-	// name back out again on later rounds. `ask` is issued once, before this loop and never
-	// inside it, for the same reason: re-asking drives more of those updates and destroys
-	// the evidence.
+	// The richest row observed is kept rather than the latest. `ask` is issued once, before
+	// this loop and never inside it, so the row is filled by eserver's own rounds.
 	var row string
 	sawName := false
 	best := -1
@@ -187,8 +196,7 @@ func TestGossipWithLugdunumEserver(t *testing.T) {
 		if sawName {
 			t.Logf("output: eserver also showed our name %q, so the tags in our 0xa3 were parsed", nameMarker)
 		} else {
-			t.Logf("output: eserver never showed our name in the row this run — see the note above; " +
-				"phase 4 is covered by the servdescreply( check")
+			t.Errorf("eserver never showed our name %q in its `vs` row: the tags in our 0xa3 did not reach it", nameMarker)
 		}
 	}
 
@@ -240,6 +248,7 @@ func TestGossipWithLugdunumEserver(t *testing.T) {
 	}
 
 	assertNoRejections(t, eserver, "eserver")
+	assertNoSelfEntry(t, eserver)
 }
 
 // assertNoRejections fails on any of eserver's refusal messages. Absence is meaningful:
@@ -262,6 +271,21 @@ func assertNoRejections(t *testing.T, n *node, label string) {
 	if hits == 0 {
 		t.Logf("output: %s log carries none of the %d refusal messages", label, len(eserverRejections))
 	}
+}
+
+// assertNoSelfEntry fails if eserver entered itself in its own peer table. It has no
+// dependable self-check, so that is what it did with every list of ours that named it:
+// "Adding server <its own address>", then pinging itself and counting the result among
+// its working servers. We leave the requester out of the list we send it.
+func assertNoSelfEntry(t *testing.T, eserver *node) {
+	t.Helper()
+	self := fmt.Sprintf("Adding server %s:%d", eserver.ip, eserverTCPPort)
+	if line := lineContaining(eserver.logs(), self); line != "" {
+		t.Errorf("eserver added itself to its peer table, so a peer list of ours named the server "+
+			"that asked for it: %s", strings.TrimSpace(line))
+		return
+	}
+	t.Logf("output: eserver never logged %q — our lists do not name the requester", self)
 }
 
 // waitForServerMet polls until a server.met inside a container holds ip:port, returning

@@ -69,6 +69,9 @@ So eNode-go's obfuscated UDP listener must bind `tcp.port + 12`:
   `udp.portObfuscated` in YAML still wins, but a value other than `tcp.port + 12` leaves the
   crypt-ping unreachable (clients degrade to the plaintext fallback — still functional, just
   slower).
+- With gossip enabled, the `portUDPOBF` advertised in the stat reply is `udp.portGossip`
+  (`tcp.port + 14`, 5569), a second obfuscated socket. The bootstrap crypt-ping still lands on
+  and is answered from `tcp.port + 12`; see `server-gossip.md` §1.
 
 Steady-state obfuscated UDP also runs on this port: the server advertises it at reply offset +32 and
 clients honour the advertised value thereafter.

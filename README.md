@@ -151,7 +151,7 @@ tcp:
 udp:
   port: 5559                 # Main UDP port (tcp.port + 4, where eMule pings the plaintext stat)
   portObfuscated: 5567       # Obfuscated UDP port; must be tcp.port + 12 for the crypt-ping (see docs/server-udp-crypt-ping.md)
-  portGossip: 5567           # Obfuscated server-to-server source port / advertised portUDPOBF; shares the socket above (see docs/server-gossip.md)
+  portGossip: 5569           # Obfuscated server-to-server source port / advertised portUDPOBF; tcp.port + 14 on its own socket, open it when gossip is enabled (see docs/server-gossip.md)
   getSources: true           # Enable UDP source queries
   getFiles: true             # Enable UDP file queries
   serverKey: 0               # 0: per-client UDP obfuscation keys derive from a generated 128-bit secret in data/udp.secret; non-zero: a legacy 32-bit secret (see docs/server-udp-crypt-ping.md)

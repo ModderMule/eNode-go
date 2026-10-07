@@ -26,7 +26,7 @@ admin:
 ```
 
 Defaults: **enabled**, bound to **127.0.0.1**, port **4560** (chosen to stay clear of
-the eD2K ports — TCP 5555/5565, UDP 5559/5567, NAT 2004). With the block omitted
+the eD2K ports — TCP 5555/5565, UDP 5559/5567/5569, NAT 2004). With the block omitted
 entirely the dashboard still runs on `127.0.0.1:4560`.
 
 On startup the server logs the dashboard URL as a clickable link, or that it is off:
@@ -132,6 +132,11 @@ daemon's estimate of its whole network next to its catalogue figures:
 `networkUsers`, `networkUsersExperimental` and `networkFiles`, 0 when the daemon has
 none. They are shown as reported, whether or not `statsBoost` adds the users to the
 advertised count; see [meta-search.md](meta-search.md#network-estimates).
+
+A daemon that counts the users it has seen over time adds `networkUsersSeen` and
+`networkUsersSeenDay`, with `networkUsersSeenWindow` (the window in seconds) and
+`networkUsersSeenSince` (RFC 3339, when it began counting). A window of 0 is a daemon
+that does not count them, and the Network row then shows the estimates alone.
 
 With server-to-server search on, `serverSearch` carries its figures and the page shows a
 **Server search** section: the mode (`allowlist` or `gossip`), the listener URL and the

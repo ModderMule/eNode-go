@@ -50,10 +50,12 @@ tcp:
 udp:
   port: 5559
   portObfuscated: 5567   # tcp.port + 12, where eMule's first crypt-ping always lands
-  # Shares the socket above. tcp.port+12 is required, not preferred: eserver reads a peer's
-  # TCP port as this value minus 12, so anything else files our frames against a phantom
-  # server and we never reach its "working servers" list. See docs/server-gossip.md §8.
-  portGossip: 5567
+  # tcp.port + 14 on a socket of its own, and the portUDPOBF we advertise. Not the socket
+  # above: eserver decrypts a reply from tcp.port+12 with the crypt-ping challenge, so our
+  # ServerKey-encrypted name reply is dropped and we never reach its "working servers"
+  # list. See docs/server-gossip.md §1. ENODE_INTEROP_GOSSIP_PORT=5567 puts the rig in the
+  # shared-socket layout instead.
+  portGossip: __GOSSIP_PORT__
   getSources: true
   getFiles: true
   serverKey: 305419896

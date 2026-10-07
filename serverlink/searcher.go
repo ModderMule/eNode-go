@@ -30,8 +30,12 @@ const (
 	// maxResets is how often one walk restarts before it is given up for this
 	// round. A peer that resets every walk is rebuilding faster than it can be read.
 	maxResets = 5
-	// walkRetry is the wait after a walk that failed, when the interval is longer.
-	walkRetry = 5 * time.Minute
+	// walkRetryFirst is the wait after a walk that failed, doubled for every
+	// further failure in a row up to walkRetry, when the interval is longer. A peer
+	// that was only restarting is read again soon, one that stays away is not
+	// called every few seconds.
+	walkRetryFirst = 10 * time.Second
+	walkRetry      = 5 * time.Minute
 	// maxNameBytes bounds a file name taken from a peer, eD2K's own limit.
 	maxNameBytes = 255
 )
@@ -373,17 +377,20 @@ func (s *Searcher) startWalkLocked(p *peer) {
 }
 
 func (s *Searcher) walkLoop(ctx context.Context, p *peer) {
-	walk := uint32(0)
+	walk, failures := uint32(0), 0
 	for {
 		wait := s.cfg.Interval
 		if err := s.walk(ctx, p, &walk); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
+			failures++
 			p.walkErrors.Add(1)
 			p.noteError(err, "catalogue walk")
-			wait = min(wait, walkRetry)
+			wait = min(wait, walkRetryAfter(failures))
 			s.expire(p)
+		} else {
+			failures = 0
 		}
 		select {
 		case <-ctx.Done():
@@ -391,6 +398,15 @@ func (s *Searcher) walkLoop(ctx context.Context, p *peer) {
 		case <-time.After(wait):
 		}
 	}
+}
+
+// walkRetryAfter is the wait before the next walk after failures failed in a row.
+func walkRetryAfter(failures int) time.Duration {
+	wait := walkRetryFirst
+	for i := 1; i < failures && wait < walkRetry; i++ {
+		wait *= 2
+	}
+	return min(wait, walkRetry)
 }
 
 // walk reads p's whole catalogue into the mirror, then drops what p no longer

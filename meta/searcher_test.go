@@ -232,8 +232,8 @@ func TestSearchKadNetwork(t *testing.T) {
 
 	all := s.Search(context.Background(), text("night"), false, false)
 	t.Logf("input: night, every network; output: %s", fileNames(all))
-	if len(all) != 2 || all[1].Name != prefix+"Night.Of.The.Living.Dead.avi" || !all[1].Meta.Native() {
-		t.Fatalf("got %s, want the torrent row then the prefixed Kad row", fileNames(all))
+	if len(all) != 2 || all[0].Name != prefix+"Night.Of.The.Living.Dead.avi" || !all[0].Meta.Native() {
+		t.Fatalf("got %s, want the prefixed Kad row then the torrent row", fileNames(all))
 	}
 
 	native := s.Search(context.Background(), text("night"), false, true)
@@ -252,8 +252,8 @@ func TestSearchKadNetwork(t *testing.T) {
 	}
 	nets := s.CatalogNetworks()
 	t.Logf("input: torrent and kad enabled; output: catalogue networks %v", nets)
-	if len(nets) != 2 || nets[0] != NetworkTorrent || nets[1] != NetworkKad {
-		t.Fatalf("catalogue networks %v, want torrent then kad", nets)
+	if len(nets) != 2 || nets[0] != NetworkKad || nets[1] != NetworkTorrent {
+		t.Fatalf("catalogue networks %v, want kad then torrent", nets)
 	}
 
 	bare := ""

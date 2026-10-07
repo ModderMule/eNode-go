@@ -152,6 +152,24 @@ func TestMirrorFollowsThePeer(t *testing.T) {
 	}
 }
 
+// TestWalkRetryBacksOff: a failed walk is tried again after ten seconds, then
+// after twice as long for every further failure, and never later than walkRetry.
+func TestWalkRetryBacksOff(t *testing.T) {
+	want := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second, 80 * time.Second,
+		160 * time.Second, 5 * time.Minute, 5 * time.Minute}
+	for i, w := range want {
+		got := walkRetryAfter(i + 1)
+		t.Logf("input:  %d failed walks in a row", i+1)
+		t.Logf("output: next walk after %s", got)
+		if got != w {
+			t.Errorf("after %d failures: wait %s, want %s", i+1, got, w)
+		}
+	}
+	if got := walkRetryAfter(1000); got != walkRetry {
+		t.Errorf("after 1000 failures: wait %s, want %s", got, walkRetry)
+	}
+}
+
 // TestMirrorThatIsFullDoesNotAnswerAlone: a mirror too small for a peer's
 // catalogue says so, and the peer is still asked on a search.
 func TestMirrorThatIsFullDoesNotAnswerAlone(t *testing.T) {

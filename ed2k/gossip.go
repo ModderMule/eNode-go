@@ -105,6 +105,10 @@ type PeerServer struct {
 	// reply is RC4-keyed on exactly this value, so it must survive until the reply
 	// arrives.
 	OurChallenge uint32
+	// PrevChallenge is the phase-2 challenge before OurChallenge. A peer whose gossip
+	// shares its tcp+12 socket keys its replies on the last ping it saw from us, and its
+	// workers can answer a frame of this round before they have seen this round's ping.
+	PrevChallenge uint32
 	// PlainChallenge is the separate 0x55AA-prefixed challenge sent with the phase-1
 	// plain 0x96.
 	//
@@ -175,6 +179,10 @@ const recentClientWindow = 30 * time.Minute
 // inbound frame stays lost if it comes back without contacting us first.
 const parkedRetryRounds = 8
 
+// maxInboundChallenges caps the crypt-ping challenges kept for the shared-socket layout.
+// Anyone can send a crypt-ping, so the map must not grow with the traffic.
+const maxInboundChallenges = 1024
+
 // GossipHandler owns the peer table and every decision about what enters it.
 type GossipHandler struct {
 	mu    sync.RWMutex
@@ -191,6 +199,10 @@ type GossipHandler struct {
 	// those is what recreates the phantom self-entries the reference implementation
 	// kept fighting.
 	localIPs map[string]struct{}
+
+	// inboundChallenges holds the last crypt-ping challenge each address sent us, filled
+	// only while gossip shares the tcp+12 socket; see NoteInboundPingChallenge.
+	inboundChallenges map[string]uint32
 
 	// stats are cumulative counters for the admin surface and the logs.
 	stats GossipStats
@@ -231,6 +243,8 @@ func NewGossipHandler(cfg GossipConfig, seeds []PeerAddr) *GossipHandler {
 		peers:     make(map[string]*PeerServer),
 		clientIPs: make(map[string]time.Time),
 		localIPs:  make(map[string]struct{}),
+
+		inboundChallenges: make(map[string]uint32),
 	}
 	for _, s := range seeds {
 		if s.IP == nil || s.Port == 0 {
@@ -390,6 +404,10 @@ func (g *GossipHandler) MergePeerList(from net.IP, entries []PeerAddr, obfuscate
 			from, len(entries))
 		return 0
 	}
+
+	// Logged whether or not anything is new: which peers a server names is what shows a
+	// peer was learned through it rather than from that peer's own registration.
+	logging.Debugf("gossip: peer list from %s names %v", from, entries)
 
 	admitted := 0
 	for _, e := range entries {
@@ -603,8 +621,56 @@ func (g *GossipHandler) SetOurChallenge(addr PeerAddr, challenge uint32) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if p := g.peers[addr.String()]; p != nil {
+		p.PrevChallenge = p.OurChallenge
 		p.OurChallenge = challenge
 	}
+}
+
+// NoteInboundPingChallenge records the challenge of a crypt-ping that arrived from an
+// address, while gossip shares the tcp+12 socket. A no-op in the default layout.
+//
+// A Lugdunum peer picks the key for a datagram by its source port. From our tcp+12 it
+// uses the challenge of the crypt-ping it last sent us, not the ServerKey we issued
+// (eserver's servgetrandkey), so a reply sent from that socket has to be keyed on this
+// value or it is dropped unread. eserver pings once and then again only every 3599 s,
+// with its ServerKey as the challenge; recording whatever arrives follows that.
+//
+// Recorded for addresses not in the table yet as well, because a peer's first ping and
+// its first registration race and it will not ping again for an hour. That makes the map
+// writable by anyone, so it is capped; ReplyKeyFor only ever reads it for a known peer.
+func (g *GossipHandler) NoteInboundPingChallenge(from net.IP, challenge uint32) {
+	if g == nil || from == nil || challenge == 0 {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.sharesPingPortLocked() {
+		return
+	}
+	key := NormalizeIP(from).String()
+	if _, held := g.inboundChallenges[key]; !held && len(g.inboundChallenges) >= maxInboundChallenges {
+		for victim := range g.inboundChallenges {
+			delete(g.inboundChallenges, victim)
+			break
+		}
+	}
+	g.inboundChallenges[key] = challenge
+}
+
+// ReplyKeyFor returns the key a reply to a peer server must be encrypted with when it
+// leaves the shared tcp+12 socket: that peer's last crypt-ping challenge. False in the
+// default layout, for an address that is not a peer, and for a peer that has not pinged.
+func (g *GossipHandler) ReplyKeyFor(to net.IP) (uint32, bool) {
+	if g == nil || to == nil {
+		return 0, false
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if !g.sharesPingPortLocked() || g.findByIPLocked(to) == nil {
+		return 0, false
+	}
+	challenge, ok := g.inboundChallenges[NormalizeIP(to).String()]
+	return challenge, ok
 }
 
 // SetPlainChallenge records the challenge sent with the phase-1 plain 0x96. Separate from
@@ -620,20 +686,27 @@ func (g *GossipHandler) SetPlainChallenge(addr PeerAddr, challenge uint32) {
 	}
 }
 
-// PingChallengeFor returns the outstanding phase-2 ping challenge for a source address, if
-// any. The receive path needs it to decrypt that peer's obf-ping reply, which is keyed on
-// the challenge rather than on any ServerKey.
-func (g *GossipHandler) PingChallengeFor(ip net.IP) (uint32, bool) {
+// PingChallengesFor returns the phase-2 ping challenges a reply from a source address may
+// be keyed on: the outstanding one, then the one before it. The receive path needs them to
+// decrypt that peer's obf-ping reply, which is keyed on the challenge rather than on any
+// ServerKey, and every reply of a peer that shares its tcp+12 socket.
+func (g *GossipHandler) PingChallengesFor(ip net.IP) []uint32 {
 	if g == nil || ip == nil {
-		return 0, false
+		return nil
 	}
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	p := g.findByIPLocked(ip)
-	if p == nil || p.OurChallenge == 0 {
-		return 0, false
+	if p == nil {
+		return nil
 	}
-	return p.OurChallenge, true
+	out := make([]uint32, 0, 2)
+	for _, c := range []uint32{p.OurChallenge, p.PrevChallenge} {
+		if c != 0 {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // PeerByIP returns a copy of the peer at an address, for the receive path which knows
@@ -817,6 +890,12 @@ func (g *GossipHandler) admitLocked(addr PeerAddr, referer net.IP) bool {
 	g.peers[key] = &PeerServer{Addr: addr, State: peerSeen, RefererIP: referer, LastSeen: time.Now()}
 	g.stats.Admitted++
 	return true
+}
+
+// sharesPingPortLocked reports whether gossip runs on the tcp+12 socket, i.e. whether the
+// portUDPOBF we advertise is the port eMule's crypt-ping is hardwired to.
+func (g *GossipHandler) sharesPingPortLocked() bool {
+	return g.cfg.UDPPortObf != 0 && int(g.cfg.UDPPortObf) == int(g.cfg.SelfPort)+peerObfPingOffset
 }
 
 // isSelfLocked reports whether an address is one of ours. Checked against the

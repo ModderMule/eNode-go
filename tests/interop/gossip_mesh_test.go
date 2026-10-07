@@ -2,11 +2,10 @@ package interop
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
-
-	"enode/ed2k"
 )
 
 // TestGossipBetweenTwoENodes covers what no run against eserver can: our own inbound
@@ -76,7 +75,10 @@ func TestGossipBetweenTwoENodes(t *testing.T) {
 // sends no datagram at all, so the old run saw silence rather than an empty list.
 //
 // Both halves therefore have to hold for this to pass: eserver must flag B `working`, and
-// it must then serve B to A. The first is checked directly below so a failure says which.
+// it must then serve B to A. Each is checked on its own evidence, because the end state
+// alone proves neither: eserver also names A to B, B then registers with A directly, and
+// A's server.met holds B without eserver ever having listed it. That is how this test used
+// to pass on runs where B was not `working` at all.
 func TestGossipPropagatesThroughEserver(t *testing.T) {
 	pool := requireInterop(t)
 	network := newNetwork(t, pool, false)
@@ -88,6 +90,15 @@ func TestGossipPropagatesThroughEserver(t *testing.T) {
 	nodeB := startEnode(t, pool, network, enodeOptions{
 		Name: "enode-b", SeedIP: eserver.ip, SeedPort: eserverTCPPort,
 	})
+	defer func() {
+		// Both nodes send eserver their list here, so this is where a list naming the
+		// requester would show. Ahead of the dump below so a hit is dumped too.
+		assertNoSelfEntry(t, eserver)
+		if t.Failed() || os.Getenv("ENODE_INTEROP_LOGS") == "1" {
+			t.Logf("output: eserver log:\n%s", eserver.logs())
+			t.Logf("output: enode-b log:\n%s", tail(nodeB.logs(), 400))
+		}
+	}()
 	waitForStats(t, nodeB, 90*time.Second, "a verified eserver", func(s liveStats) bool {
 		return s.GossipVerified >= 1
 	})
@@ -98,39 +109,73 @@ func TestGossipPropagatesThroughEserver(t *testing.T) {
 	})
 
 	// Holding B is necessary but not sufficient: a peer eserver has not flagged `working`
-	// is in its table, pinged forever, and invisible to its peer-list builder. Its
-	// server.met has the same gate, so it is the one artifact that separates "eserver never
-	// accepted B" from "eserver accepted B but did not pass it on" — and without this check
-	// the failure below could mean either.
-	var theirMet []ed2k.ServerMetEntry
-	if !waitFor(t, 60*time.Second, "eserver's server.met to contain B", func() bool {
-		eserver.console("saveServers " + eserverServerMetName)
-		theirMet = eserver.serverMet(eserverServerMet)
-		return containsEntry(theirMet, nodeB.ip, enodeTCPPort)
+	// is in its table, pinged forever, and invisible to its peer-list builder. The flag is
+	// set in its 0xa3 handler, and so is the name, so the evidence is that handler logging
+	// B's reply and B's name showing up in the table row.
+	//
+	// Either probe counts. eserver asks in plaintext on P+4 while it has no ServerKey for B
+	// and obfuscated on B's advertised portUDPOBF once it does, and stops asking when one is
+	// answered. With gossip on the tcp+12 socket the obfuscated answer was undecryptable
+	// (servgetrandkey keys a reply from tcp+12 on the crypt-ping challenge), so B was flagged
+	// only on runs where the plain probe went out first; which probe it was is logged.
+	//
+	// eserver's server.met is not used for this. It was assumed to have the same gate as the
+	// list builder, and eserver 17.14 was seen writing a B it had not flagged.
+	anyDesc := fmt.Sprintf("servdescreply(%s:", nodeB.ip)
+	obfDesc := fmt.Sprintf("servdescreply(%s:%d)", nodeB.ip, enodeUDPObfPort)
+	rowKey := fmt.Sprintf("%s:%d {", nodeB.ip, enodeTCPPort)
+	var row string
+	if !waitFor(t, 60*time.Second, "eserver to flag B `working`", func() bool {
+		eserver.console("vs")
+		logs := eserver.logs()
+		rows := allLinesMatching(logs, rowKey)
+		if len(rows) == 0 {
+			return false
+		}
+		row = rows[len(rows)-1]
+		return strings.Contains(logs, anyDesc) && strings.Contains(row, nodeB.label)
 	}) {
-		t.Fatalf("eserver holds B in its table but never wrote it to %s (%s): B is not flagged `working`, "+
-			"so eserver's peer-list builder skips it and A cannot possibly learn it. The ST_VERSION tag in "+
-			"B's 0xa3 must parse as >= 17.7 — see ed2k.GossipVersionStr",
-			eserverServerMet, describeEntries(theirMet))
+		t.Fatalf("eserver holds B in its table but has not flagged it `working`, so its peer-list builder "+
+			"skips it and A cannot learn it from eserver.\n%q logged: %t\nlatest `vs` row (want the name %q): %s\n\n"+
+			"eserver decrypts an obfuscated 0xa3 with B's ServerKey only when it arrives from B's advertised "+
+			"portUDPOBF (%d); the ST_VERSION tag in it must also parse as >= 17.7 — see ed2k.GossipVersionStr",
+			anyDesc, strings.Contains(eserver.logs(), anyDesc), nodeB.label, strings.TrimSpace(row), enodeUDPObfPort)
 	}
-	t.Logf("output: eserver %s -> %s (B is `working`)", eserverServerMet, describeEntries(theirMet))
+	t.Logf("output: eserver shows B as: %s (obfuscated 0xa3 from portUDPOBF accepted this run: %t)",
+		strings.TrimSpace(row), strings.Contains(eserver.logs(), obfDesc))
 
-	// A knows only eserver. Anything it learns about B came through eserver's peer list.
+	// A knows only eserver.
 	nodeA := startEnode(t, pool, network, enodeOptions{
 		Name: "enode-a", SeedIP: eserver.ip, SeedPort: eserverTCPPort,
 	})
 	t.Logf("input: A=%s seeded with eserver=%s only; B=%s already registered with eserver",
 		nodeA.ip, eserver.ip, nodeB.ip)
 
+	// Two conditions, and the first is the one this test exists for: a peer list *from
+	// eserver* that names B. A's server.met holding B is not enough on its own — B learns A
+	// from eserver too and registers with it, which puts B in A's table without eserver
+	// having named B to anyone.
+	named := func() string {
+		for _, line := range allLinesMatching(nodeA.logs(), fmt.Sprintf("gossip: peer list from %s names", eserver.ip)) {
+			if strings.Contains(line, fmt.Sprintf("%s:%d", nodeB.ip, enodeTCPPort)) {
+				return line
+			}
+		}
+		return ""
+	}
 	learned := waitFor(t, 2*time.Minute, "A to learn B through eserver", func() bool {
-		entries := nodeA.serverMet(enodeServerMet)
-		return containsEntry(entries, nodeB.ip, enodeTCPPort)
+		return named() != "" && containsEntry(nodeA.serverMet(enodeServerMet), nodeB.ip, enodeTCPPort)
 	})
 	stats, _ := nodeA.stats()
 	t.Logf("output: A %s, server.met -> %s", stats, describeEntries(nodeA.serverMet(enodeServerMet)))
 
 	if learned {
+		t.Logf("output: eserver named B to A: %s", strings.TrimSpace(named()))
 		return
+	}
+	if containsEntry(nodeA.serverMet(enodeServerMet), nodeB.ip, enodeTCPPort) {
+		t.Errorf("A holds B, but no peer list from eserver ever named it: A learned B from B's own " +
+			"registration, which is not propagation through eserver")
 	}
 
 	// It did not propagate. Which of two very different things happened is decided here
@@ -159,7 +204,7 @@ func TestGossipPropagatesThroughEserver(t *testing.T) {
 	// something to say and did not say it. That is a change in the reference server's
 	// behaviour, or in the request we send it, and either way it is a real failure now.
 	t.Fatalf("A never learned B through eserver: it sent 0xA4 list requests and got %d non-empty "+
-		"replies, while eserver's table and server.met both hold %s and %s.\n\n"+
+		"replies, while eserver's table holds %s and %s.\n\n"+
 		"eserver serves both OP_SERVERLIST and OP_SERVER_LIST_RES from one builder that skips "+
 		"peers it has not flagged `working`, and B clears that gate, so an empty list means the "+
 		"request itself was refused rather than the peer being withheld. Check the refusal strings "+

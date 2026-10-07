@@ -404,9 +404,9 @@ const (
 	// and from BOTH of its peer-list replies, so without this we are invisible to every
 	// client and every server behind a real eserver. See docs/server-gossip.md §3 and
 	// docs/interop-docker-tests.md §5.
-	GossipCompatVersion = "17.14"
+	GossipCompatVersion = "17.15"
 
-	// GossipVersionStr is what that tag actually carries: "17.14 (eNode-go v0.1.0)".
+	// GossipVersionStr is what that tag actually carries: "17.15 (eNode-go v0.1.0)".
 	// eserver's sscanf stops at the space and ignores the rest; eMule displays the whole
 	// string in its server-list Version column, so the part eserver ignores is where we
 	// say who we really are. Concatenated from the constants above rather than spelled

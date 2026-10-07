@@ -11,35 +11,34 @@ import (
 // throwaway YAML and loads it through the real Load path, so setDefaults runs exactly
 // as it does at boot.
 
-// TestGossipPortDefaultsToTCPPlus12 pins the port derivation, and the value is forced by
-// the reference implementation rather than chosen.
+// TestGossipPortDefaultsToTCPPlus14 pins the port derivation: a socket of its own at
+// tcp+14, eserver's own portUDPOBF default, and never the tcp+12 obfuscated client socket.
 //
-// This test previously required tcp+14 — eserver's own portUDPOBF default — and that was
-// wrong. Measured against the real binary on a shared Docker network: eserver recovers a
-// peer's *TCP* port from the UDP source port of an obfuscated frame by subtracting 12, so a
-// frame sent from tcp+14 is booked against a server two ports above the real one. It then
-// logs "received a pong from unknown server", its ping bookkeeping never confirms, and the
-// peer never appears in its server.met. From tcp+12 the same frame is booked correctly.
-//
-// The port therefore collapses onto portObfuscated deliberately; main.go shares that one
-// socket rather than binding it twice. See tests/interop and docs/server-gossip.md §8.
-func TestGossipPortDefaultsToTCPPlus12(t *testing.T) {
+// The default has moved twice. It was tcp+14, then tcp+12 shared with the client socket,
+// on a measurement that a frame from tcp+14 was booked against a server two ports above the
+// real one; that came from an unsolicited 0x97 we no longer send. Sharing tcp+12 turned out
+// to be the defect: eserver decrypts a reply arriving from a peer's tcp+12 with the
+// crypt-ping challenge and one from the advertised portUDPOBF with the ServerKey
+// (servgetrandkey), so our ServerKey-encrypted name:desc reply was dropped and we were
+// flagged `working` only when the plain ping reply won a startup race. From tcp+14 eserver
+// 17.14 and 17.15 both accept it. See tests/interop and docs/server-gossip.md §1.
+func TestGossipPortDefaultsToTCPPlus14(t *testing.T) {
 	cfg := writeConfig(t, "address: 127.0.0.1\n")
 	t.Logf("input: config with no udp port keys")
 	t.Logf("output: tcp=%d portObfuscated=%d portGossip=%d",
 		cfg.TCP.Port, cfg.UDP.PortObfuscated, cfg.UDP.PortGossip)
 
-	if cfg.UDP.PortGossip != cfg.TCP.Port+12 {
-		t.Fatalf("portGossip = %d, want tcp.port+12 = %d", cfg.UDP.PortGossip, cfg.TCP.Port+12)
+	if cfg.UDP.PortGossip != cfg.TCP.Port+14 {
+		t.Fatalf("portGossip = %d, want tcp.port+14 = %d", cfg.UDP.PortGossip, cfg.TCP.Port+14)
 	}
-	if cfg.UDP.PortGossip != cfg.UDP.PortObfuscated {
-		t.Fatalf("portGossip (%d) and portObfuscated (%d) must be the same socket by default",
+	if cfg.UDP.PortGossip == cfg.UDP.PortObfuscated {
+		t.Fatalf("portGossip (%d) must not default to the portObfuscated socket (%d)",
 			cfg.UDP.PortGossip, cfg.UDP.PortObfuscated)
 	}
 }
 
 // TestGossipPortDerivesFromCustomTCPPort makes sure the offset is computed from tcp.port,
-// not the literal 5567 the shipped config happens to carry.
+// not the literal 5569 the shipped config happens to carry.
 func TestGossipPortDerivesFromCustomTCPPort(t *testing.T) {
 	cfg := writeConfig(t, "address: 127.0.0.1\ntcp:\n  port: 4661\n")
 	t.Logf("input: tcp.port=4661; output: portObfuscated=%d portGossip=%d",
@@ -47,21 +46,55 @@ func TestGossipPortDerivesFromCustomTCPPort(t *testing.T) {
 	if cfg.UDP.PortObfuscated != 4673 {
 		t.Fatalf("portObfuscated = %d, want 4673 (4661+12)", cfg.UDP.PortObfuscated)
 	}
-	if cfg.UDP.PortGossip != 4673 {
-		t.Fatalf("portGossip = %d, want 4673: gossip shares the tcp+12 socket", cfg.UDP.PortGossip)
+	if cfg.UDP.PortGossip != 4675 {
+		t.Fatalf("portGossip = %d, want 4675 (4661+14)", cfg.UDP.PortGossip)
 	}
 }
 
-// TestGossipExplicitPortGossipIsHonoured covers the operator override. It is kept even
-// though the default is the only value that interoperates with Lugdunum: portUDPOBF is a
-// donkey.ini parameter, so a future peer implementation may want a separate socket, and
-// setting this binds one and advertises it. Against a real eserver it breaks the ping
-// bookkeeping — see TestGossipPortDefaultsToTCPPlus12.
+// TestGossipExplicitPortGossipIsHonoured covers the operator override, including the
+// shared-socket mode: setting portGossip to the portObfuscated value makes main.go send
+// gossip from that one socket instead of binding a second, for a host that cannot open
+// another port. It interoperates with Lugdunum only by luck of the startup race described
+// on TestGossipPortDefaultsToTCPPlus14, which is why it is no longer the default.
 func TestGossipExplicitPortGossipIsHonoured(t *testing.T) {
-	cfg := writeConfig(t, "address: 127.0.0.1\nudp:\n  portGossip: 9999\n")
-	t.Logf("input: udp.portGossip=9999; output: %d", cfg.UDP.PortGossip)
-	if cfg.UDP.PortGossip != 9999 {
-		t.Fatalf("portGossip = %d, want the configured 9999", cfg.UDP.PortGossip)
+	for _, tc := range []struct {
+		body string
+		want uint16
+	}{
+		{"address: 127.0.0.1\nudp:\n  portGossip: 9999\n", 9999},
+		{"address: 127.0.0.1\nudp:\n  portGossip: 5567\n", 5567},
+	} {
+		cfg := writeConfig(t, tc.body)
+		t.Logf("input: %q; output: portObfuscated=%d portGossip=%d", tc.body, cfg.UDP.PortObfuscated, cfg.UDP.PortGossip)
+		if cfg.UDP.PortGossip != tc.want {
+			t.Fatalf("portGossip = %d, want the configured %d", cfg.UDP.PortGossip, tc.want)
+		}
+	}
+}
+
+// TestGossipPortDoesNotWrap is the uint16 guard on the derived port: tcp.port+14 above
+// 65535 is refused unless udp.portGossip is set explicitly.
+func TestGossipPortDoesNotWrap(t *testing.T) {
+	for _, tc := range []struct {
+		body    string
+		wantErr bool
+	}{
+		{"address: 127.0.0.1\ntcp:\n  port: 65521\n", false},
+		{"address: 127.0.0.1\ntcp:\n  port: 65522\n", true},
+		{"address: 127.0.0.1\ntcp:\n  port: 65522\nudp:\n  portGossip: 6002\n", false},
+	} {
+		path := filepath.Join(t.TempDir(), "enode.config.yaml")
+		if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		t.Logf("input: %q, output: udp.portGossip=%d err=%v", tc.body, cfg.UDP.PortGossip, err)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("err=%v, wantErr=%t", err, tc.wantErr)
+		}
+		if tc.wantErr && !strings.Contains(err.Error(), "udp.portGossip") {
+			t.Fatalf("err=%v does not name udp.portGossip", err)
+		}
 	}
 }
 

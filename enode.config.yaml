@@ -69,13 +69,14 @@ udp:
   # docs/server-udp-crypt-ping.md.
   portObfuscated: 5567
   # The port obfuscated server-to-server frames are sent from, and the portUDPOBF value
-  # published to peers. Defaults to portObfuscated above, which is then shared rather
-  # than bound twice — and tcp.port+12 is forced, not preferred: Lugdunum recovers a
-  # peer's TCP port from this source port by subtracting 12, so a frame sent from
-  # tcp.port+14 is filed against a server that does not exist and we never count as one
-  # of its "working" servers. Change it only for a peer known to want something else.
-  # See docs/server-gossip.md.
-  portGossip: 5567
+  # published to peers and clients. Defaults to tcp.port + 14, as on Lugdunum, on a
+  # socket of its own — open it in the firewall when gossip is enabled. It must not be
+  # tcp.port+12: Lugdunum decrypts a reply arriving from that port with the crypt-ping
+  # challenge instead of our ServerKey, drops our name reply and does not count us as
+  # one of its "working" servers. Setting it equal to portObfuscated still shares that
+  # socket, for a host that cannot open another port: replies to a peer server are then
+  # keyed on its last crypt-ping challenge, which is less robust. See docs/server-gossip.md.
+  portGossip: 5569
   getSources: true
   getFiles: true
   # Each client's UDP obfuscation key is derived from a server secret + the client's

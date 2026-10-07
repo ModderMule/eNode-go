@@ -89,8 +89,9 @@ Tests pin both behaviours.
    unprefixed name, one release at a time (see [Sub-file rows](#sub-file-rows)). This
    keeps OR, NOT and extension constraints exact. It also means the prefix itself can
    never match a keyword.
-4. eD2K files come first, then the torrent rows, then the Usenet rows. The total is
-   capped at `storage.MaxSearchResults`. The existing 255-row paging
+4. eD2K files come first, then the Kad rows, then the torrent rows, then the Usenet
+   rows. Kad rows lead the meta block because they are real eD2K files, so a result
+   ceiling cuts them last. The total is capped at `storage.MaxSearchResults`. The existing 255-row paging
    (`OP_QUERY_MORE_RESULT`) is unchanged.
 
 A daemon that is slow, down, or has no search index adds at most its deadline to the
@@ -254,6 +255,14 @@ them to the server status. They are shown on the admin dashboard. Adding the use
 estimate to the advertised user count is a separate, local-only setting
 (`statsBoost.kadUsers`, `statsBoost.torrentUsers`), off by default.
 
+torrent-crawler also counts the users it has seen over time, unless its
+`dht.seen_users` is off: `network_users_seen` over a window (`network_users_seen_window`
+seconds, 30 days by default) and `network_users_seen_day` over the last 24 hours, with
+`network_users_seen_since` saying when it began. They count node ids, and a client has a
+new id whenever its address changes, so they lie above the users behind them, the
+window's figure more than the day's. A window of 0 means the daemon does not count.
+These figures are display-only: `statsBoost` never adds them.
+
 ### Admin dashboard
 
 The dashboard's Files card shows the eD2K count. When counted networks add to the
@@ -271,7 +280,9 @@ total, a line under it shows the advertised total. When meta search is on, a
 - the daemon's name and version;
 - catalogued releases and files, and the published count;
 - the daemon's estimate of its whole network: users, the experimental user figure,
-  and files, or "no estimate";
+  and files, or "no estimate". When the daemon counts the users it has seen, the same
+  row adds them: `seen 24h ~N, 30d ~N`, and for how long it has counted while that is
+  less than the window;
 - the live-search state, and whether the daemon has a search index;
 - feed rows and releases held, and whether the feed has caught up, or how far its
   cursor lags the daemon's `last_seq`;

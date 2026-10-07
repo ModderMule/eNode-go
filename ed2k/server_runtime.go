@@ -2509,11 +2509,12 @@ func (s *ServerRuntime) udpGlobServStatReq(b *Buffer, remote *net.UDPAddr, conn 
 	if err != nil {
 		return
 	}
+	// The payload always advertises the derived key; only the envelope key can differ.
 	packet, err := s.buildStatRes(challenge, crypt.ServerKey, remote)
 	if err != nil {
 		return
 	}
-	_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
+	_ = udpSend(conn, remote, packet.Bytes(), s.peerReplyCrypt(remote, crypt), module)
 }
 
 // buildStatRes builds the OP_GLOBSERVSTATRES reply for a challenge, shared by the
@@ -2569,6 +2570,7 @@ func (s *ServerRuntime) udpCryptPingReply(data []byte, remote *net.UDPAddr, conn
 	if err != nil {
 		return
 	}
+	s.gossip().NoteInboundPingChallenge(remote.IP, challenge)
 	reply := NewUDPCrypt(true, challenge).Encrypt(packet.Bytes())
 	LogUDPRaw(module, "send", remote.String(), reply)
 	_, _ = conn.WriteToUDP(reply, remote)
@@ -2579,7 +2581,7 @@ func (s *ServerRuntime) udpServDescResOld(remote *net.UDPAddr, conn UDPReplyConn
 	if err != nil {
 		return
 	}
-	_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
+	_ = udpSend(conn, remote, packet.Bytes(), s.peerReplyCrypt(remote, crypt), module)
 }
 
 func (s *ServerRuntime) udpServDescRes(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
@@ -2596,7 +2598,7 @@ func (s *ServerRuntime) udpServDescRes(b *Buffer, remote *net.UDPAddr, conn UDPR
 	if err != nil {
 		return
 	}
-	_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
+	_ = udpSend(conn, remote, packet.Bytes(), s.peerReplyCrypt(remote, crypt), module)
 }
 
 func (s *ServerRuntime) udpGlobSearchReq(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {
@@ -2649,6 +2651,21 @@ func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn U
 	for _, packet := range packets {
 		_ = udpSend(conn, remote, packet.Bytes(), crypt, module)
 	}
+}
+
+// peerReplyCrypt returns the crypt a server-protocol reply (0x97, 0xA3, 0xA1) to remote
+// must be sent with. That is crypt, the per-address derived key, except when gossip
+// shares the tcp+12 socket and remote is a peer server: a Lugdunum peer decrypts
+// anything from that port with its last crypt-ping challenge instead, see
+// GossipHandler.NoteInboundPingChallenge.
+func (s *ServerRuntime) peerReplyCrypt(remote *net.UDPAddr, crypt *UDPCrypt) *UDPCrypt {
+	if crypt == nil || crypt.Status != CsEncrypting {
+		return crypt
+	}
+	if key, ok := s.gossip().ReplyKeyFor(remote.IP); ok {
+		return NewUDPCrypt(true, key)
+	}
+	return crypt
 }
 
 func udpSend(conn UDPReplyConn, remote *net.UDPAddr, data []byte, crypt *UDPCrypt, module string) error {
