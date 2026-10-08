@@ -205,6 +205,10 @@ type ServerSearchPeerStats struct {
 // MetaNetworkStats is one torrent, Usenet or Kad network's figures: the meta.NetworkStats
 // fields the page shows. The caller maps one to the other so this package keeps no
 // dependency on the meta package.
+//
+// URL and LastError carry the catalogue daemon's address. /stats.json serves them to
+// any visitor when the dashboard is public (a widened bindIP or a reverse proxy, with
+// no admin.username), which leaks the daemons' addresses and is not desired.
 type MetaNetworkStats struct {
 	Network             string `json:"network"`
 	URL                 string `json:"url"`
