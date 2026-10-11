@@ -1,13 +1,16 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"enode/contentfilter"
 	"enode/storage"
 	"enode/tests"
 	"gopkg.in/yaml.v3"
@@ -367,6 +370,71 @@ func (c GossipConfig) PersistOrDefault() bool { return boolOrDefault(c.Persist, 
 type FilterConfig struct {
 	IPFilter IPFilterConfig `yaml:"ipfilter"`
 	GeoIP    GeoIPConfig    `yaml:"geoip"`
+
+	// Keywords refuses a file whose name holds one of these words: bar-separated,
+	// whole-word, case-insensitive, the same rules as torrent-crawler's
+	// filter.keywords. Such a file is not indexed and not served, and a search for
+	// one of the words returns nothing. One string rather than a list, so the same
+	// value can be pasted into the crawlers' configs.
+	Keywords string `yaml:"keywords"`
+	// HashBanlist, HashFilter and HashWhitelist are eD2K hash lists in the format the
+	// ed2k-server update service publishes. A ban-list hit counts against the
+	// publisher, a filter-list hit does not, and the whitelist overrides both lists
+	// and the keywords.
+	HashBanlist   HashListConfig `yaml:"hashBanlist"`
+	HashFilter    HashListConfig `yaml:"hashFilter"`
+	HashWhitelist HashListConfig `yaml:"hashWhitelist"`
+	// ReloadMinutes re-reads a changed hash list on a timer. Zero disables reloading.
+	ReloadMinutes *int `yaml:"reloadMinutes"`
+	// BanThreshold is how many distinct ban-list files one session may offer before
+	// it is disconnected and refused at login for BanMinutes. Zero disables the
+	// sanction; the files are refused either way.
+	BanThreshold *int `yaml:"banThreshold"`
+	BanMinutes   int  `yaml:"banMinutes"`
+	// Update pulls the hash lists from an ed2k-server update service.
+	Update FilterUpdateConfig `yaml:"update"`
+}
+
+// HashListConfig is one hash list file. The updater writes these, so File defaults
+// under ./data.
+type HashListConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	File    string `yaml:"file"`
+}
+
+// FilterUpdateConfig is the update service the hash lists come from. Access is granted
+// per server by the service operator, who has to put this server's public IPv4 on the
+// service's allow list. The credential sent along is a UDP key derived from this
+// server's udp secret and ReferenceIP.
+type FilterUpdateConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// ReferenceIP is the IPv4 address the access key is derived against. Optional:
+	// empty uses this server's own primary IPv4 (address, then dynIp). Set it to
+	// another server's address when the service knows this one by the key it handed
+	// that server in OP_GLOBSERVSTATRES.
+	ReferenceIP string `yaml:"referenceIP"`
+	// PublicKey is the service's Ed25519 key, 64 hex characters. A list whose
+	// signature does not verify is never installed.
+	PublicKey    string `yaml:"publicKey"`
+	BanlistURL   string `yaml:"banlistURL"`
+	FilterURL    string `yaml:"filterURL"`
+	WhitelistURL string `yaml:"whitelistURL"`
+	// IntervalHours is how often the lists are fetched. Zero uses 168 (weekly).
+	IntervalHours int `yaml:"intervalHours"`
+	// MinKeepRatio refuses a download that would shrink a list below this fraction of
+	// the installed one. Zero uses 0.5.
+	MinKeepRatio float64 `yaml:"minKeepRatio"`
+}
+
+// ReloadMinutesOrDefault is how often changed hash lists are re-read; 30 when unset.
+func (c FilterConfig) ReloadMinutesOrDefault() int { return intOrDefault(c.ReloadMinutes, 30) }
+
+// BanThresholdOrDefault is the ban-list sanction threshold; 3 when unset.
+func (c FilterConfig) BanThresholdOrDefault() int { return intOrDefault(c.BanThreshold, 3) }
+
+// ContentEnabled reports whether any content filter layer is configured.
+func (c FilterConfig) ContentEnabled() bool {
+	return strings.TrimSpace(c.Keywords) != "" || c.HashBanlist.Enabled || c.HashFilter.Enabled || c.HashWhitelist.Enabled
 }
 
 // IPFilterConfig is the static range list: an eMule/guarding.p2p ipfilter.dat or an
@@ -539,11 +607,25 @@ func intOrDefault(p *int, def int) int {
 }
 
 type StorageConfig struct {
-	Engine   string         `yaml:"engine"`
+	Engine string `yaml:"engine"`
+	// CountCacheSeconds is how long the advertised client and file totals are
+	// served from one reading before the engine is asked again. Read at startup.
+	CountCacheSeconds int `yaml:"countCacheSeconds"`
+
 	Cleanup  CleanupConfig  `yaml:"cleanup"`
 	Snapshot SnapshotConfig `yaml:"snapshot"`
 	MySQL    MySQLConfig    `yaml:"mysql"`
 	MongoDB  MongoDBConfig  `yaml:"mongodb"`
+}
+
+// DefaultCountCacheSeconds is storage.countCacheSeconds when unset.
+const DefaultCountCacheSeconds = 60
+
+func (c StorageConfig) CountCacheSecondsOrDefault() int {
+	if c.CountCacheSeconds <= 0 {
+		return DefaultCountCacheSeconds
+	}
+	return c.CountCacheSeconds
 }
 
 // SnapshotConfig persists the memory engine's index to disk so a restart does not
@@ -768,8 +850,14 @@ func setDefaults(cfg *Config) error {
 	if cfg.Filter.GeoIP.UpdateDays <= 0 {
 		cfg.Filter.GeoIP.UpdateDays = 7
 	}
+	if err := setContentFilterDefaults(&cfg.Filter); err != nil {
+		return err
+	}
 	if cfg.Storage.Engine == "" {
 		cfg.Storage.Engine = "memory"
+	}
+	if cfg.Storage.CountCacheSeconds <= 0 {
+		cfg.Storage.CountCacheSeconds = DefaultCountCacheSeconds
 	}
 	if cfg.Storage.Cleanup.StaleAfterHours <= 0 {
 		cfg.Storage.Cleanup.StaleAfterHours = 24
@@ -876,6 +964,12 @@ func (c Config) UDPSecretPath() string { return ResolveDataPath(filepath.Join(Da
 
 // GeoIPDatabasePath is the resolved location of the MaxMind country database.
 func (c Config) GeoIPDatabasePath() string { return ResolveDataPath(c.Filter.GeoIP.Database) }
+
+// HashBanlistPath, HashFilterPath and HashWhitelistPath are the resolved locations of
+// the content filter's hash lists.
+func (c Config) HashBanlistPath() string   { return ResolveDataPath(c.Filter.HashBanlist.File) }
+func (c Config) HashFilterPath() string    { return ResolveDataPath(c.Filter.HashFilter.File) }
+func (c Config) HashWhitelistPath() string { return ResolveDataPath(c.Filter.HashWhitelist.File) }
 
 // IPFilterPath is the resolved location of the operator-supplied range list. It is
 // resolved the same way even though it is not under DataDir, so that naming
@@ -1050,6 +1144,80 @@ func setMetaNetworkDefaults(key string, c *MetaNetworkConfig, defaultURL string)
 	u, err := url.Parse(c.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("%s.url %q is invalid: use http://host:port or https://host:port", key, c.URL)
+	}
+	return nil
+}
+
+// DefaultFilterUpdatePublicKey is the Ed25519 key the ed2k.emule-security.org update
+// service signs its lists with. Public by definition: it verifies a signature and
+// cannot create one.
+const DefaultFilterUpdatePublicKey = "102f8ec039fb6fcfe75dfd00cfc5cfed76d1f006aa03f0825e69f30e8c2d836d"
+
+const defaultFilterUpdateBase = "https://ed2k.emule-security.org/files/"
+
+// setContentFilterDefaults fills in and validates the content filter keys of the
+// filter section.
+func setContentFilterDefaults(f *FilterConfig) error {
+	if _, err := contentfilter.NewMatcher(f.Keywords); err != nil {
+		return fmt.Errorf("filter.keywords: %w", err)
+	}
+	if f.HashBanlist.File == "" {
+		f.HashBanlist.File = filepath.Join(DataDir, "hash_banlist.txt")
+	}
+	if f.HashFilter.File == "" {
+		f.HashFilter.File = filepath.Join(DataDir, "hash_filter.txt")
+	}
+	if f.HashWhitelist.File == "" {
+		f.HashWhitelist.File = filepath.Join(DataDir, "whitelist_hashes.txt")
+	}
+	if f.ReloadMinutesOrDefault() < 0 {
+		return fmt.Errorf("filter.reloadMinutes must not be negative, got %d", *f.ReloadMinutes)
+	}
+	if f.BanThresholdOrDefault() < 0 {
+		return fmt.Errorf("filter.banThreshold must not be negative, got %d", *f.BanThreshold)
+	}
+	if f.BanMinutes <= 0 {
+		f.BanMinutes = 1440
+	}
+
+	u := &f.Update
+	if u.PublicKey == "" {
+		u.PublicKey = DefaultFilterUpdatePublicKey
+	}
+	if u.BanlistURL == "" {
+		u.BanlistURL = defaultFilterUpdateBase + "hash_banlist.txt"
+	}
+	if u.FilterURL == "" {
+		u.FilterURL = defaultFilterUpdateBase + "hash_filter.txt"
+	}
+	if u.WhitelistURL == "" {
+		u.WhitelistURL = defaultFilterUpdateBase + "whitelist_hashes.txt"
+	}
+	if u.IntervalHours <= 0 {
+		u.IntervalHours = 168
+	}
+	if u.MinKeepRatio == 0 {
+		u.MinKeepRatio = 0.5
+	}
+	if u.MinKeepRatio < 0 || u.MinKeepRatio > 1 {
+		return fmt.Errorf("filter.update.minKeepRatio must be between 0 and 1, got %v", u.MinKeepRatio)
+	}
+	if !u.Enabled {
+		return nil
+	}
+	if _, err := contentfilter.ParsePublicKey(u.PublicKey); err != nil {
+		return fmt.Errorf("filter.update.publicKey: %w", err)
+	}
+	// Empty means this server's own primary IPv4, which is only known once dynIp is
+	// resolved. The key is derived from the raw four address bytes, so a hostname or
+	// a v6 literal cannot work.
+	if u.ReferenceIP != "" {
+		if ip := net.ParseIP(u.ReferenceIP); ip == nil || ip.To4() == nil {
+			return fmt.Errorf("filter.update.referenceIP must be an IPv4 address or empty, got %q", u.ReferenceIP)
+		}
+	}
+	if !f.HashBanlist.Enabled && !f.HashFilter.Enabled && !f.HashWhitelist.Enabled {
+		return errors.New("filter.update.enabled needs at least one of filter.hashBanlist, filter.hashFilter or filter.hashWhitelist enabled")
 	}
 	return nil
 }

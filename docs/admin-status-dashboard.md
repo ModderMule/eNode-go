@@ -124,6 +124,14 @@ from off-box once credentials are set. A public liveness probe and a public stat
 route with the advertised figures only are served by the Meta API HTTP listener
 (`GET /healthz`, `GET /status`); see [meta-api.md](meta-api.md#health-and-status).
 
+`clients` and `files` are read from storage at most once every
+`storage.countCacheSeconds` (default 60, read at startup) and shared with the
+status packets. `files` is the engine's estimate: exact on the memory engine,
+InnoDB's row estimate on mysql/mariadb and the collection's metadata count on
+mongodb. On mysql/mariadb it can differ from `SELECT COUNT(*) FROM files` by tens
+of percent and moves in steps when InnoDB recalculates its statistics; counting
+exactly would scan the whole table on every refresh.
+
 The `gossip*` fields are explained in `server-gossip.md` §5; the response carries
 further sections (filters, meta search, update check) not shown here.
 

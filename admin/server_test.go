@@ -47,6 +47,7 @@ func testServer(t *testing.T) (string, LiveStats) {
 		GossipRejectedFull: 4, GossipRejectedUnsolicited: 5, GossipRejectedPlaintext: 6,
 		FilterBlockedIP:  64,
 		FilterBlockedGeo: 8,
+		ContentFilter:    &ContentFilterStats{BanlistEntries: 1200, RefusedBanlist: 3, Keywords: 2, UpdateEnabled: true},
 		AdvertisedFiles:  6337,
 		MetaCacheEntries: 12,
 		Meta: []MetaNetworkStats{{
@@ -123,7 +124,7 @@ func TestStatsJSONReturnsSnapshot(t *testing.T) {
 		"gossipKnown", "gossipVerified", "gossipParked", "gossipAdmitted",
 		"gossipRejectedBad", "gossipRejectedSelf", "gossipRejectedClient",
 		"gossipRejectedFull", "gossipRejectedUnsolicited", "gossipRejectedPlaintext",
-		"filterBlockedIP", "filterBlockedGeo",
+		"filterBlockedIP", "filterBlockedGeo", "contentFilter",
 		"advertisedFiles", "metaCacheEntries", "meta", "serverSearch", "update",
 	} {
 		if _, ok := raw[key]; !ok {
@@ -206,6 +207,7 @@ func TestIndexRendersStaticOnly(t *testing.T) {
 	for _, id := range []string{
 		`id="clients"`, `id="files"`, `id="lowIDs"`, `id="servers"`, `id="uptime"`,
 		`id="gossip"`, `id="blocked"`, `id="blockedBreak"`,
+		`id="contentCard"`, `id="refused"`, `id="refusedBreak"`, `id="contentLists"`,
 		`id="filesAdvertised"`, `id="metaSection"`, `id="metaSummary"`, `id="metaCards"`,
 		`id="update"`,
 	} {

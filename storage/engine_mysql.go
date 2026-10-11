@@ -280,6 +280,26 @@ func (m *MySQLEngine) FilesCount() int {
 	return c
 }
 
+// FilesCountEstimate reads InnoDB's row estimate instead of counting. COUNT(*)
+// on InnoDB scans a whole index — seconds on a table of millions, and it was
+// issued every cache refresh and once per browse page of a mirroring peer. The
+// estimate is a metadata lookup; it moves in steps as InnoDB recalculates its
+// statistics and can differ from the exact count by tens of percent.
+func (m *MySQLEngine) FilesCountEstimate() int {
+	if err := m.ensureDB(); err != nil {
+		return 0
+	}
+	var rows sql.NullInt64
+	err := m.db.QueryRow(
+		`SELECT TABLE_ROWS FROM information_schema.TABLES
+		 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'files'`).Scan(&rows)
+	if err != nil || !rows.Valid {
+		logging.Errorf("mysql files count estimate unavailable (err=%v), counting instead", err)
+		return m.FilesCount()
+	}
+	return int(rows.Int64)
+}
+
 func (m *MySQLEngine) AddFile(file File, clientInfo ClientInfo) {
 	m.AddFiles([]File{file}, clientInfo)
 }

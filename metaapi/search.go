@@ -51,6 +51,11 @@ type SearchConfig struct {
 	// shares here is answered with the server's name and source counts; without
 	// it, rows go out as the daemon sent them.
 	OwnFiles OwnFiles
+	// Withheld reports a row the server's content filter refuses to serve, by eD2K
+	// hash (nil for any other kind) and name; a release holding one is left out.
+	// QueryBlocked reports a query answered with nothing. Nil means no filter.
+	Withheld     func(hash []byte, name string) bool
+	QueryBlocked func(query string) bool
 	// RequireAccount asks for an active account; it only applies with accounts on.
 	RequireAccount bool
 	// MaxLimit caps releases per page; Window is the deepest release reachable.
@@ -133,6 +138,9 @@ func (c *catalogSearch) run(ctx context.Context, req *metav1.SearchRequest) (*me
 	if len(strings.Fields(req.GetQuery())) == 0 {
 		return nil, &FetchError{Code: connect.CodeInvalidArgument, MsgCode: CodeSearchQueryRequired}
 	}
+	if c.cfg.QueryBlocked != nil && c.cfg.QueryBlocked(req.GetQuery()) {
+		return &metav1.SearchResponse{}, nil
+	}
 	limit := int(req.GetLimit())
 	if limit == 0 {
 		limit = defaultSearchLimit
@@ -164,7 +172,12 @@ func (c *catalogSearch) run(ctx context.Context, req *metav1.SearchRequest) (*me
 
 	resp := &metav1.SearchResponse{Window: uint32(c.cfg.Window)}
 	resp.Total, resp.TotalExact = total(streams)
+	// Withheld after paging, so the offsets a client pages by still count the rows
+	// the networks returned; a page can come back short.
 	for _, release := range page {
+		if c.withheld(release) {
+			continue
+		}
 		resp.Entries = append(resp.Entries, release...)
 	}
 	if next := offset + len(page); more && next < c.cfg.Window {
@@ -501,6 +514,19 @@ func (c *catalogSearch) ownFilesWin(page []meta.Release) {
 			page[i] = changed
 		}
 	}
+}
+
+// withheld reports whether the content filter refuses any row of a release.
+func (c *catalogSearch) withheld(release meta.Release) bool {
+	if c.cfg.Withheld == nil {
+		return false
+	}
+	for _, entry := range release {
+		if c.cfg.Withheld(ed2kHash(entry), entry.GetName()) {
+			return true
+		}
+	}
+	return false
 }
 
 // ed2kHash is the MD4 of an eD2K entry, and nil for any other kind.

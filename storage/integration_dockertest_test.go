@@ -90,6 +90,14 @@ func TestMySQLEngineWithDockertest(t *testing.T) {
 	if engine.FilesCount() < 1 {
 		t.Fatalf("expected files count > 0")
 	}
+	// InnoDB's estimate is only as fresh as its statistics; ANALYZE refreshes them.
+	if _, err := engine.db.Exec(`ANALYZE TABLE files`); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("output: FilesCount=%d FilesCountEstimate=%d", engine.FilesCount(), engine.FilesCountEstimate())
+	if engine.FilesCountEstimate() < 1 {
+		t.Fatalf("expected files count estimate > 0 after ANALYZE")
+	}
 	sources := engine.GetSources(file.Hash, file.Size)
 	if len(sources) == 0 {
 		t.Fatalf("expected sources for file")
@@ -166,6 +174,10 @@ func TestMongoEngineWithDockertest(t *testing.T) {
 	engine.AddFile(file, client)
 	if engine.FilesCount() < 1 {
 		t.Fatalf("expected files count > 0")
+	}
+	t.Logf("output: FilesCount=%d FilesCountEstimate=%d", engine.FilesCount(), engine.FilesCountEstimate())
+	if engine.FilesCountEstimate() != engine.FilesCount() {
+		t.Fatalf("estimate %d, want the count %d", engine.FilesCountEstimate(), engine.FilesCount())
 	}
 	sources := engine.GetSources(file.Hash, file.Size)
 	if len(sources) == 0 {

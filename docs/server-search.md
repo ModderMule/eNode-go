@@ -45,9 +45,15 @@ a source. See [Privacy](#privacy).
 
 | RPC | Purpose |
 |---|---|
-| `GetServerInfo` | Name, file count, what is served, the limits, the catalogue epoch |
+| `GetServerInfo` | Name, file count (an estimate, see below), what is served, the limits, the catalogue epoch |
 | `SearchFiles` | Keyword search, paged by offset |
 | `BrowseFiles` | Walk of the whole catalogue, paged by token |
+
+The file count in `GetServerInfo` and the `total` of a `BrowseFiles` page are the
+storage engine's estimate, not a count: exact on the memory engine, InnoDB's row
+estimate on mysql/mariadb and the collection's metadata count on mongodb. On
+mysql/mariadb it can differ from the real number by tens of percent and moves in
+steps. A peer must treat it as a size hint and end a walk on the empty page token.
 
 All three need the caller to be admitted (see [Who may call](#who-may-call)).
 The listener speaks gRPC, gRPC-Web and the Connect protocol on one port, over

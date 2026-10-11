@@ -94,6 +94,29 @@ filter:
     accountID: ""
     licenseKey: ""
     updateDays: 7
+  # Content filter: keywords, eD2K hash lists and their updater. See enode.config.yaml.
+  keywords: ""
+  hashBanlist:
+    enabled: false
+    file: "data/hash_banlist.txt"
+  hashFilter:
+    enabled: false
+    file: "data/hash_filter.txt"
+  hashWhitelist:
+    enabled: false
+    file: "data/whitelist_hashes.txt"
+  reloadMinutes: 30
+  banThreshold: 3
+  banMinutes: 1440
+  update:
+    enabled: false
+    referenceIP: "" # optional; empty = this server's own primary IPv4
+    publicKey: "102f8ec039fb6fcfe75dfd00cfc5cfed76d1f006aa03f0825e69f30e8c2d836d"
+    banlistURL: "https://ed2k.emule-security.org/files/hash_banlist.txt"
+    filterURL: "https://ed2k.emule-security.org/files/hash_filter.txt"
+    whitelistURL: "https://ed2k.emule-security.org/files/whitelist_hashes.txt"
+    intervalHours: 168
+    minKeepRatio: 0.5
 
 # Off: the rig has no catalogue daemons, and the interop tests pin plain eD2K answers.
 metaSearch:
@@ -347,6 +370,7 @@ admin:
 
 storage:
   engine: memory
+  countCacheSeconds: 60
   cleanup:
     enabled: false
 

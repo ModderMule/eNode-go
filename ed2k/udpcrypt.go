@@ -147,6 +147,14 @@ func (u *UDPCrypt) encrypt(buffer []byte, direction byte) []byte {
 	return out.Bytes()
 }
 
+// DeriveUDPKey is the key this server hands the peer at ip in OP_GLOBSERVSTATRES. The
+// content filter's updater presents the key derived for its reference server as its
+// credential: that server recorded it during gossip and exported it to the update
+// service, so no separate secret has to be exchanged.
+func DeriveUDPKey(secret []byte, ip net.IP) uint32 {
+	return deriveUDPKey(secret, ip)
+}
+
 // deriveUDPKey returns the per-client server-UDP obfuscation key: MD5(secret ‖
 // clientIP) folded to a uint32. Binding the key to the source IP restores the
 // anti-spoofing property a single global key gave up — eMule re-pings for a

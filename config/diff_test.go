@@ -107,6 +107,8 @@ func TestReloadableClassifiesKeys(t *testing.T) {
 		"gossipExtra":             false,
 		"natTraversal.enabled":    false,
 		"filter.ipfilter.enabled": false,
+		"filter.keywords":         false,
+		"filter.update.enabled":   false,
 	}
 	for path, want := range cases {
 		got := Reloadable(path)

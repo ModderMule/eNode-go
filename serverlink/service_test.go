@@ -30,6 +30,38 @@ import (
 
 const testToken = "a-long-random-test-token"
 
+// estimateCatalog reports a file total no count of its files would give, so a
+// test can tell the estimate from a count.
+type estimateCatalog struct {
+	Catalog
+	estimate int
+}
+
+func (c estimateCatalog) FilesCountEstimate() int { return c.estimate }
+
+// TestFileTotalsAreTheEstimate: the totals told to a peer come from the engine's
+// estimate. The exact count is a full scan on a DB engine, and BrowseFiles asked
+// for it on every page.
+func TestFileTotalsAreTheEstimate(t *testing.T) {
+	fx := startService(t, nil)
+	fx.svc.catalog = estimateCatalog{Catalog: fx.svc.catalog, estimate: 777}
+	client := fx.client(testToken, "")
+
+	info, err := client.GetServerInfo(context.Background(), &metav1.GetServerInfoRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := client.BrowseFiles(context.Background(), &metav1.BrowseFilesRequest{Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("input:  catalogue estimate=777, exact count=%d", fx.engine.FilesCount())
+	t.Logf("output: ServerInfo.files=%d, BrowseFiles total=%d", info.Files, page.Total)
+	if info.Files != 777 || page.Total != 777 {
+		t.Fatalf("files=%d total=%d, want the estimate 777 in both", info.Files, page.Total)
+	}
+}
+
 // TestSearchFilesPagesAndFilters: a search returns the matching files in pages
 // that follow next_offset, and applies type, size, source and exclude filters.
 func TestSearchFilesPagesAndFilters(t *testing.T) {

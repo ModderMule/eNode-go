@@ -28,7 +28,15 @@ const backgroundEnvKey = "ENODE_BACKGROUND"
 func main() {
 	configPath := flag.String("config", "enode.config.yaml", "path to YAML config")
 	daemon := flag.Bool("daemon", false, "run in background")
+	updateFilters := flag.Bool("update-filters", false, "download the content filter hash lists once and exit")
 	flag.Parse()
+
+	if *updateFilters {
+		if err := runUpdateFilters(context.Background(), *configPath, os.Stdout); err != nil {
+			log.Fatalf("update filters: %v", err)
+		}
+		return
+	}
 
 	if *daemon && os.Getenv(backgroundEnvKey) != "1" {
 		pid, err := startBackgroundProcess(filterDaemonArgs(os.Args[1:]))
@@ -211,9 +219,21 @@ func run(ctx context.Context, configPath string) error {
 		logging.Infof("advertising server IP %s (address=%q is not routable)", advertisedIP, cfg.Address)
 	}
 
+	// Hash lists and keywords: which files are refused on publish and withheld when
+	// serving. Built before the services below, which serve the file store too and
+	// are handed it through the filter.
+	contentFilter, err := buildContentFilter(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("content filter: %w", err)
+	}
+	if contentFilter == nil {
+		logging.Infof("content filter: disabled")
+	}
+	servedFiles := withFilter(engine, contentFilter)
+
 	// The server-to-server search service, built before the runtime: in gossip
 	// mode the UDP description reply advertises it. See docs/server-search.md.
-	serverSearch, err := buildServerSearch(cfg, engine, advertisedIP)
+	serverSearch, err := buildServerSearch(cfg, servedFiles, advertisedIP)
 	if err != nil {
 		return fmt.Errorf("server search: %w", err)
 	}
@@ -222,7 +242,7 @@ func run(ctx context.Context, configPath string) error {
 	// OP_SERVERIDENT advertises it. Its listeners start below. It comes after the
 	// server search, whose files its own search can answer with. See
 	// docs/meta-api.md.
-	metaAPI, err := buildMetaAPI(ctx, cfg, engine, metaSearcher, serverSearch.peerSearcher(), advertisedIP)
+	metaAPI, err := buildMetaAPI(ctx, cfg, engine, servedFiles, contentFilter, metaSearcher, serverSearch.peerSearcher(), advertisedIP)
 	if err != nil {
 		return fmt.Errorf("meta api: %w", err)
 	}
@@ -247,6 +267,29 @@ func run(ctx context.Context, configPath string) error {
 	}
 	runtimeTCP, runtimeUDP := buildRuntimeConfigs(cfg, derived)
 	runtime := ed2k.NewServerRuntime(runtimeTCP, runtimeUDP, engine)
+
+	// Attached only when there is one: a nil *Filter stored in the interface would
+	// not compare equal to nil.
+	if contentFilter != nil {
+		runtime.SetContentFilter(contentFilter)
+	}
+	// The scheduled hash-list updater. Its credential is derived from the udp secret
+	// and the reference IP (by default this server's own), hence after the secret
+	// is loaded and dynIp is resolved.
+	filterUpdater, err := buildFilterUpdater(cfg, udpSecret, func() {
+		if err := contentFilter.Reload(); err != nil {
+			logging.Errorf("content filter: reload after update failed: %v", err)
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("content filter update: %w", err)
+	}
+	if filterUpdater != nil {
+		go filterUpdater.Run(ctx)
+		reference, _ := filterReferenceIP(cfg)
+		logging.Infof("content filter update: enabled, every %dh, access key derived against %s",
+			cfg.Filter.Update.IntervalHours, reference)
+	}
 
 	// Access filters: ipfilter.dat ranges and MaxMind country blocking. A blocked address
 	// is dropped before any wire parsing on both transports.
@@ -377,6 +420,7 @@ func run(ctx context.Context, configPath string) error {
 					GossipRejectedPlaintext:   gossip.RejectedPlaintext,
 					FilterBlockedIP:           blockedIP,
 					FilterBlockedGeo:          blockedGeo,
+					ContentFilter:             contentFilterStats(contentFilter, filterUpdater),
 					// Files stays the eD2K count; this is what clients are sent.
 					AdvertisedFiles:  runtime.AdvertisedFiles(),
 					MetaCacheEntries: metaCacheEntries,

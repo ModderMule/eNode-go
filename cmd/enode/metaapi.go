@@ -13,6 +13,7 @@ import (
 	"enode/accounts/payment/woocommerce"
 	"enode/admin"
 	"enode/config"
+	"enode/contentfilter"
 	"enode/ed2k"
 	"enode/logging"
 	"enode/meta"
@@ -47,7 +48,7 @@ type metaAPIRuntime struct {
 // servers is the searcher that asks other servers, or nil. With
 // metaApi.search.servers on, MetaApi.Search answers with their files and this
 // server's own as the servers network.
-func buildMetaAPI(ctx context.Context, cfg config.Config, engine storage.Engine, searcher *meta.Searcher, servers *serverlink.Searcher, advertisedIP string) (*metaAPIRuntime, error) {
+func buildMetaAPI(ctx context.Context, cfg config.Config, engine, servedFiles storage.Engine, contentFilter *contentfilter.Filter, searcher *meta.Searcher, servers *serverlink.Searcher, advertisedIP string) (*metaAPIRuntime, error) {
 	c := cfg.MetaAPI
 	if !c.Enabled {
 		return nil, nil
@@ -117,7 +118,7 @@ func buildMetaAPI(ctx context.Context, cfg config.Config, engine storage.Engine,
 				servers = serverlink.NewSearcher(serverlink.SearcherConfig{})
 			}
 			servers.EnableCatalog(serverlink.CatalogConfig{
-				Own:     engine,
+				Own:     servedFiles,
 				Window:  s.Window,
 				Timeout: time.Duration(s.TimeoutMs) * time.Millisecond,
 				// The cache is sized in chunks; an answer here is a whole search.
@@ -131,7 +132,9 @@ func buildMetaAPI(ctx context.Context, cfg config.Config, engine storage.Engine,
 		}
 		svcCfg.Search = &metaapi.SearchConfig{
 			Catalog:             catalog,
-			OwnFiles:            engine,
+			OwnFiles:            servedFiles,
+			Withheld:            contentWithheld(contentFilter),
+			QueryBlocked:        contentQueryBlocked(contentFilter),
 			RequireAccount:      c.SearchRequiresAccount(),
 			MaxLimit:            s.MaxLimit,
 			Window:              s.Window,

@@ -124,7 +124,10 @@ type ServerRuntime struct {
 	// reload may call with the listeners live; read it through gossip().
 	gossipHandler atomic.Pointer[GossipHandler]
 	// Filter refuses blocked addresses before any parsing, or nil to filter nothing.
-	Filter   AccessFilter
+	Filter AccessFilter
+	// Content refuses files by hash list and keyword; nil when no content filter is
+	// configured. See SetContentFilter.
+	Content  ContentFilter
 	counters *counterCache
 	// udpLimiter applies UDPRuntimeConfig.RateLimitPerIPPerMinute.
 	udpLimiter *ratelimit.Limiter
@@ -660,6 +663,11 @@ type tcpClient struct {
 	offeredFiles    int
 	softLimitWarned bool
 	hardLimitHit    bool
+	// banlistHits holds the distinct ban-list files this session has offered, and
+	// banlistDropped latches the handler once that got the session dropped, as
+	// hardLimitHit does. Nil until the first hit, which most sessions never have.
+	banlistHits    map[[16]byte]struct{}
+	banlistDropped bool
 
 	// loginGateTripped makes requireLogin inert once it has dropped the session, for
 	// exactly the reason hardLimitHit exists above: closeWithReason closes the socket
@@ -1042,6 +1050,16 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		return
 	}
 
+	// A publisher banned for offering ban-list files is refused before anything is
+	// allocated for the session. Told why, or the client just sees a server that
+	// drops it and retries forever.
+	if c.server.Content != nil && c.server.Content.Banned(req.Hash, c.peerIP) {
+		logging.Warnf("login rejected remote=%s hash=%x: banned by the content filter", c.remoteHost, req.Hash)
+		c.sendServerMessage(msgBanned)
+		c.closeWithReason("content-ban")
+		return
+	}
+
 	// Reject the new connection when this user hash is already online, rather
 	// than evicting the existing session. The hash is public — it is broadcast in
 	// OP_HELLO and handed out in OP_FOUNDSOURCES_OBFU — so eviction let any peer
@@ -1414,7 +1432,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	// returns, so a client that pipelines two offers in one segment reaches this again
 	// after the drop — without this latch it would be sent a second message on a closed
 	// socket and logged twice.
-	if c.hardLimitHit {
+	if c.hardLimitHit || c.banlistDropped {
 		return
 	}
 	// data.Bytes() is the whole payload regardless of the read pointer (buffer.go:90-92),
@@ -1442,7 +1460,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	// and taking it per file would lock once per offered file.
 	info := c.snapshotInfo()
 	softLimit, hardLimit := c.server.tcp().SoftFileLimit, c.server.tcp().HardFileLimit
-	var zeroSize, metaHashes int
+	var zeroSize, metaHashes, contentRefused int
 	// The whole packet is written in one AddFiles call. Storing record by record cost
 	// a fixed set of round-trips per file, so a database outside the host turned one
 	// 200-file offer into most of a minute of blocked read loop and held pool
@@ -1469,6 +1487,24 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 			// advertises would then acquire "sources" that serve nothing. Dropped before
 			// the counter, like a zero size.
 			metaHashes++
+			continue
+		}
+		if refused, sanction := c.server.checkOffer(record.Hash, recordName(record)); refused {
+			// On a hash list or holding a filtered keyword. Dropped before the
+			// counter like the two cases above, so a refused file is charged against
+			// neither publish limit.
+			contentRefused++
+			if sanction && c.noteBanlistHit(record.Hash) {
+				// Nothing of this packet is stored: the session is going away and
+				// its sources with it.
+				c.banlistDropped = true
+				c.server.Content.Ban(info.Hash, c.peerIP)
+				logging.Warnf("offer files ban list remote=%s id=%d hash=%x distinct=%d: closing and banning",
+					c.remoteHost, info.ID, info.Hash, len(c.banlistHits))
+				c.sendServerMessage(msgBanlisted)
+				c.closeWithReason("banlist")
+				return
+			}
 			continue
 		}
 		c.offeredFiles++
@@ -1513,6 +1549,10 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	}
 	// One line for the packet, never one per record: a client at the hard limit can
 	// put 20,000 records in a single offer.
+	if contentRefused > 0 {
+		logging.Warnf("offer files content filter remote=%s id=%d refused=%d of=%d",
+			c.remoteHost, info.ID, contentRefused, len(records))
+	}
 	if zeroSize > 0 {
 		logging.Warnf("offer files zero size remote=%s id=%d dropped=%d of=%d",
 			c.remoteHost, info.ID, zeroSize, len(records))
@@ -1534,7 +1574,10 @@ func (c *tcpClient) handleGetSources(data *Buffer, obfuscated bool) {
 	if !ok {
 		return
 	}
-	sources := c.server.Storage.GetSources(hash, fileSize)
+	var sources []storage.Source
+	if !c.server.withheldHash(hash) {
+		sources = c.server.Storage.GetSources(hash, fileSize)
+	}
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=%s sourcesFound=%d", c.remoteHost, opNameGetSources(obfuscated), len(sources))
 	// A v6-capable session (connected over IPv6, or having sent CT_MOD_IP_V6) can
 	// parse the sentinel, so IPv6-only sources are published to it inline. Every
@@ -1555,7 +1598,10 @@ func (c *tcpClient) handleGetSourcesIPv6(data *Buffer) {
 	if !ok {
 		return
 	}
-	sources := c.server.v6PublishableSources(c.server.Storage.GetSources(hash, fileSize))
+	var sources []storage.Source
+	if !c.server.withheldHash(hash) {
+		sources = c.server.v6PublishableSources(c.server.Storage.GetSources(hash, fileSize))
+	}
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_GETSOURCES_IPV6 sourcesFound=%d", c.remoteHost, len(sources))
 	packet, err := BuildFoundSourcesIPv6Packet(hash, sources)
 	if err != nil {
@@ -1600,8 +1646,14 @@ func (c *tcpClient) handleSearchRequest(data *Buffer) {
 		return
 	}
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST expr=%s", c.remoteHost, formatSearchExpr(expr))
+	if c.server.queryBlocked(expr) {
+		// Answered like any search with no match, and without asking the index or
+		// the catalogue daemons.
+		c.sendSearchPage(nil)
+		return
+	}
 	metaCh := c.server.startMetaSearch(expr, c.metaCapable, false)
-	files := mergeMetaResults(c.server.Storage.FindBySearch(expr), metaCh)
+	files := c.server.withholdFiles(mergeMetaResults(c.server.Storage.FindBySearch(expr), metaCh))
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST resultCount=%d", c.remoteHost, len(files))
 	// A zero-result reply must still be sent. OP_SEARCHRESULT is the only packet
 	// that reaches eMule's LocalEd2kSearchEnd, which is what cancels the 50 s
@@ -1625,7 +1677,9 @@ func (c *tcpClient) handleQueryMoreResult() {
 	}
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_QUERY_MORE_RESULT pending=%d",
 		c.remoteHost, len(c.pendingResults))
-	c.sendSearchPage(c.pendingResults)
+	// Filtered again: the pages were cut when the search ran, and a list can have
+	// gained a hash since.
+	c.sendSearchPage(c.server.withholdFiles(c.pendingResults))
 }
 
 // sendSearchPage sends the first storage.MaxSearchPage of files, keeps the remainder for
@@ -2408,6 +2462,9 @@ func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn U
 		if len(hash) != 16 {
 			return
 		}
+		if s.withheldHash(hash) {
+			continue
+		}
 		sources := s.Storage.GetSourcesByHash(hash)
 		if len(sources) == 0 {
 			continue
@@ -2438,6 +2495,9 @@ func (s *ServerRuntime) udpGlobGetSources2(b *Buffer, remote *net.UDPAddr, conn 
 				return
 			}
 			fileSize = v
+		}
+		if s.withheldHash(hash) {
+			continue
 		}
 		sources := s.Storage.GetSources(hash, fileSize)
 		if len(sources) == 0 {
@@ -2471,6 +2531,9 @@ func (s *ServerRuntime) udpGlobGetSourcesIPv6(b *Buffer, remote *net.UDPAddr, co
 				return
 			}
 			fileSize = v
+		}
+		if s.withheldHash(hash) {
+			continue
 		}
 		sources := s.v6PublishableSources(s.Storage.GetSources(hash, fileSize))
 		if len(sources) == 0 {
@@ -2609,8 +2672,12 @@ func (s *ServerRuntime) udpGlobSearchReq(b *Buffer, remote *net.UDPAddr, conn UD
 	// OP_GLOBSEARCHREQ and ...REQ2 carry no tag block, so the requester cannot have
 	// asked for meta rows: it gets the pseudo-hash ones only when they go to every
 	// client. Kad rows are plain eD2K files and it gets those regardless.
+	if s.queryBlocked(expr) {
+		return
+	}
 	metaCh := s.startMetaSearch(expr, false, true)
-	files := capUDPSearchResults(mergeMetaResults(s.Storage.FindBySearch(expr), metaCh))
+	// Withheld before the cap, or refused rows would use up result slots.
+	files := capUDPSearchResults(s.withholdFiles(mergeMetaResults(s.Storage.FindBySearch(expr), metaCh)))
 	if len(files) == 0 {
 		return
 	}
@@ -2639,8 +2706,11 @@ func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn U
 		return
 	}
 	metaCapable := udpSearchFlags(tags)&SrvCapUDPMetaSearch != 0
+	if s.queryBlocked(expr) {
+		return
+	}
 	metaCh := s.startMetaSearch(expr, metaCapable, true)
-	files := capUDPSearchResults(mergeMetaResults(s.Storage.FindBySearch(expr), metaCh))
+	files := capUDPSearchResults(s.withholdFiles(mergeMetaResults(s.Storage.FindBySearch(expr), metaCh)))
 	if len(files) == 0 {
 		return
 	}

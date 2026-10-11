@@ -36,7 +36,8 @@ const maxQueryBytes = 256
 // Catalog is the part of the storage engine the service reads: this server's
 // own files, as its connected clients offer them.
 type Catalog interface {
-	FilesCount() int
+	// FilesCountEstimate is the catalogue size told to a peer: cheap, not exact.
+	FilesCountEstimate() int
 	FindBySearch(*storage.SearchExpr) []storage.File
 	BrowseFiles(cursor []byte, limit int) (files []storage.File, next []byte, err error)
 }
@@ -109,7 +110,7 @@ func (s *Service) GetServerInfo(ctx context.Context, _ *metav1.GetServerInfoRequ
 	s.stats.InfoCalls.Add(1)
 	info := model.ServerInfo{
 		ContractVersion:          model.ServerContractVersion,
-		Files:                    uint64(max(s.catalog.FilesCount(), 0)),
+		Files:                    uint64(max(s.catalog.FilesCountEstimate(), 0)),
 		SearchAvailable:          s.cfg.Search,
 		BrowseAvailable:          s.cfg.Browse,
 		MaxSearchLimit:           uint32(s.cfg.MaxSearchLimit),
@@ -170,7 +171,7 @@ func (s *Service) BrowseFiles(ctx context.Context, req *metav1.BrowseFilesReques
 		return nil, connectError(connect.CodeUnimplemented, CodeBrowseDisabled)
 	}
 	q := pbconv.BrowseQueryFromProto(req)
-	page := model.BrowsePage{CatalogEpoch: s.epoch, Total: uint64(max(s.catalog.FilesCount(), 0))}
+	page := model.BrowsePage{CatalogEpoch: s.epoch, Total: uint64(max(s.catalog.FilesCountEstimate(), 0))}
 
 	var cursor []byte
 	if len(q.PageToken) != 0 {

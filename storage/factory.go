@@ -20,6 +20,11 @@ type Engine interface {
 	Connect(ClientInfo) (uint64, error)
 	Disconnect(ClientInfo)
 	FilesCount() int
+	// FilesCountEstimate is the file total for display: the status packets, the
+	// dashboard, a peer's ServerInfo. It must be cheap at any table size, so a DB
+	// engine answers from its own statistics and may be off by tens of percent.
+	// Nothing may branch on it; FilesCount is the exact figure.
+	FilesCountEstimate() int
 	AddFile(File, ClientInfo)
 	// AddFiles stores every file one client offered in one packet. The result must
 	// equal calling AddFile for each file in order — a later duplicate of the same

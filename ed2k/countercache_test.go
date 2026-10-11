@@ -15,7 +15,9 @@ type countingEngine struct {
 	storage.Engine
 	clientsCalls atomic.Int64
 	filesCalls   atomic.Int64
-	delay        time.Duration
+	// exactFilesCalls counts FilesCount, the scan the cache replaced.
+	exactFilesCalls atomic.Int64
+	delay           time.Duration
 }
 
 func (e *countingEngine) ClientsCount() int {
@@ -26,7 +28,14 @@ func (e *countingEngine) ClientsCount() int {
 	return 7
 }
 
+// FilesCount is the exact count, which the cache must never ask for: on a DB
+// engine it is a full scan.
 func (e *countingEngine) FilesCount() int {
+	e.exactFilesCalls.Add(1)
+	return 42
+}
+
+func (e *countingEngine) FilesCountEstimate() int {
 	e.filesCalls.Add(1)
 	if e.delay > 0 {
 		time.Sleep(e.delay)
@@ -56,6 +65,9 @@ func TestCounterCacheServesRepeatedReadsFromOneQuery(t *testing.T) {
 	t.Logf("input: %d reads within the TTL", reads)
 	t.Logf("output: storage queries=%d", engine.queries())
 
+	if n := engine.exactFilesCalls.Load(); n != 0 {
+		t.Fatalf("%d exact FilesCount calls, want 0: the cache must use the estimate", n)
+	}
 	if engine.queries() != 2 {
 		t.Fatalf("%d queries for %d reads, want 2", engine.queries(), reads)
 	}
@@ -222,7 +234,7 @@ func TestServerStatusUsesTheCache(t *testing.T) {
 func TestNewCounterCacheDefaultTTL(t *testing.T) {
 	cache := newCounterCache(storage.NewMemoryEngine(), 0)
 	t.Logf("output: ttl=%s", cache.ttl)
-	if cache.ttl != defaultCounterCacheTTL {
-		t.Fatalf("ttl=%s, want %s", cache.ttl, defaultCounterCacheTTL)
+	if cache.ttl != time.Minute {
+		t.Fatalf("ttl=%s, want %s", cache.ttl, time.Minute)
 	}
 }

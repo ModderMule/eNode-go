@@ -217,6 +217,21 @@ func (m *MongoDBEngine) FilesCount() int {
 	return int(n)
 }
 
+// FilesCountEstimate reads the collection's metadata count rather than scanning
+// it, which CountDocuments with an empty filter does.
+func (m *MongoDBEngine) FilesCountEstimate() int {
+	if err := m.ensureDB(); err != nil {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
+	defer cancel()
+	n, err := m.db.Collection("files").EstimatedDocumentCount(ctx)
+	if err != nil {
+		return 0
+	}
+	return int(n)
+}
+
 func (m *MongoDBEngine) AddFile(file File, clientInfo ClientInfo) {
 	m.AddFiles([]File{file}, clientInfo)
 }

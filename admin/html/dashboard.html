@@ -62,6 +62,7 @@ button:disabled{opacity:.6;cursor:default}
 <div class="card"><div class="label">LowID registrations</div><div class="value" id="lowIDs">…</div></div>
 <div class="card"><div class="label">Peer servers</div><div class="value" id="servers">…</div><div class="desc" id="gossip" style="margin:0"></div><div class="desc" id="gossipRej" style="margin:0"></div></div>
 <div class="card"><div class="label">Blocked addresses</div><div class="value" id="blocked">…</div><div class="desc" id="blockedBreak" style="margin:0"></div></div>
+<div class="card" id="contentCard" hidden><div class="label">Refused files</div><div class="value" id="refused">…</div><div class="desc" id="refusedBreak" style="margin:0"></div><div class="desc" id="contentLists" style="margin:0"></div></div>
 <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">…</div></div>
 </div>
 
@@ -218,6 +219,29 @@ function metaCard(m){
   card.appendChild(table);
   return card;
 }
+// renderContentFilter fills the refused-files card; hidden while the filter is off.
+function renderContentFilter(c){
+  var card = document.getElementById('contentCard');
+  if(!card){ return; }
+  card.hidden = !c;
+  if(!c){ return; }
+  setText('refused', num(c.refusedBanlist + c.refusedFilter + c.refusedKeyword));
+  setText('refusedBreak', num(c.refusedBanlist) + ' ban list, ' + num(c.refusedFilter) + ' filter list, '
+    + num(c.refusedKeyword) + ' keyword · ' + num(c.bans) + ' banned');
+  var lists = num(c.banlistEntries) + ' / ' + num(c.filterEntries) + ' / ' + num(c.whitelistEntries)
+    + ' hashes, ' + num(c.keywords) + ' keywords';
+  if(c.updateEnabled){
+    lists += c.lastUpdate ? ' · updated ' + fmtAge(c.lastUpdate) + ' ago' + (c.lastUpdateOK ? '' : ' (failed)') : ' · not updated yet';
+  }
+  var el = document.getElementById('contentLists');
+  if(el){
+    el.textContent = lists;
+    el.title = 'ban list / filter list / whitelist. Withheld when serving: ' + num(c.withheld)
+      + ', blocked searches: ' + num(c.blockedQueries)
+      + (c.lastUpdateMessage ? '. Last update: ' + c.lastUpdateMessage : '');
+  }
+}
+
 function renderMeta(d){
   var list = d.meta || [];
   var section = document.getElementById('metaSection');
@@ -336,6 +360,7 @@ async function refresh(){
     }
     setText('blocked', (d.filterBlockedIP + d.filterBlockedGeo).toLocaleString());
     setText('blockedBreak', d.filterBlockedIP + ' ipfilter, ' + d.filterBlockedGeo + ' geoip');
+    renderContentFilter(d.contentFilter);
     setText('uptime', fmtUptime(d.uptimeSeconds));
     renderMeta(d);
     renderMetaAPI(d);

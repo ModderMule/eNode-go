@@ -40,6 +40,7 @@ func TestMongoRoundTrips(t *testing.T) {
 	})
 	b.measure("ClientsCount", func() { engine.ClientsCount() })
 	b.measure("FilesCount", func() { engine.FilesCount() })
+	b.measure("FilesCountEstimate", func() { engine.FilesCountEstimate() })
 	b.measure("Disconnect", func() { engine.Disconnect(other) })
 	large := measureLargeReads(t, b, engine)
 	sweep10 := measureMongoSweep(t, b, engine, db, 'c', 10)

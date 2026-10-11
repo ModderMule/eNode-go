@@ -103,6 +103,9 @@ type LiveStats struct {
 	FilterBlockedIP  int64 `json:"filterBlockedIP"`
 	FilterBlockedGeo int64 `json:"filterBlockedGeo"`
 
+	// ContentFilter is the hash-list and keyword filter; nil when it is off.
+	ContentFilter *ContentFilterStats `json:"contentFilter"`
+
 	// Torrent/Usenet/Kad meta search. Files above is the eD2K count alone; AdvertisedFiles
 	// is the total clients are sent in the server status, which adds the networks set
 	// to countInServerStatus. Meta is empty when meta search is off.
@@ -119,6 +122,30 @@ type LiveStats struct {
 	// Update is the last successful GitHub release check (updatecheck.go); nil when
 	// the check is off or has not succeeded yet.
 	Update *UpdateInfo `json:"update"`
+}
+
+// ContentFilterStats are the content filter's figures: how much each list holds, how
+// many offered files each layer refused, and how the last list update went.
+type ContentFilterStats struct {
+	BanlistEntries   int `json:"banlistEntries"`
+	FilterEntries    int `json:"filterEntries"`
+	WhitelistEntries int `json:"whitelistEntries"`
+	Keywords         int `json:"keywords"`
+	// Refused* count offered files per layer; Withheld counts rows and source
+	// requests withheld when serving, BlockedQueries searches answered with nothing.
+	RefusedBanlist int64 `json:"refusedBanlist"`
+	RefusedFilter  int64 `json:"refusedFilter"`
+	RefusedKeyword int64 `json:"refusedKeyword"`
+	Withheld       int64 `json:"withheld"`
+	BlockedQueries int64 `json:"blockedQueries"`
+	// Bans is how many user hashes and addresses are refused at login right now.
+	Bans int `json:"bans"`
+	// UpdateEnabled reports whether the lists are pulled from an update service.
+	// LastUpdate is empty until an update has run.
+	UpdateEnabled     bool   `json:"updateEnabled"`
+	LastUpdate        string `json:"lastUpdate"`
+	LastUpdateOK      bool   `json:"lastUpdateOK"`
+	LastUpdateMessage string `json:"lastUpdateMessage"`
 }
 
 // MetaAPIStats are the Meta API's figures (docs/meta-api.md). Accounts counts are

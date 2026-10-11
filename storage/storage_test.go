@@ -24,8 +24,8 @@ func TestMemoryEngineClientAndFiles(t *testing.T) {
 	m.AddFile(File{
 		Hash: hash, Name: "movie.mkv", Size: 100, SourceID: 1, SourcePort: 4662,
 	}, c)
-	if m.FilesCount() != 1 {
-		t.Fatalf("files count mismatch")
+	if m.FilesCount() != 1 || m.FilesCountEstimate() != 1 {
+		t.Fatalf("files count mismatch: count=%d estimate=%d", m.FilesCount(), m.FilesCountEstimate())
 	}
 	if len(m.GetSources(hash, 100)) != 1 {
 		t.Fatalf("sources mismatch")

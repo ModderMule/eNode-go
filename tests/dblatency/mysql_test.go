@@ -38,6 +38,7 @@ func TestMySQLRoundTrips(t *testing.T) {
 	})
 	b.measure("ClientsCount", func() { engine.ClientsCount() })
 	b.measure("FilesCount", func() { engine.FilesCount() })
+	b.measure("FilesCountEstimate", func() { engine.FilesCountEstimate() })
 	b.measure("Disconnect", func() { engine.Disconnect(other) })
 	measureLargeReads(t, b, engine)
 	sweep10 := measureMySQLSweep(t, b, engine, direct, 'c', 10)

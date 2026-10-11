@@ -786,3 +786,32 @@ func TestSearchServersNetwork(t *testing.T) {
 		}
 	}
 }
+
+// TestSearchAppliesTheContentFilter: a release the server's content filter refuses is
+// left out after paging, so the offsets still count what the networks returned, and a
+// blocked query is answered with nothing without asking any network.
+func TestSearchAppliesTheContentFilter(t *testing.T) {
+	cat := newFakeCatalog()
+	cat.releases[networkTorrent] = releases("t", 4)
+	cfg := searchConfig(cat)
+	cfg.Withheld = func(_ []byte, name string) bool { return name == "t1" }
+	cfg.QueryBlocked = func(query string) bool { return query == "blocked" }
+	svc := NewService(ServiceConfig{MaxMetafileBytes: 1 << 20, Search: cfg}, newTestFetcher(newFakeSource()), nil)
+
+	resp, err := svc.Search(context.Background(), &metav1.SearchRequest{Query: "x", Limit: 3})
+	got := fmt.Sprint(names(resp))
+	t.Logf("input: query x, t1 withheld; output: %s next=%d err=%v", got, resp.GetNextOffset(), err)
+	if err != nil || got != "[t0 t2]" || resp.GetNextOffset() != 3 {
+		t.Fatalf("got %s next %d err %v, want [t0 t2] next 3", got, resp.GetNextOffset(), err)
+	}
+
+	loads := cat.loadCount(networkTorrent)
+	resp, err = svc.Search(context.Background(), &metav1.SearchRequest{Query: "blocked"})
+	t.Logf("input: blocked query; output: entries=%d err=%v networkLoads=%d", len(resp.GetEntries()), err, cat.loadCount(networkTorrent)-loads)
+	if err != nil || len(resp.GetEntries()) != 0 {
+		t.Fatalf("a blocked query returned %d entries, err %v", len(resp.GetEntries()), err)
+	}
+	if cat.loadCount(networkTorrent) != loads {
+		t.Fatal("a blocked query must not reach the networks")
+	}
+}

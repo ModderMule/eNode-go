@@ -9,17 +9,18 @@ import (
 
 // defaultCounterCacheTTL bounds how stale the advertised client and file counts
 // may be. These feed the totals in OP_SERVERSTATUS and OP_GLOBSERVSTATRES, which
-// clients only display — nothing branches on them — so ten seconds is invisible
-// to a user and is already far fresher than the five-minute cadence at which any
-// client is told anything.
+// clients only display — nothing branches on them — so a minute is invisible
+// to a user and is still fresher than the five-minute cadence at which any
+// client is told anything. Ten seconds, the earlier value, kept a busy database
+// answering count queries back to back. Configurable as storage.countCacheSeconds.
 //
 // The TTL is deliberately not tied to ServerStatusInterval: it is what bounds
 // the cost of a UDP status flood, which arrives at whatever rate an attacker
 // chooses.
-const defaultCounterCacheTTL = 10 * time.Second
+const defaultCounterCacheTTL = time.Minute
 
-// counterCache serves ClientsCount and FilesCount from one shared, briefly
-// cached reading.
+// counterCache serves ClientsCount and FilesCountEstimate from one shared,
+// briefly cached reading.
 //
 // Both callers issued two COUNT(*) queries per call: the per-client status
 // ticker (one goroutine per logged-in client) and udpGlobServStatReq, which is
@@ -77,7 +78,7 @@ func (c *counterCache) Counts() (clients, files int) {
 		c.mu.Unlock()
 
 		newClients := c.engine.ClientsCount()
-		newFiles := c.engine.FilesCount()
+		newFiles := c.engine.FilesCountEstimate()
 
 		c.mu.Lock()
 		c.clients, c.files = newClients, newFiles

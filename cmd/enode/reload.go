@@ -280,6 +280,7 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		MetaAPI:           d.metaAPI,
 		SoftFileLimit:     cfg.Files.SoftLimitOrDefault(),
 		HardFileLimit:     cfg.Files.HardLimitOrDefault(),
+		CounterCacheTTL:   time.Duration(cfg.Storage.CountCacheSecondsOrDefault()) * time.Second,
 	}
 	udp := ed2k.UDPRuntimeConfig{
 		Name:        cfg.Name,

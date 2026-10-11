@@ -379,6 +379,6 @@ is not counted in the advertised file total. See [server-search.md](server-searc
 
 - Rows are held in memory only (feed and caches). Persisting them in the MySQL/MongoDB
   engines is not planned: the caches are enough.
-- Content filtering of meta rows by name is deferred. eNode-go has no filename filter
-  (`filter:` is IP and country only); category filtering is configured in the
-  crawlers.
+- Meta rows are filtered by name with `filter.keywords`, the same whole-word list
+  format the crawlers use: a row whose name holds a keyword is left out of every
+  search answer. Category filtering is still configured in the crawlers.

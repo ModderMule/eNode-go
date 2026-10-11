@@ -178,6 +178,64 @@ filter:
     # GeoLite2-Country is republished weekly. The check is conditional on the current
     # file's MD5, so an unchanged database transfers nothing.
     updateDays: 7
+  # Content filter: which files this server refuses to index and to serve. Everything
+  # below is off by default.
+  #
+  # Files with one of these words in their name are refused on publish and left out of
+  # search results, and a search for one of the words returns nothing. Words separated
+  # by a vertical bar, "word1|word2". Quote the value: a bare leading | starts a YAML
+  # block. Whole words, ignoring case: "xxx" matches Movie.XXX.1080p but not xxxl.
+  # Punctuation of any kind separates words, so "foo bar" also matches Foo.Bar. CJK and
+  # other scripts written without spaces match anywhere inside the name. The rules are
+  # torrent-crawler's filter.keywords, so one list can be shared.
+  #
+  # A source request carries only a hash, so a file indexed before its keyword was
+  # added keeps answering source requests until it ages out of the index.
+  keywords: ""
+  # eD2K hash lists: one 32-hex-character file hash per line, "#" lines are comments,
+  # text after ";" is ignored. Listed files are refused on publish and withheld from
+  # search results and source answers. Written by the updater below, hence under data/.
+  #
+  # Ban list: the publisher is also sanctioned (banThreshold).
+  hashBanlist:
+    enabled: false
+    file: "data/hash_banlist.txt"
+  # Filter list: refused, nobody sanctioned. For decoys and takedown requests.
+  hashFilter:
+    enabled: false
+    file: "data/hash_filter.txt"
+  # Whitelist: overrides both lists and the keywords.
+  hashWhitelist:
+    enabled: false
+    file: "data/whitelist_hashes.txt"
+  reloadMinutes: 30     # re-read a changed list on a timer; 0 disables reloading
+  # A session offering more than banThreshold distinct ban-list files is disconnected,
+  # and its user hash and address are refused at login for banMinutes. 0 = never
+  # sanction. Bans are kept in memory and forgotten on restart.
+  banThreshold: 3
+  banMinutes: 1440
+  # Pull the enabled lists from an ed2k-server update service. Also run once by hand
+  # with `enode -update-filters`. Every download must carry a valid Ed25519 signature
+  # and may not shrink a list below minKeepRatio of the installed one.
+  #
+  # Access is granted per server: the operator of the update service has to add this
+  # server's public IPv4 to the service's allow list before any list is served. Until
+  # then every download answers 403 and the installed lists stay as they are. For the
+  # default service, ask at https://emule-security.org/contact or
+  # https://github.com/andrey23127/ed2k-server/issues with the server's IP. Requests must leave from that same IPv4.
+  update:
+    enabled: false
+    # Optional. IPv4 the access key sent with each request is derived against,
+    # together with data/udp.secret (a changed secret changes the key). Empty = this
+    # server's own primary IPv4 (address, else dynIp). Set it only when the service
+    # operator names another server whose peer table vouches for this one.
+    referenceIP: ""
+    publicKey: "102f8ec039fb6fcfe75dfd00cfc5cfed76d1f006aa03f0825e69f30e8c2d836d"
+    banlistURL: "https://ed2k.emule-security.org/files/hash_banlist.txt"
+    filterURL: "https://ed2k.emule-security.org/files/hash_filter.txt"
+    whitelistURL: "https://ed2k.emule-security.org/files/whitelist_hashes.txt"
+    intervalHours: 168  # weekly
+    minKeepRatio: 0.5
 
 # Torrent and Usenet releases merged into eD2K search results, from the
 # torrent-crawler / usenet-crawler daemons over their MetaIngest service. Each row
@@ -502,6 +560,10 @@ admin:
 
 storage:
   engine: memory
+  # Seconds the advertised user and file totals (status packets, dashboard) are
+  # served from one reading before the database is asked again. The file total is
+  # the engine's estimate on mysql and mongodb, not an exact count. Needs a restart.
+  countCacheSeconds: 60
   cleanup:
     # Expires offline clients and their sources. Without it, rows accumulate for
     # the lifetime of the deployment and the online-count index only defers the

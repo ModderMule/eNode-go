@@ -295,6 +295,11 @@ func (m *MemoryEngine) FilesCount() int {
 	return len(m.files)
 }
 
+// FilesCountEstimate is exact here: the count is a map length.
+func (m *MemoryEngine) FilesCountEstimate() int {
+	return m.FilesCount()
+}
+
 // CleanupStale has far less to do here than on the DB engines.
 //
 // Disconnect already removes a client and its source entries outright — there is

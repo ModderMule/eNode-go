@@ -429,6 +429,8 @@ type fixedFilesEngine struct {
 
 func (e fixedFilesEngine) FilesCount() int { return e.files }
 
+func (e fixedFilesEngine) FilesCountEstimate() int { return e.files }
+
 // TestServerStatusAddsMetaFiles covers countInServerStatus on the wire: both status
 // packets carry eD2K + meta files, Counts() keeps the eD2K figure for the dashboard,
 // the sum is clamped to the uint32 field, and no searcher changes nothing.
