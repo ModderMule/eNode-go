@@ -39,7 +39,7 @@ func newFakeCatalog() *fakeCatalog {
 func (c *fakeCatalog) CatalogNetworks() []string {
 	var out []string
 	// Kad before the servers, as the real source lists them: the service orders them.
-	for _, n := range []string{networkTorrent, networkUsenet, networkKad, networkServers} {
+	for _, n := range []string{networkTorrent, networkUsenet, networkKad, networkWeb, networkServers} {
 		if _, ok := c.releases[n]; ok {
 			out = append(out, n)
 		}

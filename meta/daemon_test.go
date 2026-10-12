@@ -154,6 +154,25 @@ func nzbEntry(name string) *metav1.MetaEntry {
 	}
 }
 
+// webEntry is a single-file web release as web-crawler publishes it: kind 5, the
+// link-set digest as identity, seeders the mirrors last found alive, and no magnet.
+func webEntry(name string, mirrors uint32) *metav1.MetaEntry {
+	id := sha256.Sum256([]byte(name))
+	return &metav1.MetaEntry{
+		Kind:      metav1.MetaKind_META_KIND_WEB,
+		Name:      name,
+		Size:      700 << 20,
+		TotalSize: 700 << 20,
+		Type:      "Video",
+		Seeders:   mirrors,
+		AgeDays:   2,
+		Indexer:   "example-board",
+		CatalogId: fmt.Sprintf("web:%X", id),
+		Identity:  id[:],
+		FileCount: 1,
+	}
+}
+
 // kadEntry is a file as kademlia-crawler publishes it: kind 4, the file's own MD4 as
 // identity, peers the sources Kad reported and seeders the complete ones.
 func kadEntry(name string, sources, complete uint32) *metav1.MetaEntry {

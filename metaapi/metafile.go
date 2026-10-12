@@ -16,6 +16,7 @@ import (
 	"github.com/ModderMule/enodemeta"
 	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
 	"github.com/ModderMule/enodemeta/metahash"
+	"github.com/ModderMule/enodemeta/weblinks"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -23,6 +24,7 @@ import (
 const (
 	networkTorrent = "torrent"
 	networkUsenet  = "usenet"
+	networkWeb     = "web"
 	// networkKad has no metafiles: its rows are eD2K files. It is a network of
 	// MetaApi.Search only.
 	networkKad = "kad"
@@ -126,6 +128,8 @@ func (f *Fetcher) Kinds() []metav1.MetaKind {
 			out = append(out, metav1.MetaKind_META_KIND_BT_V1, metav1.MetaKind_META_KIND_BT_V2)
 		case networkUsenet:
 			out = append(out, metav1.MetaKind_META_KIND_NZB)
+		case networkWeb:
+			out = append(out, metav1.MetaKind_META_KIND_WEB)
 		}
 	}
 	return out
@@ -191,10 +195,14 @@ func (f *Fetcher) Get(ctx context.Context, rawHash []byte, catalogID string) (*m
 
 // ContentType is the default media type of a metafile kind.
 func ContentType(kind metav1.MetaKind) string {
-	if kind == metav1.MetaKind_META_KIND_NZB {
+	switch kind {
+	case metav1.MetaKind_META_KIND_NZB:
 		return "application/x-nzb"
+	case metav1.MetaKind_META_KIND_WEB:
+		return weblinks.ContentType
+	default:
+		return "application/x-bittorrent"
 	}
-	return "application/x-bittorrent"
 }
 
 func (f *Fetcher) fetch(ctx context.Context, hash metahash.Hash, kind metahash.Kind, network, catalogID string) (*metav1.MetaFile, error) {
@@ -289,6 +297,8 @@ func networkFor(kind metahash.Kind) string {
 		return networkTorrent
 	case metahash.KindNZB:
 		return networkUsenet
+	case metahash.KindWeb:
+		return networkWeb
 	default:
 		return ""
 	}

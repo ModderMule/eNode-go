@@ -29,6 +29,9 @@ const (
 	NetworkUsenet  = "usenet"
 	// NetworkKad is the kademlia-crawler daemon. Its rows are native: real eD2K files.
 	NetworkKad = "kad"
+	// NetworkWeb is the web-crawler daemon. Its rows are pseudo-hash rows like a
+	// torrent's, and the links behind one are its metafile.
+	NetworkWeb = "web"
 )
 
 // downBackoff is how long a daemon that answered "unavailable", "unimplemented" or
@@ -102,6 +105,7 @@ func NewWithClients(cfg config.MetaSearchConfig, clientFor func(network string, 
 		{NetworkKad, cfg.Kad, config.DefaultKadNamePrefix, true},
 		{NetworkTorrent, cfg.Torrent, config.DefaultTorrentNamePrefix, false},
 		{NetworkUsenet, cfg.Usenet, config.DefaultUsenetNamePrefix, false},
+		{NetworkWeb, cfg.Web, config.DefaultWebNamePrefix, false},
 	} {
 		if !n.cfg.Enabled {
 			continue

@@ -315,6 +315,27 @@ metaSearch:
       maxRows: 250000
       reconnectMinSeconds: 5
       reconnectMaxSeconds: 300
+  # Links found on web pages, from the web-crawler daemon: file-hoster downloads, stream
+  # pages and direct media. A row is a pseudo-hash row like a torrent's and carries no
+  # link. The links are its metafile, a text/uri-list that a capable client fetches
+  # from the Meta API when its user asks for it, so a stock eMule shows the row and can
+  # do nothing with it. Sources is the number of mirrors last found alive. Off by default.
+  web:
+    enabled: false
+    url: "http://127.0.0.1:9704"   # web-crawler's MetaIngest listener
+    token: ""
+    namePrefix: "[web emule-qt.org] "
+    liveSearch: true
+    searchTimeoutMs: 1500
+    udpSearchTimeoutMs: 800
+    maxResults: 50
+    maxUDPResults: 10
+    countInServerStatus: false
+    feed:
+      enabled: false
+      maxRows: 250000
+      reconnectMinSeconds: 5
+      reconnectMaxSeconds: 300
   # Cache live Search answers per network, keyed by the forwarded keywords, excludes,
   # file type and size bounds. Off by default: a repeat query then asks the daemon again.
   cache:

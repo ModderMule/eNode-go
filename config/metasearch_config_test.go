@@ -39,6 +39,10 @@ func TestMetaSearchDefaults(t *testing.T) {
 		m.Kad.NamePrefixOrDefault(DefaultKadNamePrefix) != "[kad] " {
 		t.Fatal("default prefixes wrong")
 	}
+	if m.Web.Enabled || m.Web.URL != DefaultWebURL || m.Web.NamePrefixOrDefault(DefaultWebNamePrefix) != "[web] " ||
+		m.Web.MaxResults != 50 || m.Web.MaxUDPResults != 10 {
+		t.Fatalf("web defaults %+v, want off at %s with the shared limits", m.Web, DefaultWebURL)
+	}
 	if m.Kad.Enabled || m.Kad.MaxResults != 50 || m.Kad.MaxUDPResults != 10 {
 		t.Fatalf("kad defaults %+v, want off with the shared limits", m.Kad)
 	}

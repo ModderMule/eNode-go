@@ -1,0 +1,7 @@
+# Loader for the eserver memory measurement (see run.sh). iproute2 is needed because the
+# loader gives every simulated client its own source address on eth0.
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 && rm -rf /var/lib/apt/lists/*
+COPY loader.py stats.py /loader/
+WORKDIR /loader
+ENTRYPOINT ["python3", "-u"]

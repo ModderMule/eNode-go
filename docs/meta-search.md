@@ -13,6 +13,9 @@ a prefix, so every client can see which network it came from.
 A third daemon, kademlia-crawler, adds files found on the eMule Kad network. Those
 are real eD2K files and follow different rules: see [Kad results](#kad-results).
 
+A fourth daemon, web-crawler, adds links found on web pages. Its rows are pseudo-hash
+rows like a torrent's, with one difference: see [Web results](#web-results).
+
 The design and its reasoning are in `docs/meta-search-torrent-usenet-plan.local.md`.
 This page describes what is implemented.
 
@@ -179,6 +182,7 @@ metaSearch:
   udpMaxConcurrent: 16
   torrent:                          # usenet: the same keys, url :9702, "[usenet] "
                                     # kad:    the same keys, url :9703, "[kad] "
+                                    # web:    the same keys, url :9704, "[web] "
     enabled: false
     url: "http://127.0.0.1:9701"
     token: ""                       # the daemon's ingest.auth_token; keep it in enode.local.yaml
@@ -367,6 +371,31 @@ fetch for one: the client builds the eD2K link from the row. The server's own fi
 wins there as well, in another form: the entry stays and takes the server's name and
 source counts (`ownFilesWin`), found by hash in the file store
 (`Engine.SharedFiles`).
+
+## Web results
+
+`metaSearch.web` adds releases that the web-crawler daemon found on web pages: links to
+file hosters, stream hosts and direct media. It is off by default. The daemon speaks the
+same MetaIngest service as the others (default `http://127.0.0.1:9704`), and everything
+above about the live search, the cache, the feed and the limits applies to it unchanged.
+
+A web row is a pseudo-hash row (`META_KIND_WEB`, contract amendment 24), so
+`advertiseToLegacyClients` governs who receives it and a stock eMule can show it but not
+act on it. What differs from a torrent row:
+
+- **The row carries no link.** `FT_META_MAGNET` is never set; a row that arrives with
+  one fails validation and is dropped. The links are the row's metafile, a
+  `text/uri-list`, which a capable client fetches from the Meta API when its user asks
+  for it. See [meta-api.md](meta-api.md#fetching-a-metafile).
+- **Sources is the number of mirrors** the daemon last found alive, capped at 99 like a
+  torrent's seeders.
+- **The release changes when its links do.** The identity is a digest of the link set,
+  so a mirror added or lost retracts the old release on the feed and publishes a new one.
+- **A release needs a size.** The daemon publishes none without one, because a row of
+  size 0 is dropped here as eMule would drop it.
+
+eMuleQt does not act on a web row yet. Until it does, enabling the network adds rows a
+user can see and cannot open.
 
 ## Files from other servers
 

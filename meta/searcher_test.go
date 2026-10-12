@@ -6,10 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"enode/config"
 	"enode/storage"
 
 	"connectrpc.com/connect/v2"
 	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
+	"github.com/ModderMule/enodemeta/metahash"
 )
 
 // TestSearchMergesNetworksWithPrefixes: each network's rows carry its own prefix, the
@@ -284,5 +286,44 @@ func TestKadIsOffByDefault(t *testing.T) {
 		if n == NetworkKad {
 			t.Fatal("kad is listed although it was never enabled")
 		}
+	}
+}
+
+// TestSearchWebRows: a web-crawler row is a pseudo-hash row with its own prefix, its
+// mirror count as sources, and no link in it. A row that carries one is dropped.
+func TestSearchWebRows(t *testing.T) {
+	good := webEntry("Night.Of.The.Living.Dead.1968.mkv", 3)
+	many := webEntry("Night.Of.The.Living.Mirrors.mkv", 250)
+	linked := webEntry("Night.Of.The.Living.Link.mkv", 2)
+	linked.Magnet = "https://host.test/f/abc123"
+
+	web := &fakeDaemon{entries: []*metav1.MetaEntry{good, many, linked}}
+	cfg := config.MetaSearchConfig{}
+	cfg.Web.Enabled = true
+	cfg, err := config.ApplyMetaSearchDefaults(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := searcherFor(cfg, map[string]*fakeDaemon{NetworkWeb: web})
+
+	got := s.Search(context.Background(), node(storage.SearchAnd, text("night"), text("living")), false, false)
+	t.Logf("input: night AND living against 3 web rows, one carrying a link; output: %s", fileNames(got))
+	if len(got) != 2 {
+		t.Fatalf("got %d rows, want the two without a link", len(got))
+	}
+	for _, row := range got {
+		t.Logf("output: %q kind=%d sources=%d catalog=%s", row.Name, row.Meta.Kind, row.Sources, row.Meta.CatalogID)
+		if !strings.HasPrefix(row.Name, "[web] ") {
+			t.Fatalf("name %q lacks the web prefix", row.Name)
+		}
+		if row.Meta == nil || row.Meta.Kind != uint8(metahash.KindWeb) || row.Meta.Magnet != "" {
+			t.Fatalf("row %+v is not a web row without a link", row.Meta)
+		}
+		if !strings.HasPrefix(row.Meta.CatalogID, "web:") {
+			t.Fatalf("catalog id %q is not a web id", row.Meta.CatalogID)
+		}
+	}
+	if got[0].Sources != 3 || got[1].Sources != 99 {
+		t.Fatalf("sources %d / %d, want the mirror count capped at 99", got[0].Sources, got[1].Sources)
 	}
 }

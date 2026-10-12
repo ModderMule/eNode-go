@@ -54,7 +54,8 @@ involved.
     `POST /enode.meta.v1.MetaApi/GetMetaFile` with a proto or JSON body;
   - `GET /caps`, which is `GetCaps` as JSON;
   - `GET /meta/v1/{meta hash hex}?id={catalog_id}`, which returns the raw bytes with
-    `Content-Type: application/x-bittorrent` or `application/x-nzb`.
+    `Content-Type: application/x-bittorrent`, `application/x-nzb` or, for the links
+    behind a web row, `text/uri-list`.
 
   When accounts are on, this listener also serves the account website under
   `/account`, even with `http.enabled: false`. In that case it serves only the
@@ -80,7 +81,8 @@ server sends is byte-for-byte unchanged.
 `catalog_id`, because the hash fold cannot be reversed. The steps are:
 
 1. The kind is read from the hash: BT v1 and BT v2 go to the torrent network, NZB
-   to the usenet network. A network that is not enabled answers `not_found`.
+   to the usenet network, WEB to the web network. A network that is not enabled
+   answers `not_found`.
 2. A verified copy is served from a byte-bounded LRU cache
    (`metafileCache.maxBytes`, default 256 MiB, `ttlSeconds`). The cache is keyed by
    hash alone, which is safe because every entry was verified against that hash.
@@ -152,10 +154,12 @@ The other fields are optional filters passed to the daemons: `exclude`, `kinds`,
 | `META_NETWORK_USENET` | Usenet only |
 | `META_NETWORK_KAD` | Kad only: eD2K files |
 | `META_NETWORK_SERVERS` | servers only: eD2K files shared on this server and on its peers |
+| `META_NETWORK_WEB` | web only: links found on web pages |
 
 A network the server does not offer gives an empty result, not an error. `kinds`
 narrows further within the chosen networks, for example BT v2 only. Each network
-has kinds of its own (torrent: BT v1 and v2, Usenet: NZB, Kad and servers: ED2K), so
+has kinds of its own (torrent: BT v1 and v2, Usenet: NZB, Kad and servers: ED2K, web:
+WEB), so
 `kinds` alone also selects: torrent and Usenet without eD2K files is `kinds` = BT v1,
 BT v2, NZB.
 
@@ -167,7 +171,7 @@ further page. Paging stops at `search.window` releases (1000). `total` is the su
 the daemons report, or 0 when it is not known.
 
 **Several networks** interleave one release from each in turn (torrent, Usenet,
-Kad, torrent, …). When one network runs out, the others continue. The order is
+Kad, web, torrent, …). When one network runs out, the others continue. The order is
 deterministic, so page N is the same on every call while the answers are cached.
 
 Two sorts merge by key instead, because every network answers them and every row

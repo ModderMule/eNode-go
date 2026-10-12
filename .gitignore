@@ -37,6 +37,9 @@ data/
 # skips itself when this tree is absent. See docs/interop-docker-tests.md.
 /lugdunum-eserver/
 
+# Raw readings of the eserver memory measurement (tests/interop/membench/run.sh).
+/tests/interop/membench/out/
+
 # Local configuration and secrets (e.g. enode.local.yaml)
 *.local.*
 *.local

@@ -391,3 +391,55 @@ is present is not necessarily complete: it appears at registration but only gain
 when a later name:desc probe is answered. And **say which side a failure is about**: these
 tests drive a twenty-year-old binary, so a failure message should make clear whether it is
 our defect or its behaviour, as case C does.
+
+## 7. Measuring eserver's memory
+
+`tests/interop/membench/run.sh` is not a test. It answers one question: how much memory
+does the original eserver hold per indexed file? It is a shell script rather than a Go
+case because a full run takes several minutes and its result is a reading, not a
+pass or fail.
+
+```sh
+tests/interop/membench/run.sh 922000 2500        # files, connected clients
+ENODE_INTEROP_ESERVER=17.14 tests/interop/membench/run.sh 100000 271
+```
+
+It starts a fresh eserver from the same `Dockerfile.eserver` and entrypoint as the suite,
+reads the empty baseline, publishes the files from a second container, waits for the
+server to settle, reads it again and removes the containers and the network.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ENODE_INTEROP_ESERVER` | `17.15` | `17.14` or `17.15` |
+| `LUGMEM_SETTLE` | `120` | seconds between the last publish and the loaded reading |
+| `LUGMEM_CONCURRENCY` | `32` | clients logging in at once |
+| `LUGMEM_VERBOSE` | `0` | `1` turns the eserver trace on; only for small runs |
+| `LUGMEM_KEEP` | `0` | `1` leaves the containers and network up |
+
+**Workload.** The same as `tests/membench` and the Rust server's `examples/loadgen.rs`:
+every file has a unique hash and one source, 70% of the names are distinct, and a name
+is 7 words from a vocabulary of 0.72·N followed by `.bin`. `loader.py` ports the
+generator exactly, so file *i* has the same hash and name in all three.
+
+**Clients.** Each one has its own source IPv4 (`10.77.16.1` upward, added to the loader
+container's interface), so `max_clients_per_ip` and the flood limits never apply. The
+loader listens on 4662 and answers the server's connect-back, so every client is HighID.
+A client logs in as eMule 0.50a, sends its files in one zlib-packed `OP_OFFERFILES`, and
+stays connected, because eserver drops a client's files when it disconnects.
+
+**Readings.** `out/<tag>/measure-baseline.txt` and `measure-loaded.txt` each hold:
+
+- the `nbuser` stats line. eserver writes it to anyone who connects to TCP 5656; no
+  request is needed. `memory=` is what its allocator has reserved, and `nbfiles=` and
+  `users=` confirm that the load arrived. Check those two before trusting the rest.
+- `VmRSS` and `VmHWM` of the QEMU process, which is PID 1 in the container. The empty
+  baseline is about 18.6 MB of emulator, so subtract it.
+- the replies to the console commands `stats`, `slab` and `debug`. `debug` prints the
+  reject counters and the `gmallocmem` line.
+
+`status.json` is the loader's own count of logged-in, published, failed and dropped
+clients.
+
+**Limits of the number.** It is the 32-bit build, so a native 64-bit eserver would use
+more. The server is idle: no searches or source requests are sent. Every file has one
+source. Results from 2026-10-11 are in `ed2k-server-rust-comparison.local.md` §7.6.

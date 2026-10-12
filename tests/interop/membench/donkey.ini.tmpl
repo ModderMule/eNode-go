@@ -1,0 +1,47 @@
+; donkey.ini for the eserver memory measurement. Rendered twice -- run.sh fills the
+; verbose placeholder while staging the build context, then entrypoint.eserver.sh fills
+; __THIS_IP__ at container start.
+;
+; Comments here must not contain an equals sign, for the reason given in the parser
+; warning at the top of ../donkey.ini.tmpl.
+
+[server]
+name=lugmem
+desc=Lugdunum eserver memory measurement
+thisIP=__THIS_IP__
+port=4661
+
+; --- REQUIRED under QEMU user-mode emulation, see ../donkey.ini.tmpl ---
+noepoll=true
+tcpthreads=1
+udpsearchers=1
+
+; --- capacity: high enough that no limit shapes the result ---
+; Every loader client has its own source address, so the per-IP limit is never reached
+; in practice. softLimit and hardLimit are files per client.
+maxClients=10000
+max_clients_per_ip=10000
+softLimit=5000
+hardLimit=20000
+LOWIDenable=1
+LOWIDpercent=100
+
+; --- logging: off, a trace of a million publishes would dominate the run ---
+; The console flag stays on so the replies to the stats, slab and debug commands reach
+; stdout.
+verbose=__VERBOSE__
+bverbose=__VERBOSE__
+sverbose=0
+console=1
+logFile=0
+
+; --- no gossip, the server is alone on its network ---
+public=false
+
+; --- misc ---
+zlib_enable=true
+ping_delay=300
+
+; The nbuser listener on TCP 5656 writes the stats line to whoever connects. It binds to
+; loopback unless told otherwise, and the reader runs in the loader container.
+nbuserIP=0.0.0.0

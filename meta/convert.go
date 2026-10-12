@@ -45,7 +45,8 @@ func EntryToFile(pb *metav1.MetaEntry) (storage.File, error) {
 	// Honest availability (docs/meta-search-torrent-usenet-plan.local.md §4.2): a
 	// torrent reports its seeders, capped below the 100 at which eMule's spam
 	// heuristic starts to count sources; an NZB has no sources at all. Its seeders
-	// field is a completion percentage, which is not a source count.
+	// field is a completion percentage, which is not a source count. A web row
+	// reports the mirrors last found alive, which is a count and is capped the same.
 	var sources uint32
 	if entry.Kind != metahash.KindNZB {
 		sources = min(entry.Seeders, uint32(tags.MaxSources))

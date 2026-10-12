@@ -240,8 +240,12 @@ func (s *Server) handleRawMetaFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ext := ".torrent"
-	if mf.GetKind() == metav1.MetaKind_META_KIND_NZB {
+	switch mf.GetKind() {
+	case metav1.MetaKind_META_KIND_NZB:
 		ext = ".nzb"
+	case metav1.MetaKind_META_KIND_WEB:
+		// RFC 2483's extension for a text/uri-list.
+		ext = ".uris"
 	}
 	w.Header().Set("Content-Type", mf.GetContentType())
 	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ToLower(r.PathValue("hash"))+ext+`"`)

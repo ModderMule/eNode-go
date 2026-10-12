@@ -483,9 +483,9 @@ func (c GeoIPConfig) HasCredentials() bool {
 	return c.AccountID != "" && c.LicenseKey != ""
 }
 
-// MetaSearchConfig merges torrent and Usenet releases, and files found on the eMule
-// Kad network, into eD2K search results. The rows come from the torrent-crawler,
-// usenet-crawler and kademlia-crawler daemons over their MetaIngest service
+// MetaSearchConfig merges torrent, Usenet and web releases, and files found on the
+// eMule Kad network, into eD2K search results. The rows come from the torrent-crawler,
+// usenet-crawler, kademlia-crawler and web-crawler daemons over their MetaIngest service
 // (github.com/ModderMule/enodemeta): a live Search per query, bounded by a
 // deadline, plus an optional subscription to each daemon's published feed. Every
 // network is off by default, so a server that never enables one answers searches
@@ -507,7 +507,11 @@ type MetaSearchConfig struct {
 	// Kad is the kademlia-crawler daemon. Its rows are real eD2K files: the hash is
 	// the file's own MD4, so every client can download one. A file a user shares on
 	// this server is always answered from the server's own database instead.
-	Kad   MetaNetworkConfig `yaml:"kad"`
+	Kad MetaNetworkConfig `yaml:"kad"`
+	// Web is the web-crawler daemon: links found on web pages, to file hosters, stream
+	// hosts and direct media. A row carries no link; the links are its metafile, a
+	// text/uri-list the Meta API serves like a .torrent.
+	Web   MetaNetworkConfig `yaml:"web"`
 	Cache MetaCacheConfig   `yaml:"cache"`
 }
 
@@ -519,14 +523,14 @@ func (c MetaSearchConfig) AdvertiseToLegacyClientsOrDefault() bool {
 
 // AnyEnabled reports whether at least one network is on.
 func (c MetaSearchConfig) AnyEnabled() bool {
-	return c.Torrent.Enabled || c.Usenet.Enabled || c.Kad.Enabled
+	return c.Torrent.Enabled || c.Usenet.Enabled || c.Kad.Enabled || c.Web.Enabled
 }
 
 // MetaNetworkConfig is one catalogue daemon.
 type MetaNetworkConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// URL is the daemon's MetaIngest listener (torrent-crawler 9701, usenet-crawler 9702,
-	// kademlia-crawler 9703).
+	// kademlia-crawler 9703, web-crawler 9704).
 	URL string `yaml:"url"`
 	// Token is the daemon's ingest.auth_token, sent as a bearer token. A daemon on a
 	// non-loopback address refuses to start without one. Keep it in enode.local.yaml.
@@ -1060,9 +1064,11 @@ const (
 	DefaultTorrentURL        = "http://127.0.0.1:9701"
 	DefaultUsenetURL         = "http://127.0.0.1:9702"
 	DefaultKadURL            = "http://127.0.0.1:9703"
+	DefaultWebURL            = "http://127.0.0.1:9704"
 	DefaultTorrentNamePrefix = "[torrent] "
 	DefaultUsenetNamePrefix  = "[usenet] "
 	DefaultKadNamePrefix     = "[kad] "
+	DefaultWebNamePrefix     = "[web] "
 	// maxMetaUDPResults bounds maxUDPResults: each row is one datagram answering one
 	// unauthenticated request.
 	maxMetaUDPResults = 50
@@ -1088,6 +1094,9 @@ func setMetaSearchDefaults(c *MetaSearchConfig) error {
 		return err
 	}
 	if err := setMetaNetworkDefaults("metaSearch.kad", &c.Kad, DefaultKadURL); err != nil {
+		return err
+	}
+	if err := setMetaNetworkDefaults("metaSearch.web", &c.Web, DefaultWebURL); err != nil {
 		return err
 	}
 	if c.Cache.MaxEntries <= 0 {

@@ -81,6 +81,7 @@ type limits struct {
 var networkKinds = map[string][]metav1.MetaKind{
 	networkTorrent: {metav1.MetaKind_META_KIND_BT_V1, metav1.MetaKind_META_KIND_BT_V2},
 	networkUsenet:  {metav1.MetaKind_META_KIND_NZB},
+	networkWeb:     {metav1.MetaKind_META_KIND_WEB},
 	networkKad:     {metav1.MetaKind_META_KIND_ED2K},
 	networkServers: {metav1.MetaKind_META_KIND_ED2K},
 }
@@ -88,8 +89,9 @@ var networkKinds = map[string][]metav1.MetaKind{
 // networkOrder is the order the networks answer in, whatever order the source
 // lists them in: it is the order their releases alternate in, and the earlier of
 // two networks keeps a file both have. The servers come before Kad, so a file a
-// server knows is answered as the server's.
-var networkOrder = []string{networkTorrent, networkUsenet, networkServers, networkKad}
+// server knows is answered as the server's. Web comes last: it was added after the
+// contract fixed the order of the other four, and a web row shares a file with none.
+var networkOrder = []string{networkTorrent, networkUsenet, networkServers, networkKad, networkWeb}
 
 // Search pages through the torrent, Usenet, server and Kad catalogues. See the
 // contract's MetaApi.Search for the paging rules.
@@ -126,6 +128,8 @@ func (s *Service) SearchNetworks() []metav1.MetaNetwork {
 			out = append(out, metav1.MetaNetwork_META_NETWORK_KAD)
 		case networkServers:
 			out = append(out, metav1.MetaNetwork_META_NETWORK_SERVERS)
+		case networkWeb:
+			out = append(out, metav1.MetaNetwork_META_NETWORK_WEB)
 		}
 	}
 	return out
@@ -555,6 +559,8 @@ func networkSelected(want metav1.MetaNetwork, network string) bool {
 		return network == networkKad
 	case metav1.MetaNetwork_META_NETWORK_SERVERS:
 		return network == networkServers
+	case metav1.MetaNetwork_META_NETWORK_WEB:
+		return network == networkWeb
 	default:
 		return false
 	}

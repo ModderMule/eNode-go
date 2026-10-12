@@ -954,7 +954,7 @@ func warnMetaTokens(c config.MetaSearchConfig) {
 	for _, n := range []struct {
 		name string
 		cfg  config.MetaNetworkConfig
-	}{{meta.NetworkTorrent, c.Torrent}, {meta.NetworkUsenet, c.Usenet}, {meta.NetworkKad, c.Kad}} {
+	}{{meta.NetworkTorrent, c.Torrent}, {meta.NetworkUsenet, c.Usenet}, {meta.NetworkKad, c.Kad}, {meta.NetworkWeb, c.Web}} {
 		if !n.cfg.Enabled || n.cfg.Token != "" {
 			continue
 		}
