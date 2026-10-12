@@ -25,7 +25,7 @@
   "metafile.not_found": "このリリースはサーバーにもうありません。",
   "metafile.verify_failed": "カタログから返されたファイルがこの検索結果と一致しません。",
   "metafile.upstream_unavailable": "この検索結果の元となるカタログに現在接続できません。",
-  "metafile.invalid_request": "これは Torrent または Usenet の検索結果ではありません。",
+  "metafile.invalid_request": "これは Torrent、Usenet または Web の検索結果ではありません。",
   "metafile.too_large": "ファイルがこのサーバーで提供できるサイズを超えています。",
   "metafile.magnet_only": "このリリースには Torrent ファイルがありません。マグネットリンクを使用してください。",
   "search.query_required": "検索語を 1 つ以上入力してください。",

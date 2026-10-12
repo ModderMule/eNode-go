@@ -67,7 +67,7 @@ button:disabled{opacity:.6;cursor:default}
 </div>
 
 <section id="metaSection" hidden>
-<h2>Torrent / Usenet / Kad</h2>
+<h2>Torrent / Usenet / Kad / Web</h2>
 <p class="desc" id="metaSummary" style="margin:0 0 10px"></p>
 <div class="mgrid" id="metaCards"></div>
 </section>
@@ -248,7 +248,7 @@ function renderMeta(d){
   if(!section){ return; }
   section.hidden = list.length === 0;
   setText('filesAdvertised', d.advertisedFiles !== d.files
-    ? 'advertised ' + num(d.advertisedFiles) + ' incl. torrent/usenet/kad' : '');
+    ? 'advertised ' + num(d.advertisedFiles) + ' incl. torrent/usenet/kad/web' : '');
   if(!list.length){ return; }
   setText('metaSummary', 'result cache: ' + num(d.metaCacheEntries) + ' queries');
   var cards = document.getElementById('metaCards');

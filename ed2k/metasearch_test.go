@@ -677,7 +677,7 @@ func TestLocalFileTakesPrecedenceOverKadRow(t *testing.T) {
 }
 
 // TestKadRowsReachEveryClient: with advertiseToLegacyClients off a client that never
-// announced SrvCapMetaSearch gets no torrent or Usenet row, which it could not act on,
+// announced SrvCapMetaSearch gets no torrent, Usenet or web row, which it could not act on,
 // but still gets the Kad rows, which it can download. The pseudo-hash networks are not
 // even asked. The same holds for the UDP opcodes without a tag block.
 func TestKadRowsReachEveryClient(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"enode/storage"
 )
 
-// MetaSearcher supplies torrent, Usenet and Kad rows for a search (package meta). It is
+// MetaSearcher supplies torrent, Usenet, Kad and web rows for a search (package meta). It is
 // an interface so this package takes no dependency on the catalogue daemons'
 // transport, and so tests can stand in a fixed answer.
 //
@@ -29,8 +29,8 @@ type MetaSearcher interface {
 	NetworkUsers(network string) int
 }
 
-// SetMetaSearcher attaches the meta searcher. advertiseToLegacy sends its torrent and
-// Usenet rows to every client; when false only a client that asked for them receives
+// SetMetaSearcher attaches the meta searcher. advertiseToLegacy sends its torrent,
+// Usenet and web rows to every client; when false only a client that asked for them receives
 // them — the SrvCapMetaSearch login bit on TCP, the SrvCapUDPMetaSearch flag of
 // OP_GLOBSEARCHREQ3 on UDP. Its Kad rows are ordinary eD2K files and go to every
 // client either way.
@@ -51,7 +51,7 @@ func (s *ServerRuntime) AdvertisedFiles() int {
 	return s.advertisedFiles(files)
 }
 
-// metaSearchFor reports whether a requester gets pseudo-hash rows (torrent, Usenet).
+// metaSearchFor reports whether a requester gets pseudo-hash rows (torrent, Usenet, web).
 // capable is whether it announced it can act on them.
 func (s *ServerRuntime) metaSearchFor(capable bool) bool {
 	return s.meta != nil && (s.metaAdvertiseLegacy || capable)

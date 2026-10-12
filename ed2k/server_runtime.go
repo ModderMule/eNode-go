@@ -149,7 +149,7 @@ type ServerRuntime struct {
 	// can drive a v6 login to either verdict without a dialable public IPv6. nil
 	// selects the real probe; nothing outside tests sets it.
 	ipv6Probe func(*tcpClient) bool
-	// meta supplies torrent/Usenet rows merged into search answers, or nil when no
+	// meta supplies torrent/Usenet/Kad/web rows merged into search answers, or nil when no
 	// catalogue daemon is configured. Set once by SetMetaSearcher before the listeners
 	// bind, then only read. metaAdvertiseLegacy sends them to clients that did not ask.
 	meta                MetaSearcher
@@ -616,7 +616,7 @@ type tcpClient struct {
 	// lock. It gates whether this session may receive IPv6 sentinel sources.
 	ipv6Capable bool
 	// metaCapable is set at login when the client sent SrvCapMetaSearch in
-	// CT_SERVER_FLAGS: it can act on torrent/Usenet rows. Written once on this
+	// CT_SERVER_FLAGS: it can act on torrent/Usenet/web rows. Written once on this
 	// connection's goroutine before its first search, and read only by it.
 	metaCapable bool
 
@@ -1481,7 +1481,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 			continue
 		}
 		if metahash.RejectOfferedFile(record.Hash) {
-			// A torrent/Usenet pseudo-hash (docs/meta-search.md). A stock client cannot
+			// A torrent/Usenet/web pseudo-hash (docs/meta-search.md). A stock client cannot
 			// offer one — a pseudo-hash download never obtains a hashset, so it never
 			// enters the shared-file map — but a modified client can, and the row it
 			// advertises would then acquire "sources" that serve nothing. Dropped before

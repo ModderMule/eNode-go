@@ -24,7 +24,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          # enodemeta, the torrent/Usenet contract module, is a submodule that go.mod
+          # enodemeta, the meta search contract module, is a submodule that go.mod
           # reaches through `replace ... => ./enodemeta`.
           submodules: true
 

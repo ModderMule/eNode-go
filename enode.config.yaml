@@ -237,14 +237,14 @@ filter:
     intervalHours: 168  # weekly
     minKeepRatio: 0.5
 
-# Torrent and Usenet releases merged into eD2K search results, from the
-# torrent-crawler / usenet-crawler daemons over their MetaIngest service. Each row
+# Torrent, Usenet and web releases merged into eD2K search results, from the
+# torrent-crawler / usenet-crawler / web-crawler daemons over their MetaIngest service. Each row
 # carries a pseudo-hash and FT_META_* tags; a stock eMule shows it (the name prefix
 # marks it) but cannot download it. The kad network below adds real eD2K files found
 # on Kad. Every network is off by default, and off means searches are answered
 # exactly as before. See docs/meta-search.md.
 metaSearch:
-  # Send torrent and Usenet rows to every client. false limits them to clients that
+  # Send torrent, Usenet and web rows to every client. false limits them to clients that
   # announced SRVCAP_METASEARCH (0x10000) at login, or a UDP OP_GLOBSEARCHREQ3 with
   # flag 0x02. Kad rows are not affected.
   advertiseToLegacyClients: true
@@ -345,7 +345,7 @@ metaSearch:
     ttlSeconds: 600
 
 # Client-facing Meta API (enode.meta.v1 MetaApi + AccountApi): how eMuleQt downloads
-# the .torrent / .nzb behind a torrent or Usenet search row, and optionally logs in
+# the .torrent / .nzb / link list behind a torrent, Usenet or web search row, and optionally logs in
 # first. Off by default. Advertised to clients in OP_SERVERIDENT (ST_META_API 0x9E).
 # See docs/meta-api.md.
 metaApi:
@@ -388,7 +388,7 @@ metaApi:
   rateLimit:
     perIPPerMinute: 30             # metafile downloads per client address; 0 = unlimited
     perAccountPerMinute: 120       # per logged-in account; 0 = unlimited
-  # MetaApi.Search: paged search of the torrent, Usenet and Kad catalogues (the
+  # MetaApi.Search: paged search of the torrent, Usenet, Kad and web catalogues (the
   # metaSearch networks with liveSearch on). A request picks one network, or all of
   # them (default).
   search:

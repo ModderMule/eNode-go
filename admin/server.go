@@ -106,7 +106,7 @@ type LiveStats struct {
 	// ContentFilter is the hash-list and keyword filter; nil when it is off.
 	ContentFilter *ContentFilterStats `json:"contentFilter"`
 
-	// Torrent/Usenet/Kad meta search. Files above is the eD2K count alone; AdvertisedFiles
+	// Torrent/Usenet/Kad/web meta search. Files above is the eD2K count alone; AdvertisedFiles
 	// is the total clients are sent in the server status, which adds the networks set
 	// to countInServerStatus. Meta is empty when meta search is off.
 	AdvertisedFiles  int                `json:"advertisedFiles"`
@@ -229,7 +229,7 @@ type ServerSearchPeerStats struct {
 	RowsServed   int64 `json:"rowsServed"`
 }
 
-// MetaNetworkStats is one torrent, Usenet or Kad network's figures: the meta.NetworkStats
+// MetaNetworkStats is one torrent, Usenet, Kad or web network's figures: the meta.NetworkStats
 // fields the page shows. The caller maps one to the other so this package keeps no
 // dependency on the meta package.
 //

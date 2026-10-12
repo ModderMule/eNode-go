@@ -112,7 +112,7 @@ type File struct {
 	Codec      string
 	SourceID   uint32
 	SourcePort uint16
-	// Meta is set on a row that stands for a torrent or Usenet release rather than an
+	// Meta is set on a row that stands for a torrent, Usenet or web release rather than an
 	// eD2K file (see docs/meta-search.md), and nil on every row an engine returns.
 	// Such rows are merged into search answers only and never stored.
 	Meta *MetaInfo

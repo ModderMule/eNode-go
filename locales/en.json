@@ -25,7 +25,7 @@
   "metafile.not_found": "The server no longer has this release.",
   "metafile.verify_failed": "The file the catalogue returned does not match this search result.",
   "metafile.upstream_unavailable": "The catalogue behind this result is not reachable right now.",
-  "metafile.invalid_request": "This is not a torrent or Usenet search result.",
+  "metafile.invalid_request": "This is not a torrent, Usenet or web search result.",
   "metafile.too_large": "The file is larger than this server serves.",
   "metafile.magnet_only": "This release has no torrent file. Use its magnet link.",
   "search.query_required": "Enter at least one search word.",

@@ -50,7 +50,7 @@ type SharedFile struct {
 	Hash       []byte
 	SourceID   uint32
 	SourcePort uint16
-	// Meta adds the FT_META_* tags of a torrent/Usenet row; nil for an eD2K file.
+	// Meta adds the FT_META_* tags of a torrent/Usenet/web row; nil for an eD2K file.
 	Meta *storage.MetaInfo
 }
 

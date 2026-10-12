@@ -281,7 +281,7 @@ const (
 )
 
 // TagMeta* are the FT_META_* search-result tags of the enode.meta.v1 contract, carried
-// by a row that stands for a torrent or Usenet release (docs/meta-search.md). The
+// by a row that stands for a torrent, Usenet or web release (docs/meta-search.md). The
 // 0x60-0x6F block is free in every surveyed eMule tree; the values are pinned against
 // github.com/ModderMule/enodemeta/tags by a test so the two cannot drift. 0x66 is
 // reserved by the contract and never emitted.
@@ -367,7 +367,7 @@ const (
 	// unknown bits. Advertised only when natTraversal.serverIndependent is on. See
 	// docs/ipv6-client-implementation-spec.md §9.
 	FlagNatRendezvous uint32 = 0x8000
-	// FlagMetaSearch advertises that search answers may carry torrent/Usenet rows
+	// FlagMetaSearch advertises that search answers may carry torrent/Usenet/web rows
 	// (FT_META_* tags, docs/meta-search.md). 0x10000 is the next clean bit above
 	// FlagNatRendezvous; clients ignore unknown bits. Set on both the TCP and UDP word
 	// when a catalogue daemon is configured.

@@ -25,7 +25,7 @@
   "metafile.not_found": "服务器上已不再有此发布。",
   "metafile.verify_failed": "目录返回的文件与此搜索结果不匹配。",
   "metafile.upstream_unavailable": "此结果所在的目录暂时无法访问。",
-  "metafile.invalid_request": "这不是 Torrent 或 Usenet 搜索结果。",
+  "metafile.invalid_request": "这不是 Torrent、Usenet 或网页搜索结果。",
   "metafile.too_large": "文件超出了此服务器提供的大小上限。",
   "metafile.magnet_only": "此发布没有种子文件，请使用它的磁力链接。",
   "search.query_required": "请至少输入一个搜索词。",

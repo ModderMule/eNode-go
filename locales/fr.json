@@ -25,7 +25,7 @@
   "metafile.not_found": "Le serveur ne dispose plus de cette publication.",
   "metafile.verify_failed": "Le fichier renvoyé par le catalogue ne correspond pas à ce résultat de recherche.",
   "metafile.upstream_unavailable": "Le catalogue à l'origine de ce résultat est injoignable pour le moment.",
-  "metafile.invalid_request": "Ceci n'est pas un résultat de recherche torrent ou Usenet.",
+  "metafile.invalid_request": "Ceci n'est pas un résultat de recherche torrent, Usenet ou web.",
   "metafile.too_large": "Le fichier est plus volumineux que ce que ce serveur fournit.",
   "metafile.magnet_only": "Cette publication n'a pas de fichier torrent. Utilisez son lien magnet.",
   "search.query_required": "Saisissez au moins un mot de recherche.",

@@ -155,7 +155,7 @@ meta rows. When it is `false`, only these requesters do:
 
 `OP_GLOBSEARCHREQ` and `…REQ2` have no tag block, so they never qualify.
 
-This gate covers torrent and Usenet rows. [Kad rows](#kad-results) go to every client.
+This gate covers torrent, Usenet and web rows. [Kad rows](#kad-results) go to every client.
 
 While any network is enabled, the server sets `FlagMetaSearch` (`0x10000`) in its
 TCP and UDP flag words. Clients ignore unknown bits.

@@ -1,5 +1,6 @@
-// Package meta merges torrent and Usenet releases into eD2K search answers. The rows
-// come from catalogue daemons (torrent-crawler, usenet-crawler) that serve the
+// Package meta merges torrent, Usenet, Kad and web releases into eD2K search answers.
+// The rows come from catalogue daemons (torrent-crawler, usenet-crawler,
+// kademlia-crawler, web-crawler) that serve the
 // enode.meta.v1 MetaIngest service defined in github.com/ModderMule/enodemeta.
 //
 // Everything that depends on the contract module or on connect lives here; the ed2k
@@ -196,7 +197,7 @@ func (s *Searcher) FetchMetaFile(ctx context.Context, network, catalogID string)
 // only while a udpMaxConcurrent slot is free.
 //
 // nativeOnly asks the native networks alone (Kad), for a requester that cannot act on
-// a torrent or Usenet row: those daemons are then not called at all.
+// a torrent, Usenet or web row: those daemons are then not called at all.
 func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, nativeOnly bool) []storage.File {
 	if expr == nil || len(s.sources) == 0 {
 		return nil

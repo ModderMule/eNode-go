@@ -199,7 +199,7 @@ func run(ctx context.Context, configPath string) error {
 	dualStack := cfg.IPv6.EnabledOrDefault()
 	tcpCfg, udpCfg := serverListenConfigs(cfg)
 
-	// Torrent/Usenet rows from the catalogue daemons. Built before the runtime so the
+	// Torrent/Usenet/Kad/web rows from the catalogue daemons. Built before the runtime so the
 	// FlagMetaSearch bit reaches both advertised flag words; attached and started
 	// below, before the listeners bind. See docs/meta-search.md.
 	var metaSearcher *meta.Searcher

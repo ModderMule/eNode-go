@@ -491,7 +491,7 @@ func (c GeoIPConfig) HasCredentials() bool {
 // network is off by default, so a server that never enables one answers searches
 // exactly as before. See docs/meta-search.md.
 type MetaSearchConfig struct {
-	// AdvertiseToLegacyClients sends torrent and Usenet rows to every client. When
+	// AdvertiseToLegacyClients sends torrent, Usenet and web rows to every client. When
 	// false, only a client that announced SRVCAP_METASEARCH (0x10000) at login, or a UDP
 	// OP_GLOBSEARCHREQ3 carrying SRVCAP_UDP_METASEARCH (0x02), receives them. *bool,
 	// defaults on: a stock eMule shows the rows (the name prefix marks them) but can

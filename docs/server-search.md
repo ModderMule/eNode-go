@@ -62,7 +62,7 @@ TLS when a certificate is configured and h2c otherwise.
 ### What is served
 
 **Only this server's own eD2K files, and only those a connected client offers
-now.** Torrent, Usenet and Kad rows from the catalogue daemons are not served,
+now.** Torrent, Usenet, Kad and web rows from the catalogue daemons are not served,
 and neither is anything in the mirror. A file that came from another server
 therefore never travels on to a third.
 
@@ -224,8 +224,8 @@ catalogue rows in the answer.
 
 - **No source is attached.** The client finds sources the way it does for any
   file the server has none for: global source queries, Kad, source exchange.
-- **Every client gets them**, whether or not it asked for torrent and Usenet
-  rows: they are real eD2K files.
+- **Every client gets them**, whether or not it asked for torrent, Usenet
+  and web rows: they are real eD2K files.
 - **The server's own file wins.** A file a local user shares is answered with
   the local row and its real sources.
 - **Counts are never added up.** The same file from several servers shows the
@@ -391,7 +391,7 @@ ENODE_INTEGRATION=1 go test ./storage -run 'BrowseFiles'   # MySQL and MongoDB, 
 ## By design / deferred
 
 - **The catalogue daemons' rows are not served.** A server that wants torrent,
-  Usenet or Kad rows runs its own daemons.
+  Usenet, Kad or web rows runs its own daemons.
 - **Other servers' files in `MetaApi.Search` are opt-in.** With
   `metaApi.search.servers` on they are the `META_NETWORK_SERVERS` network,
   together with this server's own files. See

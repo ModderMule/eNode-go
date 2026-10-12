@@ -25,7 +25,7 @@
   "metafile.not_found": "서버에 더 이상 이 릴리스가 없습니다.",
   "metafile.verify_failed": "카탈로그가 반환한 파일이 이 검색 결과와 일치하지 않습니다.",
   "metafile.upstream_unavailable": "지금은 이 결과를 제공하는 카탈로그에 연결할 수 없습니다.",
-  "metafile.invalid_request": "토렌트 또는 Usenet 검색 결과가 아닙니다.",
+  "metafile.invalid_request": "토렌트, Usenet 또는 웹 검색 결과가 아닙니다.",
   "metafile.too_large": "파일이 이 서버가 제공하는 크기보다 큽니다.",
   "metafile.magnet_only": "이 릴리스에는 토렌트 파일이 없습니다. 마그넷 링크를 사용하세요.",
   "search.query_required": "검색어를 하나 이상 입력하세요.",

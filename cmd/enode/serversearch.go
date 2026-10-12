@@ -260,7 +260,7 @@ func newCombinedSearcher(metaSearcher ed2k.MetaSearcher, servers *serverlink.Sea
 
 // Search asks both at once. The catalogue rows come first, as before; another
 // server's files follow. Those are real eD2K files, so every client gets them,
-// whether or not it asked for torrent and Usenet rows.
+// whether or not it asked for torrent, Usenet and web rows.
 func (c *combinedSearcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, nativeOnly bool) []storage.File {
 	var wg sync.WaitGroup
 	var metaRows, serverRows []storage.File
