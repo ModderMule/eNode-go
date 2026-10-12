@@ -327,3 +327,41 @@ func TestSearchWebRows(t *testing.T) {
 		t.Fatalf("sources %d / %d, want the mirror count capped at 99", got[0].Sources, got[1].Sources)
 	}
 }
+
+// TestSearchWebRowWithoutSize: a stream row of size 0 is found like any other, and a
+// size bound treats it as the 0 it states.
+func TestSearchWebRowWithoutSize(t *testing.T) {
+	sized := webEntry("Night.Of.The.Living.Dead.1968.mkv", 3)
+	stream := webEntry("Night.Of.The.Living.Stream", 2)
+	stream.Size, stream.TotalSize = 0, 0
+
+	cfg := config.MetaSearchConfig{}
+	cfg.Web.Enabled = true
+	cfg, err := config.ApplyMetaSearchDefaults(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keywords := node(storage.SearchAnd, text("night"), text("living"))
+	for _, tc := range []struct {
+		name string
+		expr *storage.SearchExpr
+		want int
+	}{
+		{"no size bound", keywords, 2},
+		{"size > 1 MiB", node(storage.SearchAnd, keywords, tagUint(sizeLeaf(storage.SearchOpGreater), 1<<20)), 1},
+		{"size < 1 MiB", node(storage.SearchAnd, keywords, tagUint(sizeLeaf(storage.SearchOpLess), 1<<20)), 1},
+	} {
+		web := &fakeDaemon{entries: []*metav1.MetaEntry{sized, stream}}
+		s := searcherFor(cfg, map[string]*fakeDaemon{NetworkWeb: web})
+
+		got := s.Search(context.Background(), tc.expr, false, false)
+		t.Logf("input: %s against a sized row and a stream; output: %s", tc.name, fileNames(got))
+		if len(got) != tc.want {
+			t.Fatalf("%s: got %d rows, want %d", tc.name, len(got), tc.want)
+		}
+		for _, row := range got {
+			t.Logf("output: %q size=%d", row.Name, row.Size)
+		}
+	}
+}

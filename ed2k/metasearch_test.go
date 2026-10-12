@@ -377,6 +377,38 @@ func TestAddFileEmitsMetaTags(t *testing.T) {
 	}
 }
 
+// TestAddFileWritesSizeZero: a web stream row leaves with FT_FILESIZE 0 and no
+// FT_META_TOTALSIZE, which is how a capable client tells a stream from a file (ingest
+// contract, amendment 25). Stock eMule discards the record.
+func TestAddFileWritesSizeZero(t *testing.T) {
+	row := metaRows(t, 1)[0]
+	row.Name, row.Size = "[web] some.stream", 0
+	row.Meta.Kind, row.Meta.TotalSize, row.Meta.Magnet = 5, 0, ""
+
+	packets, err := BuildGlobSearchResPackets([]storage.File{row})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := append([]byte{1, 0, 0, 0}, packets[0].Bytes()[2:]...)
+	records, err := NewBufferFromBytes(raw).GetFileList()
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := records[0]
+	t.Logf("input: %q size=%d meta=%+v", row.Name, row.Size, *row.Meta)
+	t.Logf("output: size=%d tags=%v", got.Size, got.Tags)
+
+	if got.Size != 0 {
+		t.Fatalf("size %d, want 0", got.Size)
+	}
+	if _, has := got.Tags[tagName(TagMetaTotalSize)]; has {
+		t.Fatal("a total size was written for a release that has none")
+	}
+	if got.Tags[tagName(TagMetaKind)] != uint64(5) {
+		t.Fatalf("kind %v, want the web kind", got.Tags[tagName(TagMetaKind)])
+	}
+}
+
 // TestOfferFilesRejectsMetaHash is the §9.1 guard: a modified client offering a file
 // under a pseudo-hash must not attach itself as a source of an advertised meta row.
 func TestOfferFilesRejectsMetaHash(t *testing.T) {

@@ -180,6 +180,10 @@ carries the key: `SEARCH_SORT_DATE` by `age_days` and `SEARCH_SORT_SIZE` by
 sort alternates: relevance scores are not comparable between daemons, and a sort a
 network does not have comes back from it in relevance order.
 
+A web entry may carry `size` 0 and `total_size` 0: a stream, whose size is not known
+(ingest contract, amendment 25). It sorts with the smallest, and `min_size` above 0
+leaves it out.
+
 **Cache.** Each network's answer is fetched in chunks of 100 releases and cached per
 network, search and chunk (`search.cache`, 2000 chunks, 600 s). Paging forward and
 repeated searches cost no daemon call, and pages stay stable for the TTL. This cache

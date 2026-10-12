@@ -121,12 +121,16 @@ func TestEntryToFileRejectsBadRows(t *testing.T) {
 	nzbMagnet := nzbEntry("d")
 	nzbMagnet.Magnet = "magnet:?xt=urn:btih:00"
 
+	nzbNoSize := nzbEntry("e")
+	nzbNoSize.Size, nzbNoSize.TotalSize = 0, 0
+
 	cases := []struct {
 		name  string
 		entry *metav1.MetaEntry
 	}{
 		{"no identity", noIdentity},
-		{"no size", noSize},
+		{"a torrent with no size", noSize},
+		{"an nzb with no size", nzbNoSize},
 		{"no name", noName},
 		{"nzb with magnet", nzbMagnet},
 	}
@@ -135,6 +139,41 @@ func TestEntryToFileRejectsBadRows(t *testing.T) {
 		t.Logf("input: %s; output: err=%v", tc.name, err)
 		if err == nil {
 			t.Errorf("%s: accepted a row a client could not use", tc.name)
+		}
+	}
+}
+
+// TestEntryToFileKeepsWebRowWithoutSize: a web row of size 0 is a stream, whose size
+// nobody can state (ingest contract, amendment 25). It is passed on with size 0 and
+// no total, where a torrent or an NZB without a size is a fault and is dropped.
+func TestEntryToFileKeepsWebRowWithoutSize(t *testing.T) {
+	stream := webEntry("Some.Stream.1080p", 2)
+	stream.Size, stream.TotalSize = 0, 0
+
+	// A file of unknown size inside a release whose total is known keeps reading as
+	// the release's size, as every kind does.
+	part := webEntry("Some.Set.part1", 2)
+	part.Size, part.FileCount = 0, 2
+
+	for _, tc := range []struct {
+		name  string
+		entry *metav1.MetaEntry
+		want  uint64
+	}{
+		{"a stream", stream, 0},
+		{"a file of unknown size in a sized release", part, 700 << 20},
+	} {
+		file, err := EntryToFile(tc.entry)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		t.Logf("input: %s size=%d total=%d; output: %q size=%d meta total=%d sources=%d",
+			tc.name, tc.entry.Size, tc.entry.TotalSize, file.Name, file.Size, file.Meta.TotalSize, file.Sources)
+		if file.Size != tc.want {
+			t.Errorf("%s: size %d, want %d", tc.name, file.Size, tc.want)
+		}
+		if file.Meta == nil || file.Meta.TotalSize != tc.entry.TotalSize {
+			t.Errorf("%s: meta %+v does not carry the total as sent", tc.name, file.Meta)
 		}
 	}
 }

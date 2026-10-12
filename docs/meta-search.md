@@ -54,7 +54,7 @@ Each daemon row becomes one ordinary search record:
 | hash | The 16-byte **meta hash** (`ED 2B 01 …`), minted by eNode-go from the row's identity (infohash or NZB digest) by `enodemeta/metahash`. A daemon never supplies it. |
 | client ID / port | `0` / `0`. eMule records no source. |
 | `FT_FILENAME` | `namePrefix` + the release's name. A file row of a multi-file release is named `Release Name - path/inside/release` (see [Sub-file rows](#sub-file-rows)). |
-| `FT_FILESIZE` | The selected file's size, or the release's total size for a whole-set row. |
+| `FT_FILESIZE` | The selected file's size, or the release's total size for a whole-set row. 0 on a web row whose size is not known. |
 | `FT_FILETYPE` | The daemon's eD2K type string. |
 | `FT_SOURCES`, `FT_COMPLETE_SOURCES` | Torrent seeders capped at 99, which stays below eMule's spam heuristic. `0` for an NZB, which has no sources. |
 | `0x60`–`0x6C` | `FT_META_KIND`, `_VERSION`, `_FILEINDEX`, `_FILEPATH`, `_TOTALSIZE`, `_ID`, `_SEEDERS`, `_PEERS`, `_AGE`, `_INDEXER`, `_FLAGS`, `_MAGNET` |
@@ -391,8 +391,13 @@ act on it. What differs from a torrent row:
   torrent's seeders.
 - **The release changes when its links do.** The identity is a digest of the link set,
   so a mirror added or lost retracts the old release on the feed and publishes a new one.
-- **A release needs a size.** The daemon publishes none without one, because a row of
-  size 0 is dropped here as eMule would drop it.
+- **A row of size 0 is a stream.** A stream page or a tube video has no size to state,
+  and the daemon publishes such a row with `size` and `total_size` 0 (ingest contract,
+  amendment 25). It is passed on as it is: `FT_FILESIZE` 0 and no `FT_META_TOTALSIZE`.
+  A capable client shows it as a stream. Stock eMule discards a search result of size
+  0, so it never shows the row. A size operator in the search treats the row as 0.
+  This holds for web rows only: a torrent or an NZB that arrives without a size is
+  dropped, as before.
 
 eMuleQt does not act on a web row yet. Until it does, enabling the network adds rows a
 user can see and cannot open.

@@ -37,8 +37,10 @@ func EntryToFile(pb *metav1.MetaEntry) (storage.File, error) {
 	if size == 0 {
 		size = entry.TotalSize
 	}
-	if size == 0 {
-		// eMule discards a zero-size search result (srchybrid/SearchList.cpp:355).
+	if size == 0 && entry.Kind != metahash.KindWeb {
+		// eMule discards a zero-size search result (srchybrid/SearchList.cpp:355). A
+		// web row is the exception (ingest contract, amendment 25): a stream has no
+		// size to state, and a client that knows the amendment shows the row as one.
 		return storage.File{}, fmt.Errorf("release %s has no size", entry.CatalogID)
 	}
 
@@ -78,7 +80,8 @@ func EntryToFile(pb *metav1.MetaEntry) (storage.File, error) {
 
 // MintEntry validates one daemon row and returns it with the server-minted meta_hash
 // set, for MetaApi.Search. It runs the same checks as EntryToFile, except the
-// zero-size rule, which exists for eMule's search list only.
+// zero-size rule, which exists for eMule's search list only (and there not for a web
+// row, whose size 0 says "a stream").
 func MintEntry(pb *metav1.MetaEntry) (*metav1.MetaEntry, error) {
 	entry, err := mint(pb)
 	if err != nil {
