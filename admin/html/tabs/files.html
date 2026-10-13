@@ -4,11 +4,15 @@
 <div class="tools">
 <input id="fiQ" placeholder="search file names (empty = browse)" size="34">
 <button id="fiSearch">Search</button>
-<button id="fiFirst">« first</button><button id="fiNext">next ›</button>
-<span class="desc" id="fiCount" style="margin:0"></span>
+<button class="fiFirst">« first</button><button class="fiNext">next ›</button>
+<span class="desc fiCount" style="margin:0"></span>
 </div>
 <p class="desc tabmsg" id="msg-files"></p>
 <div class="scroll"><table><thead><tr><th></th><th>Name</th><th>Size</th><th>Type</th><th>Sources</th><th>Complete</th><th>Hash</th></tr></thead><tbody id="fiRows"></tbody></table></div>
+<div class="tools" style="margin-top:10px">
+<button class="fiFirst">« first</button><button class="fiNext">next ›</button>
+<span class="desc fiCount" style="margin:0"></span>
+</div>
 <p class="desc">Files the content filter withholds are not listed. A search returns its whole capped answer; browsing pages through the files that have a source online.</p>
 <div id="fiSources" hidden>
 <h2 id="fiSourcesTitle">Sources</h2>
@@ -20,6 +24,8 @@
 {{define "js-files"}}
 (function(){
   var cursor = '', next = '';
+  // The paging controls sit above and below the table, so they are addressed by class.
+  function each(cls, fn){ document.querySelectorAll('#tab-files .' + cls).forEach(fn); }
   async function sources(f){
     var rows = await api('/api/files/' + f.hash + '/sources');
     document.getElementById('fiSources').hidden = false;
@@ -58,15 +64,16 @@
       copy.onclick = function(){ copyLink(f).catch(function(e){ tabMsg('files', e.message, true); }); };
       return [copy, name, fmtBytes(f.size), f.type || '—', num(f.sources), num(f.completed), el('code', f.hash)];
     }, q ? 'no file matches' : 'no files');
-    setText('fiCount', num(page.rows.length) + (q ? ' matches' : ' files on this page'));
-    document.getElementById('fiNext').disabled = !next;
-    document.getElementById('fiFirst').disabled = !cursor;
+    var count = num(page.rows.length) + (q ? ' matches' : ' files on this page');
+    each('fiCount', function(e){ e.textContent = count; });
+    each('fiNext', function(e){ e.disabled = !next; });
+    each('fiFirst', function(e){ e.disabled = !cursor; });
   }
   function first(){ cursor = ''; document.getElementById('fiSources').hidden = true; runTab('files'); }
   document.getElementById('fiSearch').onclick = first;
-  document.getElementById('fiFirst').onclick = first;
+  each('fiFirst', function(e){ e.onclick = first; });
   document.getElementById('fiQ').onkeydown = function(e){ if(e.key === 'Enter'){ first(); } };
-  document.getElementById('fiNext').onclick = function(){ cursor = next; runTab('files'); };
+  each('fiNext', function(e){ e.onclick = function(){ cursor = next; runTab('files'); }; });
   tabs.files = {load: load, poll: false};
 })();
 {{end}}
