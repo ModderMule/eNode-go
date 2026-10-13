@@ -15,22 +15,26 @@ import (
 // implementations must be safe for concurrent use.
 type ContentFilter interface {
 	// CheckOffer judges one offered file. refused means it must not be indexed;
-	// sanction means the refusal also counts against the publisher.
-	CheckOffer(hash []byte, name string) (refused, sanction bool)
+	// banlist and keyword say which layer refused it when the refusal also counts
+	// against the publisher.
+	CheckOffer(hash []byte, name string) (refused, banlist, keyword bool)
 	// Withheld reports whether a file must not be served. An empty name tests the
 	// hash alone, which is all a source request carries.
 	Withheld(hash []byte, name string) bool
 	// QueryBlocked reports whether a search with these terms is answered with nothing.
 	QueryBlocked(terms []string) bool
-	// BanThreshold is how many distinct sanctioned files one session may offer before
+	// BanThreshold is how many distinct ban-list files one session may offer before
 	// it is dropped and banned. Zero means never.
 	BanThreshold() int
+	// KeywordBanThreshold is how many distinct keyword-refused files get a session
+	// dropped and banned: the one that reaches it. Zero means never.
+	KeywordBanThreshold() int
 	// Ban refuses a publisher at login for a while, Banned reports whether one is.
 	Ban(userHash []byte, ip net.IP)
 	Banned(userHash []byte, ip net.IP) bool
 }
 
-// msgBanlisted is sent before a session is dropped for offering ban-list files, and
+// msgBanlisted is sent before a session is dropped for offering refused files, and
 // msgBanned when such a publisher logs in again. "ERROR" so the client shows them and
 // logs them as an error, like msgHardFileLimit; without one the user sees a server that
 // keeps closing the connection for no stated reason.
@@ -46,9 +50,9 @@ func (s *ServerRuntime) SetContentFilter(f ContentFilter) {
 }
 
 // checkOffer judges one offered record; see ContentFilter.CheckOffer.
-func (s *ServerRuntime) checkOffer(hash []byte, name string) (refused, sanction bool) {
+func (s *ServerRuntime) checkOffer(hash []byte, name string) (refused, banlist, keyword bool) {
 	if s.Content == nil {
-		return false, false
+		return false, false, false
 	}
 	return s.Content.CheckOffer(hash, name)
 }
@@ -107,6 +111,20 @@ func (c *tcpClient) noteBanlistHit(hash []byte) bool {
 	}
 	c.banlistHits[[16]byte(hash)] = struct{}{}
 	return len(c.banlistHits) > threshold
+}
+
+// noteKeywordHit records an offer refused for a keyword and reports whether the session
+// has now offered as many distinct such files as the filter tolerates.
+func (c *tcpClient) noteKeywordHit(hash []byte) bool {
+	threshold := c.server.Content.KeywordBanThreshold()
+	if threshold <= 0 || len(hash) != 16 {
+		return false
+	}
+	if c.keywordHits == nil {
+		c.keywordHits = make(map[[16]byte]struct{})
+	}
+	c.keywordHits[[16]byte(hash)] = struct{}{}
+	return len(c.keywordHits) >= threshold
 }
 
 // recordName is the file name an offered record carries, or "" when it has none.

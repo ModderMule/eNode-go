@@ -1,6 +1,7 @@
 package contentfilter
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -54,7 +55,7 @@ func TestNewNothingConfiguredReturnsNil(t *testing.T) {
 
 func TestNilFilterRefusesNothing(t *testing.T) {
 	var f *Filter
-	refused, sanction := f.CheckOffer(testHash(1), "blocked.avi")
+	refused, sanction, _ := f.CheckOffer(testHash(1), "blocked.avi")
 	t.Logf("input: nil filter output: refused=%t sanction=%t withheld=%t query=%t banned=%t threshold=%d",
 		refused, sanction, f.Withheld(testHash(1), "x"), f.QueryBlocked([]string{"blocked"}),
 		f.Banned(testHash(9), net.IPv4(1, 2, 3, 4)), f.BanThreshold())
@@ -68,8 +69,8 @@ func TestNilFilterRefusesNothing(t *testing.T) {
 	}
 }
 
-// TestCheckOfferLayerOrder pins which layer answers, and that only the ban list
-// sanctions the publisher.
+// TestCheckOfferLayerOrder pins which layer answers, and which refusals count against
+// the publisher: a ban-list hit and a keyword hit, each under its own flag.
 func TestCheckOfferLayerOrder(t *testing.T) {
 	f := newTestFilter(t)
 	cases := []struct {
@@ -78,20 +79,22 @@ func TestCheckOfferLayerOrder(t *testing.T) {
 		file         string
 		wantRefused  bool
 		wantSanction bool
+		wantKeyword  bool
 	}{
-		{"clean file", 9, "holiday.avi", false, false},
-		{"ban list", 1, "holiday.avi", true, true},
-		{"filter list", 2, "holiday.avi", true, false},
-		{"keyword", 9, "some.BLOCKED.thing.avi", true, false},
-		{"filter list beats keyword", 2, "blocked.avi", true, false},
-		{"whitelist beats both lists", 4, "holiday.avi", false, false},
-		{"whitelist beats keyword", 5, "blocked.avi", false, false},
+		{"clean file", 9, "holiday.avi", false, false, false},
+		{"ban list", 1, "holiday.avi", true, true, false},
+		{"filter list", 2, "holiday.avi", true, false, false},
+		{"keyword", 9, "some.BLOCKED.thing.avi", true, false, true},
+		{"filter list beats keyword", 2, "blocked.avi", true, false, false},
+		{"whitelist beats both lists", 4, "holiday.avi", false, false, false},
+		{"whitelist beats keyword", 5, "blocked.avi", false, false, false},
 	}
 	for _, tc := range cases {
-		refused, sanction := f.CheckOffer(testHash(tc.hash), tc.file)
-		t.Logf("input: %s hash=%02x.. name=%q output: refused=%t sanction=%t", tc.name, tc.hash, tc.file, refused, sanction)
-		if refused != tc.wantRefused || sanction != tc.wantSanction {
-			t.Errorf("%s: refused=%t sanction=%t, want %t/%t", tc.name, refused, sanction, tc.wantRefused, tc.wantSanction)
+		refused, sanction, keyword := f.CheckOffer(testHash(tc.hash), tc.file)
+		t.Logf("input: %s hash=%02x.. name=%q output: refused=%t banlist=%t keyword=%t", tc.name, tc.hash, tc.file, refused, sanction, keyword)
+		if refused != tc.wantRefused || sanction != tc.wantSanction || keyword != tc.wantKeyword {
+			t.Errorf("%s: refused=%t banlist=%t keyword=%t, want %t/%t/%t", tc.name, refused, sanction, keyword,
+				tc.wantRefused, tc.wantSanction, tc.wantKeyword)
 		}
 	}
 	st := f.Stats()
@@ -162,7 +165,7 @@ func TestMissingListIsFatalUnlessAllowed(t *testing.T) {
 	if err != nil || f == nil {
 		t.Fatalf("with the updater on a missing list must start empty, got %v, %v", f, err)
 	}
-	if refused, _ := f.CheckOffer(testHash(1), "x"); refused {
+	if refused, _, _ := f.CheckOffer(testHash(1), "x"); refused {
 		t.Fatal("an empty list refuses nothing")
 	}
 
@@ -171,7 +174,7 @@ func TestMissingListIsFatalUnlessAllowed(t *testing.T) {
 	if err := f.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	refused, sanction := f.CheckOffer(testHash(1), "x")
+	refused, sanction, _ := f.CheckOffer(testHash(1), "x")
 	t.Logf("output after install+Reload: refused=%t sanction=%t", refused, sanction)
 	if !refused || !sanction {
 		t.Fatal("Reload must pick up the installed list")
@@ -191,7 +194,7 @@ func TestFailedReloadKeepsPreviousList(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = f.Reload()
-	refused, _ := f.CheckOffer(testHash(1), "x")
+	refused, _, _ := f.CheckOffer(testHash(1), "x")
 	t.Logf("input: list removed, Reload output: err=%v stillRefused=%t", err, refused)
 	if err == nil {
 		t.Fatal("Reload must report the missing list")
@@ -213,8 +216,8 @@ func TestReloadSwapsEqualSizedList(t *testing.T) {
 	if err := f.Reload(); err != nil {
 		t.Fatal(err)
 	}
-	old, _ := f.CheckOffer(testHash(1), "x")
-	replaced, _ := f.CheckOffer(testHash(2), "x")
+	old, _, _ := f.CheckOffer(testHash(1), "x")
+	replaced, _, _ := f.CheckOffer(testHash(2), "x")
 	t.Logf("input: list {1} replaced by {2} output: refuses1=%t refuses2=%t", old, replaced)
 	if old || !replaced {
 		t.Fatal("a reload must swap in the new set even when its size is the same")
@@ -354,5 +357,183 @@ func TestListsDescribeTheEnabledFiles(t *testing.T) {
 	var none *Filter
 	if none.Lists() != nil || none.Bans() != nil {
 		t.Fatal("a nil filter must list nothing")
+	}
+}
+
+// TestBansSurviveARestart: a ban written to the ban file is in force for a filter built
+// from the same file, an expired one is not, and an unban is written too.
+func TestBansSurviveARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bans.txt")
+	cfg := Config{Keywords: "blocked", BanMinutes: 10, KeywordBanThreshold: 5, BanFile: path}
+	user, ip, v6 := testHash(0x77), net.IPv4(203, 0, 113, 7), net.ParseIP("2001:db8:1:2::1")
+
+	first, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Ban(user, ip)
+	first.BanFor(nil, v6, time.Hour)
+	first.BanFor(testHash(0x11), nil, time.Nanosecond) // run out by the time it is read back
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("input: ban user=%x ip=%s, %s, and one expired hash; output: ban file\n%s", user[:2], ip, v6, raw)
+
+	second, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("output after restart: hash=%t ip=%t v6=%t expired=%t bans=%d threshold=%d",
+		second.Banned(user, nil), second.Banned(nil, ip), second.Banned(nil, net.ParseIP("2001:db8:1:2::9")),
+		second.Banned(testHash(0x11), nil), second.Stats().Bans, second.KeywordBanThreshold())
+	if !second.Banned(user, nil) || !second.Banned(nil, ip) || !second.Banned(nil, net.ParseIP("2001:db8:1:2::9")) {
+		t.Error("the user hash, the address and the IPv6 /64 must still be banned after a restart")
+	}
+	if second.Banned(testHash(0x11), nil) || second.Stats().Bans != 3 {
+		t.Errorf("Bans = %d, want 3: an expired ban must not be read back", second.Stats().Bans)
+	}
+
+	if removed, err := second.Unban("hash:" + hex.EncodeToString(user)); err != nil || !removed {
+		t.Fatalf("Unban = %t, %v", removed, err)
+	}
+	third, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("output after unban and restart: hash=%t ip=%t", third.Banned(user, nil), third.Banned(nil, ip))
+	if third.Banned(user, nil) || !third.Banned(nil, ip) {
+		t.Error("an unban must be written to the ban file, and leave the other bans alone")
+	}
+}
+
+// TestBanFileSkipsWhatItCannotRead: a damaged line costs that ban, not the others.
+func TestBanFileSkipsWhatItCannotRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bans.txt")
+	body := "# comment\nip:203.0.113.7 2999-01-01T00:00:00Z\nnot a ban\nhash:zz 2999-01-01T00:00:00Z\nip:203.0.113.8 soon\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := New(context.Background(), Config{Keywords: "blocked", BanFile: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("input: %q output: bans=%d first=%t second=%t", body, f.Stats().Bans,
+		f.Banned(nil, net.IPv4(203, 0, 113, 7)), f.Banned(nil, net.IPv4(203, 0, 113, 8)))
+	if f.Stats().Bans != 1 || !f.Banned(nil, net.IPv4(203, 0, 113, 7)) {
+		t.Errorf("Bans = %d, want only the one well-formed line", f.Stats().Bans)
+	}
+}
+
+// TestLocalListsAddToTheHashLists: a hash put on a local list is judged like one on the
+// downloaded list of that kind, takes effect at once, and is still there for a filter
+// built from the same files.
+func TestLocalListsAddToTheHashLists(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		BanlistFile:        writeList(t, dir, "ban.txt", 1),
+		LocalBanlistFile:   filepath.Join(dir, "local", "ban.txt"),
+		LocalFilterFile:    filepath.Join(dir, "local", "filter.txt"),
+		LocalWhitelistFile: filepath.Join(dir, "local", "white.txt"),
+	}
+	f, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refused, _, _ := f.CheckOffer(testHash(7), "a.avi"); refused || !f.LocalListsEnabled() {
+		t.Fatalf("setup: refused=%t enabled=%t, want an empty local list that is enabled", refused, f.LocalListsEnabled())
+	}
+
+	steps := []struct {
+		list LocalList
+		hash byte
+		name string
+	}{
+		{LocalFilter, 7, "decoy.avi"},
+		{LocalBanlist, 8, "two\nlines;and a semicolon.exe"},
+		{LocalWhitelist, 1, "it is fine.avi"},
+		{LocalFilter, 7, "decoy again.avi"}, // already listed: not written twice
+	}
+	for _, s := range steps {
+		if err := f.AddLocal(s.list, testHash(s.hash), s.name); err != nil {
+			t.Fatalf("AddLocal(%s, %02x): %v", s.list, s.hash, err)
+		}
+	}
+	filterFile, _ := os.ReadFile(cfg.LocalFilterFile)
+	banFile, _ := os.ReadFile(cfg.LocalBanlistFile)
+	t.Logf("input: filter<-07 banlist<-08 whitelist<-01 filter<-07 again; output: filter file %q ban file %q stats=%+v",
+		filterFile, banFile, f.Stats())
+
+	check := func(f *Filter, when string) {
+		t.Helper()
+		_, banlist7, _ := f.CheckOffer(testHash(7), "a.avi")
+		refused7 := f.Withheld(testHash(7), "")
+		refused8, banlist8, _ := f.CheckOffer(testHash(8), "a.avi")
+		refused1, _, _ := f.CheckOffer(testHash(1), "a.avi")
+		t.Logf("output %s: 07 withheld=%t sanction=%t; 08 refused=%t sanction=%t; 01 refused=%t whitelisted=%t",
+			when, refused7, banlist7, refused8, banlist8, refused1, f.Whitelisted(testHash(1)))
+		if !refused7 || banlist7 {
+			t.Errorf("%s: the local filter list must refuse 07 and sanction nobody", when)
+		}
+		if !refused8 || !banlist8 {
+			t.Errorf("%s: the local ban list must refuse 08 and count against its publisher", when)
+		}
+		if refused1 || !f.Whitelisted(testHash(1)) {
+			t.Errorf("%s: the local whitelist must override the downloaded ban list for 01", when)
+		}
+	}
+	check(f, "at once")
+	if n := bytes.Count(filterFile, []byte("\n")); n != 1 {
+		t.Errorf("local filter file has %d line(s), want 1: %q", n, filterFile)
+	}
+	if n := bytes.Count(banFile, []byte("\n")); n != 1 || !bytes.Contains(banFile, []byte("; two lines;and a semicolon.exe")) {
+		t.Errorf("local ban file = %q, want one line with the name folded into it", banFile)
+	}
+
+	restarted, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(restarted, "after a restart")
+}
+
+// TestLocalListAppendAfterAHandEdit: a file left without its last newline must not have
+// the next entry glued to its last line.
+func TestLocalListAppendAfterAHandEdit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "filter.txt")
+	if err := os.WriteFile(path, []byte("# mine\n"+testHashLine(3)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := New(context.Background(), Config{LocalBanlistFile: filepath.Join(dir, "b"), LocalFilterFile: path, LocalWhitelistFile: filepath.Join(dir, "w")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.AddLocal(LocalFilter, testHash(4), ""); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	t.Logf("input: file without a final newline, then one entry appended; output: %q entries=%d", raw, f.Stats().FilterEntries)
+	if f.Stats().FilterEntries != 2 || !f.Withheld(testHash(3), "") || !f.Withheld(testHash(4), "") {
+		t.Errorf("entries = %d, want both the hand-written and the appended hash", f.Stats().FilterEntries)
+	}
+}
+
+// TestAddLocalRefusals: no local lists, an unknown list and a short hash are errors.
+func TestAddLocalRefusals(t *testing.T) {
+	plain := newTestFilter(t)
+	dir := t.TempDir()
+	local, err := New(context.Background(), Config{LocalBanlistFile: filepath.Join(dir, "b"), LocalFilterFile: filepath.Join(dir, "f"), LocalWhitelistFile: filepath.Join(dir, "w")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var none *Filter
+	off := plain.AddLocal(LocalFilter, testHash(1), "")
+	nilErr := none.AddLocal(LocalFilter, testHash(1), "")
+	unknown := local.AddLocal("greylist", testHash(1), "")
+	short := local.AddLocal(LocalFilter, []byte{1, 2}, "")
+	t.Logf("output: not enabled=%v nil filter=%v unknown list=%v short hash=%v", off, nilErr, unknown, short)
+	if !errors.Is(off, ErrNoLocalLists) || !errors.Is(nilErr, ErrNoLocalLists) || !errors.Is(unknown, ErrLocalList) || short == nil {
+		t.Errorf("errors = %v / %v / %v / %v", off, nilErr, unknown, short)
 	}
 }

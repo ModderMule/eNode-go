@@ -39,6 +39,7 @@ var secretKeys = []string{
 // publicKeys read like secrets and are not: a word list, a public key, a length.
 var publicKeys = []string{
 	"filter.keywords",
+	"filter.keywordBanThreshold",
 	"filter.update.publicKey",
 	"metaApi.accounts.minPasswordLength",
 }

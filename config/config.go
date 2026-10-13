@@ -424,9 +424,38 @@ type FilterConfig struct {
 	// it is disconnected and refused at login for BanMinutes. Zero disables the
 	// sanction; the files are refused either way.
 	BanThreshold *int `yaml:"banThreshold"`
-	BanMinutes   int  `yaml:"banMinutes"`
+	// KeywordBanThreshold is how many distinct files refused for a keyword get a
+	// session disconnected and banned the same way: the session that reaches it.
+	// Zero disables the sanction.
+	KeywordBanThreshold *int `yaml:"keywordBanThreshold"`
+	BanMinutes          int  `yaml:"banMinutes"`
+	// BanFile keeps the bans across restarts.
+	BanFile string `yaml:"banFile"`
 	// Update pulls the hash lists from an ed2k-server update service.
 	Update FilterUpdateConfig `yaml:"update"`
+	// LocalLists are the operator's own hash lists, beside the downloaded ones.
+	LocalLists LocalListsConfig `yaml:"localLists"`
+	// Spam scores offered files and publishers' shares.
+	Spam SpamConfig `yaml:"spam"`
+}
+
+// SpamConfig is filter.spam. It only observes: a scored file or publisher is listed in
+// the admin UI and logged, and nothing is refused. See docs/spam-detection.md.
+type SpamConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// LogFile is where each listed verdict and each operator decision is appended as
+	// a line of JSON, to tune the thresholds against later.
+	LogFile string `yaml:"logFile"`
+}
+
+// LocalListsConfig is filter.localLists: the operator's own additions to the three
+// hash lists. The updater never replaces these files, and the admin dashboard's Spam
+// tab writes to them.
+type LocalListsConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	BanlistFile   string `yaml:"banlistFile"`
+	FilterFile    string `yaml:"filterFile"`
+	WhitelistFile string `yaml:"whitelistFile"`
 }
 
 // HashListConfig is one hash list file. The updater writes these, so File defaults
@@ -466,9 +495,15 @@ func (c FilterConfig) ReloadMinutesOrDefault() int { return intOrDefault(c.Reloa
 // BanThresholdOrDefault is the ban-list sanction threshold; 3 when unset.
 func (c FilterConfig) BanThresholdOrDefault() int { return intOrDefault(c.BanThreshold, 3) }
 
+// KeywordBanThresholdOrDefault is the keyword sanction threshold; 5 when unset.
+func (c FilterConfig) KeywordBanThresholdOrDefault() int {
+	return intOrDefault(c.KeywordBanThreshold, 5)
+}
+
 // ContentEnabled reports whether any content filter layer is configured.
 func (c FilterConfig) ContentEnabled() bool {
-	return strings.TrimSpace(c.Keywords) != "" || c.HashBanlist.Enabled || c.HashFilter.Enabled || c.HashWhitelist.Enabled
+	return strings.TrimSpace(c.Keywords) != "" || c.HashBanlist.Enabled || c.HashFilter.Enabled || c.HashWhitelist.Enabled ||
+		c.LocalLists.Enabled
 }
 
 // IPFilterConfig is the static range list: an eMule/guarding.p2p ipfilter.dat or an
@@ -1020,6 +1055,12 @@ func (c Config) HashBanlistPath() string   { return ResolveDataPath(c.Filter.Has
 func (c Config) HashFilterPath() string    { return ResolveDataPath(c.Filter.HashFilter.File) }
 func (c Config) HashWhitelistPath() string { return ResolveDataPath(c.Filter.HashWhitelist.File) }
 
+// SpamLogPath is the resolved location of the spam verdict log.
+func (c Config) SpamLogPath() string { return ResolveDataPath(c.Filter.Spam.LogFile) }
+
+// BanFilePath is the resolved location of the persisted bans.
+func (c Config) BanFilePath() string { return ResolveDataPath(c.Filter.BanFile) }
+
 // IPFilterPath is the resolved location of the operator-supplied range list. It is
 // resolved the same way even though it is not under DataDir, so that naming
 // "ipfilter.dat" works from a subdirectory too.
@@ -1230,8 +1271,26 @@ func setContentFilterDefaults(f *FilterConfig) error {
 	if f.BanThresholdOrDefault() < 0 {
 		return fmt.Errorf("filter.banThreshold must not be negative, got %d", *f.BanThreshold)
 	}
+	if f.KeywordBanThresholdOrDefault() < 0 {
+		return fmt.Errorf("filter.keywordBanThreshold must not be negative, got %d", *f.KeywordBanThreshold)
+	}
 	if f.BanMinutes <= 0 {
 		f.BanMinutes = 1440
+	}
+	if f.BanFile == "" {
+		f.BanFile = filepath.Join(DataDir, "bans.txt")
+	}
+	if f.LocalLists.BanlistFile == "" {
+		f.LocalLists.BanlistFile = filepath.Join(DataDir, "local_banlist.txt")
+	}
+	if f.LocalLists.FilterFile == "" {
+		f.LocalLists.FilterFile = filepath.Join(DataDir, "local_filter.txt")
+	}
+	if f.LocalLists.WhitelistFile == "" {
+		f.LocalLists.WhitelistFile = filepath.Join(DataDir, "local_whitelist.txt")
+	}
+	if f.Spam.LogFile == "" {
+		f.Spam.LogFile = filepath.Join(DataDir, "spam_verdicts.jsonl")
 	}
 
 	u := &f.Update

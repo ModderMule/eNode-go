@@ -131,7 +131,9 @@ type ServerRuntime struct {
 	Filter AccessFilter
 	// Content refuses files by hash list and keyword; nil when no content filter is
 	// configured. See SetContentFilter.
-	Content  ContentFilter
+	Content ContentFilter
+	// Spam scores offered files and observes only; nil when spam detection is off.
+	Spam     SpamObserver
 	counters *counterCache
 	// udpLimiter applies UDPRuntimeConfig.RateLimitPerIPPerMinute.
 	udpLimiter *ratelimit.Limiter
@@ -680,8 +682,12 @@ type tcpClient struct {
 	// banlistHits holds the distinct ban-list files this session has offered, and
 	// banlistDropped latches the handler once that got the session dropped, as
 	// hardLimitHit does. Nil until the first hit, which most sessions never have.
+	// keywordHits is the same set for files refused by a keyword.
 	banlistHits    map[[16]byte]struct{}
+	keywordHits    map[[16]byte]struct{}
 	banlistDropped bool
+	// spamSession is the spam observer's state for this session; see SpamObserver.
+	spamSession any
 
 	// loginGateTripped makes requireLogin inert once it has dropped the session, for
 	// exactly the reason hardLimitHit exists above: closeWithReason closes the socket
@@ -1522,18 +1528,25 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 			metaHashes++
 			continue
 		}
-		if refused, sanction := c.server.checkOffer(record.Hash, recordName(record)); refused {
+		if refused, banlist, keyword := c.server.checkOffer(record.Hash, recordName(record)); refused {
 			// On a hash list or holding a filtered keyword. Dropped before the
 			// soft limit like the two cases above, so a refused file is not charged
 			// against it.
 			contentRefused++
-			if sanction && c.noteBanlistHit(record.Hash) {
+			reason, distinct := "", 0
+			switch {
+			case banlist && c.noteBanlistHit(record.Hash):
+				reason, distinct = "ban list", len(c.banlistHits)
+			case keyword && c.noteKeywordHit(record.Hash):
+				reason, distinct = "keyword", len(c.keywordHits)
+			}
+			if reason != "" {
 				// Nothing of this packet is stored: the session is going away and
 				// its sources with it.
 				c.banlistDropped = true
 				c.server.Content.Ban(info.Hash, c.peerIP)
-				logging.Warnf("offer files ban list remote=%s id=%d hash=%x distinct=%d: closing and banning",
-					c.remoteHost, info.ID, info.Hash, len(c.banlistHits))
+				logging.Warnf("offer files %s remote=%s id=%d hash=%x distinct=%d: closing and banning",
+					reason, c.remoteHost, info.ID, info.Hash, distinct)
 				c.sendServerMessage(msgBanlisted)
 				c.closeWithReason("banlist")
 				return
@@ -1546,6 +1559,11 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 			logging.Debugf("offer file remote=%s idx=%d hash=%x name=%q size=%d type=%q sourceID=%d sourcePort=%d",
 				c.remoteHost, i, record.Hash, file.Name, file.Size, file.Type, info.ID, info.Port)
 		}
+	}
+	// Before the soft limit: what a publisher offers says what its share is, whether
+	// or not the server indexes all of it.
+	if c.server.Spam != nil && len(batch) > 0 {
+		c.spamSession = c.server.Spam.ObserveOffer(c.spamSession, info.Hash, c.peerIP, batch)
 	}
 	batch, skipped := c.withinSoftLimit(batch, info, softLimit)
 	if skipped > 0 && !c.softLimitWarned {

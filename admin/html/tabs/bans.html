@@ -8,7 +8,7 @@
 </div>
 <p class="desc tabmsg" id="msg-bans"></p>
 <table><thead><tr><th>Banned</th><th>Until</th><th>Remaining</th><th></th></tr></thead><tbody id="baRows"></tbody></table>
-<p class="desc">A banned user hash or address is refused at login; a client that is already connected stays until it is disconnected. An IPv6 address is banned as its /64. Bans are kept in memory and end with a restart.</p>
+<p class="desc">A banned user hash or address is refused at login; a client that is already connected stays until it is disconnected. An IPv6 address is banned as its /64. Bans are written to <code>filter.banFile</code> and outlast a restart.</p>
 </div>
 {{end}}
 

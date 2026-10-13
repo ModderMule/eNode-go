@@ -25,6 +25,9 @@ func buildContentFilter(ctx context.Context, cfg config.Config) (*contentfilter.
 		ReloadMinutes: f.ReloadMinutesOrDefault(),
 		BanThreshold:  f.BanThresholdOrDefault(),
 		BanMinutes:    f.BanMinutes,
+		BanFile:       cfg.BanFilePath(),
+
+		KeywordBanThreshold: f.KeywordBanThresholdOrDefault(),
 	}
 	if f.HashBanlist.Enabled {
 		fc.BanlistFile = cfg.HashBanlistPath()
@@ -34,6 +37,11 @@ func buildContentFilter(ctx context.Context, cfg config.Config) (*contentfilter.
 	}
 	if f.HashWhitelist.Enabled {
 		fc.WhitelistFile = cfg.HashWhitelistPath()
+	}
+	if f.LocalLists.Enabled {
+		fc.LocalBanlistFile = config.ResolveDataPath(f.LocalLists.BanlistFile)
+		fc.LocalFilterFile = config.ResolveDataPath(f.LocalLists.FilterFile)
+		fc.LocalWhitelistFile = config.ResolveDataPath(f.LocalLists.WhitelistFile)
 	}
 	return contentfilter.New(ctx, fc)
 }

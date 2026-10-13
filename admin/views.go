@@ -43,6 +43,10 @@ type Views interface {
 	RemoveBan(key string) error
 
 	Bots() []BotRow
+	Spam() SpamView
+	// SpamDecide puts a file on one of the operator's hash lists: "banlist", "filter"
+	// or "whitelist".
+	SpamDecide(hash, list string) error
 	Blocks() []BlockRow
 	Health() HealthView
 	Runtime() RuntimeView
@@ -65,6 +69,10 @@ type Features struct {
 	Bans bool
 	// Bots is udp.botDetection.
 	Bots bool
+	// Spam is filter.spam, and SpamLists that filter.localLists is on too, so a
+	// listed file can be put on a list.
+	Spam      bool
+	SpamLists bool
 	// FilterReload is set when a filter that reads a file is enabled, and
 	// FilterUpdate when filter.update is.
 	FilterReload bool
@@ -251,6 +259,43 @@ type BotRow struct {
 	LastSeen         string  `json:"lastSeen"`
 }
 
+// SpamView is what the spam detector has scored. It observes: nothing listed here was
+// refused.
+type SpamView struct {
+	// Assessed is how many offered files were scored since the start, and Caution,
+	// Suspect and Spam how many of them fell into each band.
+	Assessed   uint64             `json:"assessed"`
+	Caution    uint64             `json:"caution"`
+	Suspect    uint64             `json:"suspect"`
+	Spam       uint64             `json:"spam"`
+	Files      []SpamFileRow      `json:"files"`
+	Publishers []SpamPublisherRow `json:"publishers"`
+}
+
+// SpamFileRow is one file that scored, with the reasons as "reason +points".
+type SpamFileRow struct {
+	Hash      string   `json:"hash"`
+	Name      string   `json:"name"`
+	Size      uint64   `json:"size"`
+	Score     int      `json:"score"`
+	Band      string   `json:"band"`
+	Reasons   []string `json:"reasons"`
+	Offers    uint64   `json:"offers"`
+	FirstSeen string   `json:"firstSeen"`
+	LastSeen  string   `json:"lastSeen"`
+}
+
+// SpamPublisherRow is one session whose share was judged spam.
+type SpamPublisherRow struct {
+	UserHash  string   `json:"userHash"`
+	Address   string   `json:"address"`
+	Country   string   `json:"country"`
+	Files     int      `json:"files"`
+	Reasons   []string `json:"reasons"`
+	FirstSeen string   `json:"firstSeen"`
+	LastSeen  string   `json:"lastSeen"`
+}
+
 // BlockRow is one reason something was refused and how often since the start.
 type BlockRow struct {
 	Reason string `json:"reason"`
@@ -335,6 +380,12 @@ func (s *Server) registerViews(mux *http.ServeMux) {
 	get("POST /api/bans", handleBanAdd)
 	get("DELETE /api/bans/{key...}", handleBanRemove)
 	get("GET /api/bots", func(v Views, w http.ResponseWriter, _ *http.Request) { writeJSON(w, orEmpty(v.Bots())) })
+	get("GET /api/spam", func(v Views, w http.ResponseWriter, _ *http.Request) {
+		view := v.Spam()
+		view.Files, view.Publishers = orEmpty(view.Files), orEmpty(view.Publishers)
+		writeJSON(w, view)
+	})
+	get("POST /api/spam/files/{hash}/{list}", handleSpamDecide)
 	get("GET /api/blocks", func(v Views, w http.ResponseWriter, _ *http.Request) { writeJSON(w, orEmpty(v.Blocks())) })
 	get("GET /api/health", func(v Views, w http.ResponseWriter, _ *http.Request) { writeJSON(w, v.Health()) })
 	get("GET /api/runtime", func(v Views, w http.ResponseWriter, _ *http.Request) { writeJSON(w, v.Runtime()) })
@@ -454,6 +505,22 @@ func handleFilterReload(v Views, w http.ResponseWriter, r *http.Request) {
 	}
 	logging.Infof("admin dashboard: filters reloaded by %s", r.RemoteAddr)
 	writeJSON(w, v.Filter())
+}
+
+func handleSpamDecide(v Views, w http.ResponseWriter, r *http.Request) {
+	if !v.Features().SpamLists {
+		writeViewError(w, ErrUnavailable)
+		return
+	}
+	hash, list := r.PathValue("hash"), r.PathValue("list")
+	if err := v.SpamDecide(hash, list); err != nil {
+		writeViewError(w, err)
+		return
+	}
+	logging.Infof("admin dashboard: file %s put on the local %s by %s", hash, list, r.RemoteAddr)
+	view := v.Spam()
+	view.Files, view.Publishers = orEmpty(view.Files), orEmpty(view.Publishers)
+	writeJSON(w, view)
 }
 
 func handleFilterUpdate(v Views, w http.ResponseWriter, r *http.Request) {

@@ -179,7 +179,8 @@ strings.
 
 A tab is shown only when the server has the feature: **Bans** needs the content filter
 (any of `filter.keywords`, `filter.hashBanlist`, `filter.hashFilter`,
-`filter.hashWhitelist`), **Bots** needs `udp.botDetection.enabled`, **Accounts** needs
+`filter.hashWhitelist`), **Bots** needs `udp.botDetection.enabled`, **Spam** needs
+`filter.spam.enabled` (and `filter.localLists.enabled` for its buttons), **Accounts** needs
 Meta API accounts.
 
 | Tab | Shows | Endpoints |
@@ -191,6 +192,7 @@ Meta API accounts.
 | Filter | what the IP filter, the country filter and the content filter have loaded and refused; their data files | `GET /api/filter` |
 | Bans | the user hashes and addresses refused at login, with their expiry | `GET /api/bans` |
 | Bots | addresses whose UDP queries look automated; see [bot-detection.md](bot-detection.md) | `GET /api/bots` |
+| Spam | offered files that scored as spam or fake, and the sessions whose share looks like spam; see [spam-detection.md](spam-detection.md) | `GET /api/spam` |
 | Blocks | how often each kind of refusal happened since the start | `GET /api/blocks` |
 | Health | the filters' data files (present, size, age, entries) and the last 100 warnings and errors | `GET /api/health` |
 | Runtime | Go heap, goroutines, garbage collection, heap per indexed file, storage settings | `GET /api/runtime` |
@@ -223,6 +225,7 @@ is logged with the operator's address.
 | Disconnect a client | `POST /api/clients/{hash}/disconnect` | closes that session. The client can log in again at once; ban it to prevent that. |
 | Ban | `POST /api/bans` with `{"key": "ip:203.0.113.9", "minutes": 1440}` | refuses that address or user hash (`hash:<32 hex digits>`) at login for the given time. An IPv6 address is banned as its /64. A client that is already connected stays until it is disconnected. |
 | Lift a ban | `DELETE /api/bans/{key}` | |
+| Put a listed file on a local hash list | `POST /api/spam/files/{hash}/{list}` | `list` is `filter`, `banlist` or `whitelist`; see [spam-detection.md](spam-detection.md#acting-on-the-list) |
 | Add a server | `POST /api/servers` with `{"ip": "203.0.113.5", "port": 4661}` | adds an entry to the static server list sent to clients |
 | Remove a server | `DELETE /api/servers/{ip}/{port}` | removes one |
 | Reload filter files | `POST /api/filter/reload` | re-reads the IP filter, the hash lists and the country database from disk now |
@@ -231,7 +234,8 @@ is logged with the operator's address.
 | Account actions | `POST /api/accounts/{id}/{action}` | see [Account administration](#account-administration) |
 
 - Bans are the content filter's publisher bans (see [access-filters.md](access-filters.md)):
-  kept in memory, gone after a restart, and only available with the content filter on.
+  written to `filter.banFile` and read back at startup, and only available with the
+  content filter on.
 - A server added or removed here lasts until the next restart or config reload, which
   applies the `servers:` list of the config file again.
 - **Reload filter files** is offered only when a filter that reads a file is enabled

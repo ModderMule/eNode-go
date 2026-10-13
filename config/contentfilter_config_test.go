@@ -28,6 +28,24 @@ func TestContentFilterDefaults(t *testing.T) {
 	if f.ReloadMinutesOrDefault() != 30 || f.BanThresholdOrDefault() != 3 || f.BanMinutes != 1440 {
 		t.Errorf("reload=%d threshold=%d banMinutes=%d, want 30/3/1440", f.ReloadMinutesOrDefault(), f.BanThresholdOrDefault(), f.BanMinutes)
 	}
+	t.Logf("output: spam=%+v localLists=%+v", f.Spam, f.LocalLists)
+	if f.Spam.Enabled || f.LocalLists.Enabled {
+		t.Error("filter.spam and filter.localLists must default to off")
+	}
+	for name, got := range map[string]string{
+		"filter.spam.logFile":             f.Spam.LogFile,
+		"filter.localLists.banlistFile":   f.LocalLists.BanlistFile,
+		"filter.localLists.filterFile":    f.LocalLists.FilterFile,
+		"filter.localLists.whitelistFile": f.LocalLists.WhitelistFile,
+	} {
+		if filepath.Dir(got) != DataDir {
+			t.Errorf("%s = %q, want it under %s/", name, got, DataDir)
+		}
+	}
+	t.Logf("output: keywordBanThreshold=%d banFile=%q", f.KeywordBanThresholdOrDefault(), f.BanFile)
+	if f.KeywordBanThresholdOrDefault() != 5 || f.BanFile != filepath.Join(DataDir, "bans.txt") {
+		t.Errorf("keywordBanThreshold=%d banFile=%q, want 5 and %s", f.KeywordBanThresholdOrDefault(), f.BanFile, filepath.Join(DataDir, "bans.txt"))
+	}
 	if f.Update.IntervalHours != 168 || f.Update.MinKeepRatio != 0.5 || f.Update.PublicKey != DefaultFilterUpdatePublicKey {
 		t.Errorf("update defaults = %+v, want weekly, 0.5 and the service's key", f.Update)
 	}
@@ -57,6 +75,7 @@ func TestContentFilterValidation(t *testing.T) {
 	}{
 		{"keyword without a word", "  keywords: \"ok|--\"\n", "filter.keywords"},
 		{"negative threshold", "  banThreshold: -1\n", "filter.banThreshold"},
+		{"negative keyword threshold", "  keywordBanThreshold: -1\n", "filter.keywordBanThreshold"},
 		{"negative reload", "  reloadMinutes: -5\n", "filter.reloadMinutes"},
 		{"ratio above one", "  update:\n    minKeepRatio: 1.5\n", "filter.update.minKeepRatio"},
 		{"reference IP is a hostname", lists + "  update:\n    enabled: true\n    referenceIP: \"peer.example\"\n", "filter.update.referenceIP"},

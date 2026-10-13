@@ -1,0 +1,48 @@
+{{define "tab-spam"}}
+<div class="tab" id="tab-spam" hidden>
+<h2>Spam detection</h2>
+<p class="desc tabmsg" id="msg-spam"></p>
+<p class="desc" id="spSummary"></p>
+<h2>Flagged publishers</h2>
+<div class="scroll"><table><thead><tr><th>User hash</th><th>Address</th><th>Country</th><th>Files</th><th>Reasons</th><th>First seen</th><th>Last seen</th><th></th></tr></thead><tbody id="spPubRows"></tbody></table></div>
+<h2>Scored files</h2>
+<div class="scroll"><table><thead><tr><th>Score</th><th>Band</th><th>Name</th><th>Size</th><th>Reasons</th><th>Offers</th><th>Hash</th><th>Last seen</th><th></th></tr></thead><tbody id="spFileRows"></tbody></table></div>
+<p class="desc">Offered files scored on what their publisher says about them, and sessions whose share looks made to be found rather than shared. This list only observes. Nothing here is refused, withheld or banned. Shown are the 500 highest scores of the last 24 hours; a publisher's reasons count against every file it offers.{{if .Features.SpamLists}} <b>Filter</b> puts a file on the local filter list (refused, nobody sanctioned), <b>Ban list</b> on the local ban list (refused, and its publishers count toward a ban), <b>It is fine</b> on the local whitelist (never listed again). Each takes effect at once.{{end}}</p>
+</div>
+{{end}}
+
+{{define "js-spam"}}
+(function(){
+  var lists = {{.Features.SpamLists}}, bans = {{.Features.Bans}};
+  function decide(f, list, label){
+    var b = el('button', label);
+    b.onclick = function(){ act('spam', '/api/spam/files/' + f.hash + '/' + list, 'POST', undefined, render, 'put on the local ' + list); };
+    return b;
+  }
+  function render(s){
+    document.getElementById('spSummary').textContent = num(s.assessed) + ' offered files scored since the start: '
+      + num(s.caution) + ' caution, ' + num(s.suspect) + ' suspect, ' + num(s.spam) + ' spam.';
+    fillTable('spPubRows', s.publishers, function(p){
+      var ban = '';
+      if(bans && p.address){
+        ban = el('button', 'Ban 24 h');
+        ban.onclick = function(){
+          act('spam', '/api/bans', 'POST', {key: 'ip:' + p.address, minutes: 1440}, function(){ runTab('spam', true); }, 'banned');
+        };
+      }
+      return [el('code', p.userHash || '—'), el('code', p.address), p.country || '—', num(p.files),
+        p.reasons.join(', '), fmtAge(p.firstSeen) + ' ago', fmtAge(p.lastSeen) + ' ago', ban];
+    }, 'no publisher flagged');
+    fillTable('spFileRows', s.files, function(f){
+      var actions = '';
+      if(lists){
+        actions = el('span');
+        actions.append(decide(f, 'filter', 'Filter'), ' ', decide(f, 'banlist', 'Ban list'), ' ', decide(f, 'whitelist', 'It is fine'));
+      }
+      return [num(f.score), el('span', f.band, f.band === 'caution' ? 'badge warn' : 'badge err'), f.name, fmtBytes(f.size),
+        f.reasons.join(', '), num(f.offers), el('code', f.hash), fmtAge(f.lastSeen) + ' ago', actions];
+    }, 'no file scored');
+  }
+  tabs.spam = {poll: true, load: async function(){ render(await api('/api/spam')); }};
+})();
+{{end}}

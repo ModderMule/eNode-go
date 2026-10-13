@@ -18,24 +18,28 @@ type stubContent struct {
 	filtered  map[string]bool
 	keyword   string
 	threshold int
+	// keywordThreshold is KeywordBanThreshold; 0 never sanctions a keyword hit.
+	keywordThreshold int
 
 	mu         sync.Mutex
 	bans       [][]byte
 	bannedUser []byte
 }
 
-func (s *stubContent) CheckOffer(hash []byte, name string) (bool, bool) {
+func (s *stubContent) CheckOffer(hash []byte, name string) (bool, bool, bool) {
 	switch {
 	case s.banned[string(hash)]:
-		return true, true
-	case s.filtered[string(hash)], s.keyword != "" && strings.Contains(name, s.keyword):
-		return true, false
+		return true, true, false
+	case s.filtered[string(hash)]:
+		return true, false, false
+	case s.keyword != "" && strings.Contains(name, s.keyword):
+		return true, false, true
 	}
-	return false, false
+	return false, false, false
 }
 
 func (s *stubContent) Withheld(hash []byte, name string) bool {
-	refused, _ := s.CheckOffer(hash, name)
+	refused, _, _ := s.CheckOffer(hash, name)
 	return refused
 }
 
@@ -49,6 +53,8 @@ func (s *stubContent) QueryBlocked(terms []string) bool {
 }
 
 func (s *stubContent) BanThreshold() int { return s.threshold }
+
+func (s *stubContent) KeywordBanThreshold() int { return s.keywordThreshold }
 
 func (s *stubContent) Ban(userHash []byte, _ net.IP) {
 	s.mu.Lock()

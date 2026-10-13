@@ -18,6 +18,7 @@ type fakeViews struct {
 	bans         []BanRow
 	reloaded     bool
 	updated      bool
+	decided      string
 }
 
 func (f *fakeViews) Features() Features   { return f.features }
@@ -75,7 +76,12 @@ func (f *fakeViews) RemoveBan(key string) error {
 	}
 	return ErrNotFound
 }
-func (f *fakeViews) Bots() []BotRow       { return nil }
+func (f *fakeViews) Bots() []BotRow { return nil }
+func (f *fakeViews) Spam() SpamView { return SpamView{Assessed: 7} }
+func (f *fakeViews) SpamDecide(hash, list string) error {
+	f.decided = hash + "/" + list
+	return nil
+}
 func (f *fakeViews) Blocks() []BlockRow   { return []BlockRow{{Reason: "rate limit", Count: 4}} }
 func (f *fakeViews) Health() HealthView   { return HealthView{} }
 func (f *fakeViews) Runtime() RuntimeView { return RuntimeView{GoVersion: "go-test"} }
@@ -85,7 +91,7 @@ func (f *fakeViews) Config() (ConfigView, error) {
 
 func newViewServer(user, pass string) (*Server, *fakeViews) {
 	s, _ := newAuthServer(user, pass)
-	fv := &fakeViews{features: Features{Bans: true, Bots: true, FilterReload: true, FilterUpdate: true}}
+	fv := &fakeViews{features: Features{Bans: true, Bots: true, Spam: true, SpamLists: true, FilterReload: true, FilterUpdate: true}}
 	s.SetViews(fv)
 	return s, fv
 }
@@ -105,7 +111,7 @@ func write(body string) func(*http.Request) {
 // viewReadRoutes are every GET route of the tabs.
 var viewReadRoutes = []string{
 	"/api/clients", "/api/clients/summary", "/api/files", "/api/files/aa/sources", "/api/peers",
-	"/api/filter", "/api/bans", "/api/bots", "/api/blocks", "/api/health", "/api/runtime", "/api/config",
+	"/api/filter", "/api/bans", "/api/bots", "/api/spam", "/api/blocks", "/api/health", "/api/runtime", "/api/config",
 }
 
 func TestViewRoutesAreSensitive(t *testing.T) {
@@ -145,6 +151,7 @@ func TestViewWritesNeedHeaderAndSameOrigin(t *testing.T) {
 		{"POST", "/api/filter/update", ""},
 		{"POST", "/api/bans", `{"key":"ip:203.0.113.9","minutes":60}`},
 		{"DELETE", "/api/bans/ip:203.0.113.9", ""},
+		{"POST", "/api/spam/files/aa/filter", ""},
 	}
 	for _, c := range writes {
 		s, fv := newViewServer("", "")
@@ -156,7 +163,7 @@ func TestViewWritesNeedHeaderAndSameOrigin(t *testing.T) {
 			write(c.body)(r)
 			r.Header.Set("Origin", "https://evil.example")
 		}).Code
-		untouched := fv.disconnected == "" && !fv.reloaded && !fv.updated && len(fv.servers) == 1 && len(fv.bans) == 1
+		untouched := fv.disconnected == "" && !fv.reloaded && !fv.updated && len(fv.servers) == 1 && len(fv.bans) == 1 && fv.decided == ""
 		remote := do(s, c.method, c.path, "192.0.2.7:4000", write(c.body)).Code
 		ok := do(s, c.method, c.path, "", write(c.body))
 		t.Logf("input: %s %s output: no-header=%d cross-origin=%d untouched=%t remote=%d same-origin=%d %s",
@@ -214,15 +221,15 @@ func TestFilterButtonsFollowFeatures(t *testing.T) {
 	if reload != 404 || update != 404 || fv.reloaded || fv.updated {
 		t.Errorf("filter writes ran with no filter enabled: %d %d", reload, update)
 	}
-	for _, id := range []string{`id="flReload"`, `id="flUpdate"`, `id="tab-bans"`, `id="tab-bots"`} {
+	for _, id := range []string{`id="flReload"`, `id="flUpdate"`, `id="tab-bans"`, `id="tab-bots"`, `id="tab-spam"`} {
 		if strings.Contains(page, id) {
 			t.Errorf("page renders %s with its feature off", id)
 		}
 	}
 
-	fv.features = Features{Bans: true, Bots: true, FilterReload: true, FilterUpdate: true}
+	fv.features = Features{Bans: true, Bots: true, Spam: true, FilterReload: true, FilterUpdate: true}
 	page = do(s, "GET", "/", "", nil).Body.String()
-	for _, id := range []string{`id="flReload"`, `id="flUpdate"`, `id="tab-bans"`, `id="tab-bots"`, `id="tab-accounts"`,
+	for _, id := range []string{`id="flReload"`, `id="flUpdate"`, `id="tab-bans"`, `id="tab-bots"`, `id="tab-spam"`, `id="tab-accounts"`,
 		`id="tab-status"`, `id="tab-clients"`, `id="tab-files"`, `id="tab-peers"`, `id="tab-filter"`, `id="tab-blocks"`,
 		`id="tab-health"`, `id="tab-runtime"`, `id="tab-config"`} {
 		if !strings.Contains(page, id) {

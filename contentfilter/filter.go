@@ -8,7 +8,11 @@
 //   - the filter list refuses a file and accuses nobody — decoys and takedowns, which
 //     an ordinary user holds without having done anything;
 //   - the whitelist overrides both lists and the keywords;
-//   - a keyword in the file name refuses the file, again without accusing anybody.
+//   - a keyword in the file name refuses the file, and counts against whoever offered
+//     it under a threshold of its own.
+//
+// Each hash list may have a local twin: a file the operator owns, which adds to the
+// list and which the updater never replaces.
 package contentfilter
 
 import (
@@ -18,6 +22,9 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,6 +41,12 @@ type Config struct {
 	BanlistFile   string
 	FilterFile    string
 	WhitelistFile string
+	// LocalBanlistFile, LocalFilterFile and LocalWhitelistFile are the operator's own
+	// additions to the three lists, or "" for none. Such a file need not exist: it is
+	// created by the first AddLocal.
+	LocalBanlistFile   string
+	LocalFilterFile    string
+	LocalWhitelistFile string
 	// AllowMissing lets an enabled list start empty when its file does not exist yet.
 	// Set when the updater is on, since the first download is what creates the file.
 	AllowMissing bool
@@ -42,8 +55,14 @@ type Config struct {
 	// BanThreshold is how many distinct ban-list files one session may offer before it
 	// is disconnected and banned. Zero disables the sanction.
 	BanThreshold int
+	// KeywordBanThreshold is how many distinct keyword-refused files one session may
+	// offer: the session that reaches it is disconnected and banned. Zero disables the
+	// sanction.
+	KeywordBanThreshold int
 	// BanMinutes is how long such a ban lasts.
 	BanMinutes int
+	// BanFile is where the bans are kept across restarts, or "" for in memory only.
+	BanFile string
 }
 
 // Stats is the admin view of the filter.
@@ -86,14 +105,32 @@ const (
 	verdictKeyword
 )
 
+// LocalList names one of the operator's own lists.
+type LocalList string
+
+const (
+	LocalBanlist   LocalList = "banlist"
+	LocalFilter    LocalList = "filter"
+	LocalWhitelist LocalList = "whitelist"
+)
+
+// ErrLocalList is returned for a list name that is none of the three, and
+// ErrNoLocalLists when the local lists are not configured.
+var (
+	ErrLocalList    = errors.New("list must be banlist, filter or whitelist")
+	ErrNoLocalLists = errors.New("the local hash lists are not enabled")
+)
+
 // listSlot is one hash list, its file, and what that file looked like when it was last
 // read, so the reload timer can skip an unchanged multi-megabyte list.
 type listSlot struct {
-	name    string
-	path    string
-	list    atomic.Pointer[HashList]
-	modTime atomic.Int64
-	size    atomic.Int64
+	name string
+	path string
+	// optional marks a local list, whose missing file is an empty list.
+	optional bool
+	list     atomic.Pointer[HashList]
+	modTime  atomic.Int64
+	size     atomic.Int64
 }
 
 // Filter is the seam the protocol layer consults. The lists sit behind atomic pointers:
@@ -104,10 +141,16 @@ type Filter struct {
 	banlist   listSlot
 	filter    listSlot
 	whitelist listSlot
-	keywords  *Matcher
-	bans      *banList
-	banCount  atomic.Int64
-	stats     struct {
+	// The operator's own additions to the three lists above.
+	localBanlist   listSlot
+	localFilter    listSlot
+	localWhitelist listSlot
+	// appendMu serializes AddLocal's writes.
+	appendMu sync.Mutex
+	keywords *Matcher
+	bans     *banList
+	banCount atomic.Int64
+	stats    struct {
 		refusedBanlist atomic.Int64
 		refusedFilter  atomic.Int64
 		refusedKeyword atomic.Int64
@@ -127,13 +170,21 @@ func New(ctx context.Context, cfg Config) (*Filter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("filter.keywords: %w", err)
 	}
-	if keywords.Empty() && cfg.BanlistFile == "" && cfg.FilterFile == "" && cfg.WhitelistFile == "" {
+	if keywords.Empty() && cfg.BanlistFile == "" && cfg.FilterFile == "" && cfg.WhitelistFile == "" &&
+		cfg.LocalBanlistFile == "" && cfg.LocalFilterFile == "" && cfg.LocalWhitelistFile == "" {
 		return nil, nil
 	}
-	f := &Filter{cfg: cfg, keywords: keywords, bans: newBanList()}
+	f := &Filter{cfg: cfg, keywords: keywords, bans: newBanList(cfg.BanFile)}
+	if err := f.bans.load(); err != nil {
+		return nil, err
+	}
+	f.banCount.Store(int64(f.bans.sweep()))
 	f.banlist.name, f.banlist.path = "hash ban list", cfg.BanlistFile
 	f.filter.name, f.filter.path = "hash filter list", cfg.FilterFile
 	f.whitelist.name, f.whitelist.path = "hash whitelist", cfg.WhitelistFile
+	f.localBanlist = listSlot{name: "local hash ban list", path: cfg.LocalBanlistFile, optional: true}
+	f.localFilter = listSlot{name: "local hash filter list", path: cfg.LocalFilterFile, optional: true}
+	f.localWhitelist = listSlot{name: "local hash whitelist", path: cfg.LocalWhitelistFile, optional: true}
 
 	for _, slot := range f.slots() {
 		if slot.path == "" {
@@ -157,24 +208,25 @@ func New(ctx context.Context, cfg Config) (*Filter, error) {
 	return f, nil
 }
 
-// CheckOffer judges one offered file. refused means it must not be indexed; sanction
-// means the refusal also counts against the publisher, which only a ban-list hit does.
-func (f *Filter) CheckOffer(hash []byte, name string) (refused, sanction bool) {
+// CheckOffer judges one offered file. refused means it must not be indexed. banlist
+// and keyword say which layer refused it when the refusal also counts against the
+// publisher; a filter-list hit sets neither.
+func (f *Filter) CheckOffer(hash []byte, name string) (refused, banlist, keyword bool) {
 	if f == nil {
-		return false, false
+		return false, false, false
 	}
 	switch f.judge(hash, name) {
 	case verdictBanlist:
 		f.stats.refusedBanlist.Add(1)
-		return true, true
+		return true, true, false
 	case verdictFilter:
 		f.stats.refusedFilter.Add(1)
-		return true, false
+		return true, false, false
 	case verdictKeyword:
 		f.stats.refusedKeyword.Add(1)
-		return true, false
+		return true, false, true
 	}
-	return false, false
+	return false, false, false
 }
 
 // Withheld reports whether a file must not be served: left out of search results, and
@@ -189,6 +241,48 @@ func (f *Filter) Withheld(hash []byte, name string) bool {
 	}
 	f.stats.withheld.Add(1)
 	return true
+}
+
+// Whitelisted reports whether hash is on the whitelist or its local twin.
+func (f *Filter) Whitelisted(hash []byte) bool {
+	return f != nil && listed(&f.whitelist, &f.localWhitelist, hash)
+}
+
+// LocalListsEnabled reports whether AddLocal has somewhere to write.
+func (f *Filter) LocalListsEnabled() bool {
+	return f != nil && f.cfg.LocalBanlistFile != "" && f.cfg.LocalFilterFile != "" && f.cfg.LocalWhitelistFile != ""
+}
+
+// AddLocal appends hash to one of the operator's lists and loads it at once. comment
+// is written after the hash, by convention the file name that justified the entry. A
+// hash the list already holds is left alone.
+func (f *Filter) AddLocal(list LocalList, hash []byte, comment string) error {
+	if !f.LocalListsEnabled() {
+		return ErrNoLocalLists
+	}
+	if len(hash) != HashSize {
+		return fmt.Errorf("file hash is %d bytes, want %d", len(hash), HashSize)
+	}
+	var slot *listSlot
+	switch list {
+	case LocalBanlist:
+		slot = &f.localBanlist
+	case LocalFilter:
+		slot = &f.localFilter
+	case LocalWhitelist:
+		slot = &f.localWhitelist
+	default:
+		return ErrLocalList
+	}
+	f.appendMu.Lock()
+	defer f.appendMu.Unlock()
+	if slot.list.Load().Contains(hash) {
+		return nil
+	}
+	if err := appendHashLine(slot.path, hash, comment); err != nil {
+		return fmt.Errorf("%s: %w", slot.name, err)
+	}
+	return f.loadSlot(slot, true)
 }
 
 // QueryBlocked reports whether a search asks for one of the keywords itself. Such a
@@ -213,6 +307,15 @@ func (f *Filter) BanThreshold() int {
 		return 0
 	}
 	return f.cfg.BanThreshold
+}
+
+// KeywordBanThreshold is how many distinct keyword-refused files get a session
+// sanctioned. Zero means never.
+func (f *Filter) KeywordBanThreshold() int {
+	if f == nil {
+		return 0
+	}
+	return f.cfg.KeywordBanThreshold
 }
 
 // Ban refuses a publisher at login, by user hash and by address, for BanMinutes.
@@ -322,9 +425,9 @@ func (f *Filter) Stats() Stats {
 		return Stats{}
 	}
 	return Stats{
-		BanlistEntries:   f.banlist.list.Load().Len(),
-		FilterEntries:    f.filter.list.Load().Len(),
-		WhitelistEntries: f.whitelist.list.Load().Len(),
+		BanlistEntries:   f.banlist.list.Load().Len() + f.localBanlist.list.Load().Len(),
+		FilterEntries:    f.filter.list.Load().Len() + f.localFilter.list.Load().Len(),
+		WhitelistEntries: f.whitelist.list.Load().Len() + f.localWhitelist.list.Load().Len(),
 		Keywords:         f.keywords.Len(),
 		RefusedBanlist:   f.stats.refusedBanlist.Load(),
 		RefusedFilter:    f.stats.refusedFilter.Load(),
@@ -335,8 +438,13 @@ func (f *Filter) Stats() Stats {
 	}
 }
 
-func (f *Filter) slots() [3]*listSlot {
-	return [3]*listSlot{&f.banlist, &f.filter, &f.whitelist}
+func (f *Filter) slots() [6]*listSlot {
+	return [6]*listSlot{&f.banlist, &f.filter, &f.whitelist, &f.localBanlist, &f.localFilter, &f.localWhitelist}
+}
+
+// listed reports whether hash is on a list or its local twin.
+func listed(slot, local *listSlot, hash []byte) bool {
+	return slot.list.Load().Contains(hash) || local.list.Load().Contains(hash)
 }
 
 // judge applies the layers in order. The whitelist comes first and beats everything:
@@ -344,13 +452,13 @@ func (f *Filter) slots() [3]*listSlot {
 // overriding are keyword matches as often as hash ones. The filter list comes before
 // the keywords so a decoy with a spam name is counted as what the operator ruled it.
 func (f *Filter) judge(hash []byte, name string) verdict {
-	if f.whitelist.list.Load().Contains(hash) {
+	if listed(&f.whitelist, &f.localWhitelist, hash) {
 		return verdictAllow
 	}
-	if f.banlist.list.Load().Contains(hash) {
+	if listed(&f.banlist, &f.localBanlist, hash) {
 		return verdictBanlist
 	}
-	if f.filter.list.Load().Contains(hash) {
+	if listed(&f.filter, &f.localFilter, hash) {
 		return verdictFilter
 	}
 	if name != "" && f.keywords.Match(name) {
@@ -363,6 +471,12 @@ func (f *Filter) judge(hash []byte, name string) verdict {
 // modification time are unchanged is left alone.
 func (f *Filter) loadSlot(slot *listSlot, force bool) error {
 	info, err := os.Stat(slot.path)
+	if slot.optional && errors.Is(err, fs.ErrNotExist) {
+		slot.list.Store(nil)
+		slot.modTime.Store(0)
+		slot.size.Store(0)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("%s: %w", slot.name, err)
 	}
@@ -402,4 +516,33 @@ func (f *Filter) reloadLoop(ctx context.Context, every time.Duration) {
 			return
 		}
 	}
+}
+
+// appendHashLine adds "<hash> ; <comment>" to a hash list file, creating it. A file
+// edited by hand may lack its last newline, so one is written first when it does.
+func appendHashLine(path string, hash []byte, comment string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	line := fmt.Sprintf("%x", hash)
+	// One line per entry: a file name may hold anything, a line break included.
+	comment = strings.Join(strings.FieldsFunc(comment, func(r rune) bool { return r < 0x20 || r == 0x7f }), " ")
+	if comment != "" {
+		line += " ; " + comment
+	}
+	if info, err := file.Stat(); err == nil && info.Size() > 0 {
+		last := make([]byte, 1)
+		if _, err := file.ReadAt(last, info.Size()-1); err == nil && last[0] != '\n' {
+			line = "\n" + line
+		}
+	}
+	if _, err := file.WriteString(line + "\n"); err != nil {
+		return err
+	}
+	return file.Sync()
 }

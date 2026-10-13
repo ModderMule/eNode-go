@@ -3,7 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +16,7 @@ import (
 	"enode/config"
 	"enode/contentfilter"
 	"enode/ed2k"
+	"enode/spamfilter"
 	"enode/storage"
 )
 
@@ -190,5 +196,100 @@ func TestAdminViewsRuntimeAndHealth(t *testing.T) {
 	}
 	if health.Files == nil || health.Log == nil {
 		t.Fatalf("health lists must be empty, not null: %+v", health)
+	}
+}
+
+// TestAdminViewsSpam: the Spam tab shows what the detector scored through the offer
+// adapter, and answers empty, with the tab off, when detection is off.
+func TestAdminViewsSpam(t *testing.T) {
+	v, _ := newTestViews(t, "")
+	off := v.Spam()
+	t.Logf("input: no detector output: feature=%t view=%+v", v.Features().Spam, off)
+	if v.Features().Spam || off.Assessed != 0 || len(off.Files) != 0 || len(off.Publishers) != 0 {
+		t.Fatalf("without a detector: feature=%t view=%+v, want off and empty", v.Features().Spam, off)
+	}
+
+	v.spam = spamfilter.New()
+	observer := spamObserver{detector: v.spam}
+	var files []storage.File
+	for i := 0; i < 12; i++ {
+		files = append(files, storage.File{
+			Hash: bytes.Repeat([]byte{byte(0x20 + i)}, 16), Name: fmt.Sprintf("Title%d full crack keygen.zip", i),
+			Size: 1_500_000, Type: "Video",
+		})
+	}
+	session := observer.ObserveOffer(nil, bytes.Repeat([]byte{0x5a}, 16), net.IPv4(203, 0, 113, 7), files)
+	again := observer.ObserveOffer(session, bytes.Repeat([]byte{0x5a}, 16), net.IPv4(203, 0, 113, 7), files[:1])
+
+	view := v.Spam()
+	t.Logf("input: 12 template-named archives claimed as video, then one again")
+	t.Logf("output: feature=%t assessed=%d caution=%d files=%d first=%+v publishers=%+v",
+		v.Features().Spam, view.Assessed, view.Caution, len(view.Files), view.Files[0], view.Publishers)
+	if !v.Features().Spam || session == nil || again != session {
+		t.Fatalf("feature=%t session=%v again=%v, want the tab on and one session state kept", v.Features().Spam, session, again)
+	}
+	if view.Assessed != 13 || view.Caution != 13 || len(view.Files) != 12 {
+		t.Fatalf("assessed=%d caution=%d files=%d, want 13, 13 and 12 distinct files", view.Assessed, view.Caution, len(view.Files))
+	}
+	row := view.Files[0]
+	if row.Score != 45 || row.Band != "caution" || len(row.Hash) != 32 || len(row.Reasons) != 2 {
+		t.Errorf("file row = %+v, want score 45, caution, a hex hash and two reasons", row)
+	}
+	if len(view.Publishers) != 1 || view.Publishers[0].Address != "203.0.113.7" || view.Publishers[0].Files != 13 ||
+		view.Publishers[0].Reasons[0] != "publisher_name_template +30" {
+		t.Errorf("publishers = %+v, want the session once with its 13 offers and the template reason", view.Publishers)
+	}
+}
+
+// TestAdminViewsSpamDecide: a button of the Spam tab puts the file on the local list
+// under the name it was listed with, the file leaves the tab, and the content filter
+// refuses it from then on.
+func TestAdminViewsSpamDecide(t *testing.T) {
+	dir := t.TempDir()
+	filter, err := contentfilter.New(context.Background(), contentfilter.Config{
+		LocalBanlistFile: filepath.Join(dir, "ban.txt"), LocalFilterFile: filepath.Join(dir, "filter.txt"),
+		LocalWhitelistFile: filepath.Join(dir, "white.txt"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, _ := newTestViews(t, "")
+	hash := bytes.Repeat([]byte{0x21}, 16)
+	if err := v.SpamDecide(hex.EncodeToString(hash), "filter"); !errors.Is(err, admin.ErrUnavailable) {
+		t.Fatalf("SpamDecide without a detector and local lists = %v, want ErrUnavailable", err)
+	}
+
+	v.content, v.spam = filter, spamfilter.New()
+	v.spam.SetExempt(filter.Whitelisted)
+	observer := spamObserver{detector: v.spam}
+	var files []storage.File
+	for i := 0; i < 12; i++ {
+		files = append(files, storage.File{Hash: bytes.Repeat([]byte{byte(0x20 + i)}, 16), Name: fmt.Sprintf("Title%d full crack keygen.zip", i), Size: 1_500_000})
+	}
+	observer.ObserveOffer(nil, nil, net.IPv4(203, 0, 113, 7), files)
+
+	bad := v.SpamDecide("zz", "filter")
+	unknown := v.SpamDecide(hex.EncodeToString(hash), "greylist")
+	if err := v.SpamDecide(hex.EncodeToString(hash), "filter"); err != nil {
+		t.Fatal(err)
+	}
+	fine := bytes.Repeat([]byte{0x22}, 16)
+	if err := v.SpamDecide(hex.EncodeToString(fine), "whitelist"); err != nil {
+		t.Fatal(err)
+	}
+	observer.ObserveOffer(nil, nil, net.IPv4(203, 0, 113, 8), files) // the same share from somebody else
+	raw, _ := os.ReadFile(filepath.Join(dir, "filter.txt"))
+	_, fineListed := v.spam.File(fine)
+	t.Logf("input: 12 listed files; #1 put on the filter list, #2 on the whitelist, then the share offered again")
+	t.Logf("output: features=%+v bad hash=%v unknown list=%v filter file=%q withheld=%t files=%d whitelistedListed=%t",
+		v.Features(), bad, unknown, raw, filter.Withheld(hash, ""), len(v.Spam().Files), fineListed)
+	if !v.Features().SpamLists || bad == nil || unknown == nil {
+		t.Errorf("features=%+v bad=%v unknown=%v, want the buttons on and both bad requests refused", v.Features(), bad, unknown)
+	}
+	if !filter.Withheld(hash, "") || !strings.Contains(string(raw), "; Title1 full crack keygen.zip") {
+		t.Errorf("filter file = %q, want the hash with the name it was listed under", raw)
+	}
+	if fineListed {
+		t.Error("a whitelisted file must not be listed again")
 	}
 }

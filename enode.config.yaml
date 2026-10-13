@@ -224,9 +224,30 @@ filter:
   reloadMinutes: 30     # re-read a changed list on a timer; 0 disables reloading
   # A session offering more than banThreshold distinct ban-list files is disconnected,
   # and its user hash and address are refused at login for banMinutes. 0 = never
-  # sanction. Bans are kept in memory and forgotten on restart.
+  # sanction.
   banThreshold: 3
+  # The same sanction for files refused by filter.keywords: the session that offers
+  # this many distinct such files is disconnected and banned. 0 = never sanction.
+  keywordBanThreshold: 5
   banMinutes: 1440
+  # Bans are written here and read back at startup, so a restart does not lift them.
+  banFile: "data/bans.txt"
+  # Your own additions to the three hash lists above, in the same format. The updater
+  # never replaces these files, and they apply whether or not the downloaded list of the
+  # same kind is enabled. The Spam tab of the admin dashboard writes to them.
+  localLists:
+    enabled: false
+    banlistFile: "data/local_banlist.txt"
+    filterFile: "data/local_filter.txt"
+    whitelistFile: "data/local_whitelist.txt"
+  # Spam detection scores every offered file on what its publisher says about it, and
+  # every session on what its share looks like. It only observes: the admin dashboard
+  # lists the verdicts and nothing is refused. See docs/spam-detection.md.
+  spam:
+    enabled: false
+    # Every listed verdict, and every decision taken in the Spam tab, as a line of JSON.
+    # Moved aside to <logFile>.1 at 64 MiB.
+    logFile: "data/spam_verdicts.jsonl"
   # Pull the enabled lists from an ed2k-server update service. Also run once by hand
   # with `enode -update-filters`. Every download must carry a valid Ed25519 signature
   # and may not shrink a list below minKeepRatio of the installed one.

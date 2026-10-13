@@ -21,6 +21,7 @@ import (
 	"enode/logging"
 	"enode/meta"
 	"enode/netfilter"
+	"enode/spamfilter"
 	"enode/storage"
 )
 
@@ -274,6 +275,17 @@ func run(ctx context.Context, configPath string) error {
 	if contentFilter != nil {
 		runtime.SetContentFilter(contentFilter)
 	}
+	// Spam detection observes offers; it needs no other filter.
+	var spamDetector *spamfilter.Detector
+	if cfg.Filter.Spam.Enabled {
+		spamDetector = spamfilter.New()
+		// A whitelisted file is one the operator has looked at: it is not listed again.
+		spamDetector.SetExempt(contentFilter.Whitelisted)
+		if err := spamDetector.SetLog(cfg.SpamLogPath()); err != nil {
+			logging.Errorf("spam detection: verdict log %s not opened, verdicts are listed only: %v", cfg.SpamLogPath(), err)
+		}
+		runtime.SetSpamObserver(spamObserver{detector: spamDetector})
+	}
 	// The scheduled hash-list updater. Its credential is derived from the udp secret
 	// and the reference IP (by default this server's own), hence after the secret
 	// is loaded and dynIp is resolved.
@@ -441,6 +453,7 @@ func run(ctx context.Context, configPath string) error {
 		views = &adminViews{
 			runtime: runtime, engine: engine, served: servedFiles,
 			access: accessFilter, content: contentFilter, updater: filterUpdater,
+			spam:       spamDetector,
 			configPath: absConfigPath(configPath),
 			config:     func() config.Config { return cfg },
 		}

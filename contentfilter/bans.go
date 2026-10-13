@@ -1,13 +1,20 @@
 package contentfilter
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"enode/logging"
 )
 
 // BanEntry is one active ban for the admin surface. Key is what Unban takes:
@@ -21,28 +28,35 @@ type BanEntry struct {
 var ErrBanKey = errors.New("ban key must be hash:<32 hex digits> or ip:<address>")
 
 // banList is the publisher sanction: user hashes and addresses refused at login until
-// their ban runs out. In memory only — a restart forgives everyone, which is the
-// cheaper mistake than a ban file that outlives the list entry that caused it.
+// their ban runs out. With a path the list is written to that file on every change and
+// read back at startup, so a restart does not forgive a publisher; without one it lives
+// in memory only.
 type banList struct {
 	mu      sync.Mutex
 	entries map[string]time.Time // key -> expiry
 	now     func() time.Time
+
+	// saveMu orders the writes of the ban file: the snapshot is taken and written under
+	// it, so two changes cannot land on disk in the wrong order.
+	saveMu sync.Mutex
+	path   string
 }
 
-func newBanList() *banList {
-	return &banList{entries: make(map[string]time.Time), now: time.Now}
+func newBanList(path string) *banList {
+	return &banList{entries: make(map[string]time.Time), now: time.Now, path: path}
 }
 
 func (b *banList) add(userHash []byte, ip net.IP, d time.Duration) {
 	until := b.now().Add(d)
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if k := hashKey(userHash); k != "" {
 		b.entries[k] = until
 	}
 	if k := ipKey(ip); k != "" {
 		b.entries[k] = until
 	}
+	b.mu.Unlock()
+	b.save()
 }
 
 func (b *banList) banned(userHash []byte, ip net.IP) bool {
@@ -84,12 +98,13 @@ func (b *banList) list() []BanEntry {
 // remove lifts one ban and reports whether it existed.
 func (b *banList) remove(key string) bool {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if _, ok := b.entries[key]; !ok {
-		return false
-	}
+	_, ok := b.entries[key]
 	delete(b.entries, key)
-	return true
+	b.mu.Unlock()
+	if ok {
+		b.save()
+	}
+	return ok
 }
 
 // sweep drops expired entries and returns how many remain.
@@ -103,6 +118,68 @@ func (b *banList) sweep() int {
 		}
 	}
 	return len(b.entries)
+}
+
+// load reads the ban file, keeping the bans still running. A missing file is an empty
+// list; a line that does not parse is skipped and counted.
+func (b *banList) load() error {
+	if b.path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(b.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("ban file: %w", err)
+	}
+	now := b.now()
+	var kept, skipped int
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, expiry, ok := strings.Cut(line, " ")
+		until, timeErr := time.Parse(time.RFC3339, strings.TrimSpace(expiry))
+		userHash, ip, keyErr := parseBanKey(key)
+		if !ok || timeErr != nil || keyErr != nil {
+			skipped++
+			continue
+		}
+		if !now.Before(until) {
+			continue
+		}
+		internal := hashKey(userHash)
+		if internal == "" {
+			internal = ipKey(ip)
+		}
+		b.entries[internal] = until
+		kept++
+	}
+	logging.Infof("content filter: ban file %s loaded, %d running ban(s), %d line(s) skipped", b.path, kept, skipped)
+	return nil
+}
+
+// save writes the running bans to the ban file. A failed write is logged and the bans
+// stay in force in memory.
+func (b *banList) save() {
+	if b.path == "" {
+		return
+	}
+	b.saveMu.Lock()
+	defer b.saveMu.Unlock()
+	var out bytes.Buffer
+	out.WriteString("# eNode bans: <key> <expiry>. Written by the server; edit only while it is stopped.\n")
+	for _, e := range b.list() {
+		fmt.Fprintf(&out, "%s %s\n", e.Key, e.Until.UTC().Format(time.RFC3339))
+	}
+	if err := installAtomic(b.path, out.Bytes()); err != nil {
+		logging.Errorf("content filter: ban file not written, bans are kept in memory only: %v", err)
+	}
 }
 
 func hashKey(userHash []byte) string {

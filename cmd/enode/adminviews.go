@@ -17,6 +17,7 @@ import (
 	"enode/ed2k"
 	"enode/logging"
 	"enode/netfilter"
+	"enode/spamfilter"
 	"enode/storage"
 )
 
@@ -30,6 +31,9 @@ const lowIDCeiling = 0x1000000
 // recentLogRows is how many warnings and errors the Health tab shows.
 const recentLogRows = 100
 
+// spamFileRows is how many scored files the Spam tab shows, highest score first.
+const spamFileRows = 500
+
 // adminViews adapts the running server to the dashboard's Views, so the admin package
 // keeps no dependency on ed2k, storage or config. Every filter may be nil: the nil
 // receivers answer as "off".
@@ -42,6 +46,8 @@ type adminViews struct {
 	access  *netfilter.Filter
 	content *contentfilter.Filter
 	updater *contentfilter.Updater
+	// spam is the spam detector, or nil when filter.spam is off.
+	spam *spamfilter.Detector
 
 	// configPath is the absolute path of the config file the server was started with.
 	configPath string
@@ -68,6 +74,8 @@ func (v *adminViews) Features() admin.Features {
 	return admin.Features{
 		Bans:         v.content != nil,
 		Bots:         v.runtime.UDPConfig().BotDetection.Enabled,
+		Spam:         v.spam != nil,
+		SpamLists:    v.spam != nil && v.content.LocalListsEnabled(),
 		FilterReload: info.IPFilterEnabled || info.GeoIPEnabled || len(v.content.Lists()) > 0,
 		FilterUpdate: v.updater != nil,
 	}
@@ -307,6 +315,43 @@ func (v *adminViews) Bots() []admin.BotRow {
 	return rows
 }
 
+func (v *adminViews) Spam() admin.SpamView {
+	st := v.spam.Stats()
+	view := admin.SpamView{Assessed: st.Assessed, Caution: st.Caution, Suspect: st.Suspect, Spam: st.Spam}
+	for _, f := range v.spam.Files(spamFileRows) {
+		view.Files = append(view.Files, admin.SpamFileRow{
+			Hash: f.Hash, Name: f.Name, Size: f.Size,
+			Score: f.Verdict.Score, Band: f.Verdict.Band.String(), Reasons: spamReasons(f.Verdict.Reasons),
+			Offers: f.Offers, FirstSeen: admin.FormatTime(f.FirstSeen), LastSeen: admin.FormatTime(f.LastSeen),
+		})
+	}
+	for _, p := range v.spam.Publishers() {
+		view.Publishers = append(view.Publishers, admin.SpamPublisherRow{
+			UserHash: p.UserHash, Address: p.Address, Country: v.access.Country(net.ParseIP(p.Address)),
+			Files: p.Files, Reasons: spamReasons(p.Reasons),
+			FirstSeen: admin.FormatTime(p.FirstSeen), LastSeen: admin.FormatTime(p.LastSeen),
+		})
+	}
+	return view
+}
+
+func (v *adminViews) SpamDecide(hash, list string) error {
+	if v.spam == nil || !v.content.LocalListsEnabled() {
+		return admin.ErrUnavailable
+	}
+	raw, err := hex.DecodeString(hash)
+	if err != nil || len(raw) != contentfilter.HashSize {
+		return errors.New("file hash must be 32 hex digits")
+	}
+	// The name the file was listed under goes into the list as its comment.
+	det, _ := v.spam.File(raw)
+	if err := v.content.AddLocal(contentfilter.LocalList(list), raw, det.Name); err != nil {
+		return err
+	}
+	v.spam.Decide(raw, list)
+	return nil
+}
+
 func (v *adminViews) Blocks() []admin.BlockRow {
 	blockedIP, blockedGeo := v.access.Stats()
 	rt := v.runtime.BlockStats()
@@ -451,4 +496,13 @@ func parseHash(s string) ([]byte, error) {
 		return nil, errors.New("a hash is 32 hex digits")
 	}
 	return raw, nil
+}
+
+// spamReasons renders reasons as "claimed_type_mismatch +15".
+func spamReasons(reasons []spamfilter.ReasonPoints) []string {
+	out := make([]string, 0, len(reasons))
+	for _, r := range reasons {
+		out = append(out, fmt.Sprintf("%s +%d", r.Reason, r.Points))
+	}
+	return out
 }

@@ -93,6 +93,7 @@ tr.sel{outline:2px solid var(--accent);outline-offset:-2px}
 <a href="#filter" data-tab="filter">Filter</a>
 {{if .Features.Bans}}<a href="#bans" data-tab="bans">Bans</a>{{end}}
 {{if .Features.Bots}}<a href="#bots" data-tab="bots">Bots</a>{{end}}
+{{if .Features.Spam}}<a href="#spam" data-tab="spam">Spam</a>{{end}}
 <a href="#blocks" data-tab="blocks">Blocks</a>
 <a href="#health" data-tab="health">Health</a>
 <a href="#runtime" data-tab="runtime">Runtime</a>
@@ -153,6 +154,7 @@ tr.sel{outline:2px solid var(--accent);outline-offset:-2px}
 {{template "tab-filter" .}}
 {{if .Features.Bans}}{{template "tab-bans" .}}{{end}}
 {{if .Features.Bots}}{{template "tab-bots" .}}{{end}}
+{{if .Features.Spam}}{{template "tab-spam" .}}{{end}}
 {{template "tab-blocks" .}}
 {{template "tab-health" .}}
 {{template "tab-runtime" .}}
@@ -583,6 +585,7 @@ function showTab(name){
 {{template "js-filter" .}}
 {{if .Features.Bans}}{{template "js-bans" .}}{{end}}
 {{if .Features.Bots}}{{template "js-bots" .}}{{end}}
+{{if .Features.Spam}}{{template "js-spam" .}}{{end}}
 {{template "js-blocks" .}}
 {{template "js-health" .}}
 {{template "js-runtime" .}}
