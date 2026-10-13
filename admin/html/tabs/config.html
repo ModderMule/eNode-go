@@ -3,12 +3,17 @@
 <h2>Effective configuration</h2>
 <div class="tools"><button id="coReload">Read again</button></div>
 <p class="desc tabmsg" id="msg-config"></p>
+<p class="desc">Loaded from <code id="coPath">—</code></p>
 <pre id="coText" class="log"></pre>
 <p class="desc">Read-only: the configuration in effect, defaults included. Passwords, tokens, keys and database addresses are hidden, and a registration step shows only its id and type. To change a value, edit the config file and reload or restart.</p>
 </div>
 {{end}}
 
 {{define "js-config"}}
-tabs.config = {poll: false, load: async function(){ setText('coText', (await api('/api/config')).yaml); }};
+tabs.config = {poll: false, load: async function(){
+  var c = await api('/api/config');
+  setText('coPath', c.path || '—');
+  setText('coText', c.yaml);
+}};
 document.getElementById('coReload').onclick = function(){ runTab('config'); };
 {{end}}

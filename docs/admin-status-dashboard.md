@@ -186,7 +186,7 @@ Meta API accounts.
 |---|---|---|
 | Status | the page described above | `GET /stats.json` |
 | Clients | software and country distribution; the connected clients with address, country, software, nick, published files, High/Low ID, IPv6 and connected time. Filtered, sorted and paged by the server. | `GET /api/clients?q=&country=&software=&id=high\|low&sort=&dir=&offset=&limit=`, `GET /api/clients/summary` |
-| Files | the shared file index: browse, or search file names; click a file for its sources | `GET /api/files?q=&cursor=&limit=`, `GET /api/files/{hash}/sources` |
+| Files | the shared file index: browse, or search file names; click a file for its sources; the link icon in front of a row copies its `ed2k://|file|…|/` link | `GET /api/files?q=&cursor=&limit=`, `GET /api/files/{hash}/sources` |
 | Peers | the gossip peer table (name, address, users, files, state, last seen, who told us) and the static server list | `GET /api/peers` |
 | Filter | what the IP filter, the country filter and the content filter have loaded and refused; their data files | `GET /api/filter` |
 | Bans | the user hashes and addresses refused at login, with their expiry | `GET /api/bans` |
@@ -243,7 +243,8 @@ is logged with the operator's address.
 
 The Config tab shows the configuration in effect — the file, with defaults filled in
 and reloadable keys as the last reload left them — as YAML. It cannot be edited there:
-change the file and reload or restart.
+change the file and reload or restart. Above the YAML the tab names the config file the
+server loaded, as a full path on disk.
 
 Secrets never leave the process. A secret that is set is shown as `(set, hidden)`, an
 unset one as empty:

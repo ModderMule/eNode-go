@@ -8,7 +8,7 @@
 <span class="desc" id="fiCount" style="margin:0"></span>
 </div>
 <p class="desc tabmsg" id="msg-files"></p>
-<div class="scroll"><table><thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Sources</th><th>Complete</th><th>Hash</th></tr></thead><tbody id="fiRows"></tbody></table></div>
+<div class="scroll"><table><thead><tr><th></th><th>Name</th><th>Size</th><th>Type</th><th>Sources</th><th>Complete</th><th>Hash</th></tr></thead><tbody id="fiRows"></tbody></table></div>
 <p class="desc">Files the content filter withholds are not listed. A search returns its whole capped answer; browsing pages through the files that have a source online.</p>
 <div id="fiSources" hidden>
 <h2 id="fiSourcesTitle">Sources</h2>
@@ -28,6 +28,25 @@
       return [s.lowId ? s.ip : s.ip + ':' + s.port, s.lowId ? 'Low' : 'High', s.ipv6 || '—'];
     }, 'no source online');
   }
+  // ed2kLink builds the file link the way eMule writes it: name percent-encoded,
+  // hash in upper case.
+  function ed2kLink(f){
+    return 'ed2k://|file|' + encodeURIComponent(f.name) + '|' + f.size + '|' + f.hash.toUpperCase() + '|/';
+  }
+  async function copyLink(f){
+    var link = ed2kLink(f);
+    // The clipboard API needs a secure context; a plain-http remote page falls back.
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(link);
+    }else{
+      var ta = el('textarea'); ta.value = link; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      var ok = document.execCommand('copy');
+      ta.remove();
+      if(!ok){ throw new Error('the browser refused to copy; link: ' + link); }
+    }
+    tabMsg('files', 'Copied ed2k link of ' + f.name);
+  }
   async function load(){
     var q = document.getElementById('fiQ').value.trim();
     var page = await api('/api/files?' + new URLSearchParams({q: q, cursor: cursor, limit: 100}));
@@ -35,7 +54,9 @@
     fillTable('fiRows', page.rows, function(f){
       var name = el('a', f.name); name.href = '#files';
       name.onclick = function(){ sources(f).catch(function(e){ tabMsg('files', e.message, true); }); };
-      return [name, fmtBytes(f.size), f.type || '—', num(f.sources), num(f.completed), el('code', f.hash)];
+      var copy = el('button', '\uD83D\uDD17', 'icon'); copy.title = 'Copy ed2k link'; copy.setAttribute('aria-label', 'Copy ed2k link');
+      copy.onclick = function(){ copyLink(f).catch(function(e){ tabMsg('files', e.message, true); }); };
+      return [copy, name, fmtBytes(f.size), f.type || '—', num(f.sources), num(f.completed), el('code', f.hash)];
     }, q ? 'no file matches' : 'no files');
     setText('fiCount', num(page.rows.length) + (q ? ' matches' : ' files on this page'));
     document.getElementById('fiNext').disabled = !next;

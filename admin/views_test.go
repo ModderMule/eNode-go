@@ -75,11 +75,13 @@ func (f *fakeViews) RemoveBan(key string) error {
 	}
 	return ErrNotFound
 }
-func (f *fakeViews) Bots() []BotRow          { return nil }
-func (f *fakeViews) Blocks() []BlockRow      { return []BlockRow{{Reason: "rate limit", Count: 4}} }
-func (f *fakeViews) Health() HealthView      { return HealthView{} }
-func (f *fakeViews) Runtime() RuntimeView    { return RuntimeView{GoVersion: "go-test"} }
-func (f *fakeViews) Config() (string, error) { return "name: t\n", nil }
+func (f *fakeViews) Bots() []BotRow       { return nil }
+func (f *fakeViews) Blocks() []BlockRow   { return []BlockRow{{Reason: "rate limit", Count: 4}} }
+func (f *fakeViews) Health() HealthView   { return HealthView{} }
+func (f *fakeViews) Runtime() RuntimeView { return RuntimeView{GoVersion: "go-test"} }
+func (f *fakeViews) Config() (ConfigView, error) {
+	return ConfigView{Path: "/etc/enode/enode.config.yaml", YAML: "name: t\n"}, nil
+}
 
 func newViewServer(user, pass string) (*Server, *fakeViews) {
 	s, _ := newAuthServer(user, pass)

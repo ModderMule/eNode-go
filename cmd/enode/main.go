@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -440,7 +441,8 @@ func run(ctx context.Context, configPath string) error {
 		views = &adminViews{
 			runtime: runtime, engine: engine, served: servedFiles,
 			access: accessFilter, content: contentFilter, updater: filterUpdater,
-			config: func() config.Config { return cfg },
+			configPath: absConfigPath(configPath),
+			config:     func() config.Config { return cfg },
 		}
 		adminSrv.SetViews(views)
 		if err := adminSrv.Start(); err != nil {
@@ -929,6 +931,16 @@ func seedServers(store storage.Engine, entries []config.ServerEntry) {
 	if n := store.ServersCount(); n > 0 {
 		logging.Infof("advertising %d server(s) in OP_SERVERLIST", n)
 	}
+}
+
+// absConfigPath is the config file's full path for display. A path that cannot be
+// resolved is shown as given.
+func absConfigPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return abs
 }
 
 // adminDisplayHost turns a bind address into a host usable in a browseable URL.

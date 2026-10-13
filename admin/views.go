@@ -46,8 +46,9 @@ type Views interface {
 	Blocks() []BlockRow
 	Health() HealthView
 	Runtime() RuntimeView
-	// Config is the effective configuration as YAML with every secret hidden.
-	Config() (string, error)
+	// Config is the effective configuration as YAML with every secret hidden, and
+	// the file it was loaded from.
+	Config() (ConfigView, error)
 }
 
 // ErrNotFound is what a Views method returns for a client, server or ban that is not
@@ -115,6 +116,14 @@ type FileQuery struct {
 	Search string
 	Cursor string
 	Limit  int
+}
+
+// ConfigView is the configuration in effect.
+type ConfigView struct {
+	// Path is the absolute path of the config file on disk.
+	Path string `json:"path"`
+	// YAML is the configuration with every secret hidden.
+	YAML string `json:"yaml"`
 }
 
 // FileRow is one indexed file.
@@ -504,12 +513,12 @@ func handleBanRemove(v Views, w http.ResponseWriter, r *http.Request) {
 }
 
 func handleConfig(v Views, w http.ResponseWriter, _ *http.Request) {
-	text, err := v.Config()
+	view, err := v.Config()
 	if err != nil {
 		writeViewError(w, err)
 		return
 	}
-	writeJSON(w, map[string]string{"yaml": text})
+	writeJSON(w, view)
 }
 
 // clientQuery filters, sorts and pages the client list.

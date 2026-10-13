@@ -1073,13 +1073,39 @@ func (m *MySQLEngine) specializeFulltextIndex(ctx context.Context, db *sql.DB) e
 	// parser clause (verified on MySQL 8.0 — SHOW CREATE TABLE comes back without
 	// WITH PARSER), leaving a word-based index that only matches whole tokens and
 	// so never does the substring search the mysql dialect promises.
-	if _, err := db.ExecContext(ctx, "ALTER TABLE sources DROP INDEX name_ft"); err != nil {
+	//
+	// The index is built without InnoDB's stopword list. The ngram parser drops
+	// every token that contains a stopword, and the default list holds `a`, `i`
+	// and `on`, so with it most bigrams are never indexed: a name run made only of
+	// such bigrams (`vacation`) has no token left and its MATCH finds nothing,
+	// which silently broke OR and AND NOT on that term. The setting is read when
+	// the index is created and stays with the index, so it is set on the one
+	// connection that runs the DDL and nowhere else.
+	//
+	// The mariadb dialect is deliberately left on the default list. Its word
+	// index is created by the schema file and is not rebuilt here, so a search
+	// holding a listed word of three letters or more (about, are, com, for, from,
+	// how, that, the, this, was, what, when, where, who, will, with, und, www)
+	// returns nothing there, also beside other words: `doctor who` and
+	// `about time` come back empty (TestMariaDBFullTextStopwords). An operator who
+	// wants those found sets innodb_ft_enable_stopword=OFF and rebuilds name_ft.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("mysql connection for ngram rebuild (dialect=mysql): %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SET SESSION innodb_ft_enable_stopword = OFF"); err != nil {
+		return fmt.Errorf("mysql disable stopwords for ngram name_ft (dialect=mysql): %w", err)
+	}
+	// The connection goes back to the pool, so put the session default back.
+	defer conn.ExecContext(context.WithoutCancel(ctx), "SET SESSION innodb_ft_enable_stopword = DEFAULT")
+	if _, err := conn.ExecContext(ctx, "ALTER TABLE sources DROP INDEX name_ft"); err != nil {
 		return fmt.Errorf("mysql drop name_ft before ngram rebuild (dialect=mysql): %w", err)
 	}
-	if _, err := db.ExecContext(ctx, "ALTER TABLE sources ADD FULLTEXT INDEX name_ft (name) WITH PARSER ngram"); err != nil {
+	if _, err := conn.ExecContext(ctx, "ALTER TABLE sources ADD FULLTEXT INDEX name_ft (name) WITH PARSER ngram"); err != nil {
 		return fmt.Errorf("mysql add ngram name_ft (dialect=mysql): %w", err)
 	}
-	logging.Infof("mysql: specialized sources.name_ft full-text index to ngram parser (dialect=mysql)")
+	logging.Infof("mysql: specialized sources.name_ft full-text index to ngram parser without stopwords (dialect=mysql)")
 	return nil
 }
 

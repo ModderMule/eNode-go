@@ -43,6 +43,9 @@ type adminViews struct {
 	content *contentfilter.Filter
 	updater *contentfilter.Updater
 
+	// configPath is the absolute path of the config file the server was started with.
+	configPath string
+
 	// mu guards config, which the reloader replaces once it exists, and the cached
 	// memory figures.
 	mu       sync.Mutex
@@ -360,9 +363,9 @@ func (v *adminViews) Runtime() admin.RuntimeView {
 	return view
 }
 
-func (v *adminViews) Config() (string, error) {
+func (v *adminViews) Config() (admin.ConfigView, error) {
 	out, err := config.RedactedYAML(v.cfg())
-	return string(out), err
+	return admin.ConfigView{Path: v.configPath, YAML: string(out)}, err
 }
 
 // cfg is the configuration in effect now.

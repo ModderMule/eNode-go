@@ -60,36 +60,111 @@ func TestSQLFullTextSearchDialects(t *testing.T) {
 	})
 }
 
-func runFTDialectTest(t *testing.T, p ftDialectParams) {
-	pool, err := dockertest.NewPool("")
-	if err != nil {
-		t.Skipf("docker not available: %v", err)
-	}
-	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
-		Repository: p.repo, Tag: p.tag, Env: p.env,
-	}, func(hc *docker.HostConfig) {
-		hc.AutoRemove = true
-		hc.RestartPolicy = docker.RestartPolicy{Name: "no"}
-	})
-	if err != nil {
-		t.Fatalf("start %s:%s container: %v", p.repo, p.tag, err)
-	}
-	defer func() { _ = pool.Purge(resource) }()
+// ftStopwordNames are file names built around words on InnoDB's default stopword
+// list that carry meaning in a title. No name contains another query word as an
+// infix, so substring matching (memory) and word-prefix matching (mariadb) must
+// give the same answer for every query in ftStopwordQueries.
+var ftStopwordNames = []string{
+	"Doctor.Who.S01E01.avi",
+	"The.Who.Live.at.Leeds.mp3",
+	"Will.and.Grace.S02E03.avi",
+	"About.Time.2013.mkv",
+	"From.Dusk.Till.Dawn.1996.avi",
+	"What.Women.Want.2000.avi",
+	"Where.Eagles.Dare.1968.mkv",
+	"When.Harry.Met.Sally.1989.avi",
+	"This.Is.Spinal.Tap.1984.avi",
+	"www.example.com.release.zip",
+	"Gone.With.The.Wind.1939.mkv",
+}
 
-	port := mustAtoi(resource.GetPort("3306/tcp"))
-	engine, err := NewMySQLEngine(MySQLConfig{
-		Host: "localhost", Port: port, User: "root", Pass: "root", Database: "enode",
-		MaxOpenConns: 4, MaxIdleConns: 2, Dialect: p.dialect,
-		SchemaFile: tests.FixRelativeTestingPath("misc/enode.sql"),
+// ftStopwordQueries are searches a user would type for those names. Each holds a
+// default stopword of at least three letters (shorter ones are below the index's
+// token size anyway), alone and beside an ordinary word.
+var ftStopwordQueries = []string{
+	"who", "doctor who", "the who",
+	"will", "will grace",
+	"about", "about time",
+	"from", "from dusk",
+	"what", "what women",
+	"where", "where eagles",
+	"when", "when harry",
+	"this", "this spinal",
+	"with", "gone with wind",
+	"www", "com", "example com",
+}
+
+// TestMariaDBFullTextStopwords records a known limit of the mariadb dialect: the
+// word index built from misc/enode.sql keeps InnoDB's default stopword list, so a
+// search holding a listed word returns nothing, while the memory engine finds the
+// file. It pins that behaviour rather than the wanted one (see
+// specializeFulltextIndex); if the index is ever built without stopwords this
+// test fails and the expectation has to be turned around.
+func TestMariaDBFullTextStopwords(t *testing.T) {
+	requireIntegration(t)
+	engine, port := startFTEngine(t, ftDialectParams{
+		repo: "mariadb", tag: "10.11", dialect: DialectMariaDB,
+		env: []string{"MARIADB_ROOT_PASSWORD=root", "MARIADB_DATABASE=enode"},
 	})
+
+	db, err := sql.Open("mysql", fmt.Sprintf("root:root@tcp(localhost:%d)/enode", port))
 	if err != nil {
 		t.Fatal(err)
 	}
-	pool.MaxWait = 3 * time.Minute
-	if err := pool.Retry(func() error { return engine.Init() }); err != nil {
-		t.Fatalf("%s not ready: %v", p.repo, err)
+	defer db.Close()
+	var enabled string
+	if err := db.QueryRow(`SELECT @@GLOBAL.innodb_ft_enable_stopword`).Scan(&enabled); err != nil {
+		t.Fatalf("read innodb_ft_enable_stopword: %v", err)
 	}
-	defer engine.Close()
+	var stopwords []string
+	rows, err := db.Query(`SELECT value FROM information_schema.INNODB_FT_DEFAULT_STOPWORD`)
+	if err != nil {
+		t.Fatalf("read default stopword list: %v", err)
+	}
+	for rows.Next() {
+		var w string
+		if err := rows.Scan(&w); err == nil {
+			stopwords = append(stopwords, w)
+		}
+	}
+	rows.Close()
+	t.Logf("input: server innodb_ft_enable_stopword=%s, %d default stopwords %v", enabled, len(stopwords), stopwords)
+
+	mem := NewMemoryEngine()
+	client := ClientInfo{ID: 710, IPv4: 0x0100007f, Port: 4662, Hash: []byte("0123456789abcdef")}
+	storeID, err := engine.Connect(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.StoreID = storeID
+	memClient := client
+	memClient.StoreID, _ = mem.Connect(memClient)
+	for i, name := range ftStopwordNames {
+		f := File{
+			Hash: ftSeedHash(200 + i), Name: name, Size: uint64(3000 + i), Completed: 1,
+			SourceID: client.ID, SourcePort: client.Port,
+		}
+		engine.AddFile(f, client)
+		mem.AddFile(f, memClient)
+		t.Logf("input: seeded %q", name)
+	}
+
+	for _, q := range ftStopwordQueries {
+		expr := &SearchExpr{Kind: SearchText, Text: q}
+		want := fileNames(mem.FindBySearch(expr))
+		got := fileNames(engine.FindBySearch(expr))
+		t.Logf("output: search=%q mariadb=%v memory=%v", q, got, want)
+		if len(want) == 0 {
+			t.Fatalf("search %q finds nothing on the memory engine; the seed is wrong", q)
+		}
+		if len(got) != 0 {
+			t.Errorf("search %q: mariadb returned %v, want nothing while stopwords are on", q, got)
+		}
+	}
+}
+
+func runFTDialectTest(t *testing.T, p ftDialectParams) {
+	engine, port := startFTEngine(t, p)
 
 	client := ClientInfo{ID: 700, IPv4: 0x0100007f, Port: 4662, Hash: []byte("0123456789abcdef")}
 	storeID, err := engine.Connect(client)
@@ -245,4 +320,40 @@ func assertSameSet(t *testing.T, label string, got, want []string) {
 			t.Fatalf("%s: got %v, want %v", label, g, w)
 		}
 	}
+}
+
+// startFTEngine starts the server p names in a container and returns an engine
+// that has created its schema there, plus the published port.
+func startFTEngine(t *testing.T, p ftDialectParams) (*MySQLEngine, int) {
+	t.Helper()
+	pool, err := dockertest.NewPool("")
+	if err != nil {
+		t.Skipf("docker not available: %v", err)
+	}
+	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
+		Repository: p.repo, Tag: p.tag, Env: p.env,
+	}, func(hc *docker.HostConfig) {
+		hc.AutoRemove = true
+		hc.RestartPolicy = docker.RestartPolicy{Name: "no"}
+	})
+	if err != nil {
+		t.Fatalf("start %s:%s container: %v", p.repo, p.tag, err)
+	}
+	t.Cleanup(func() { _ = pool.Purge(resource) })
+
+	port := mustAtoi(resource.GetPort("3306/tcp"))
+	engine, err := NewMySQLEngine(MySQLConfig{
+		Host: "localhost", Port: port, User: "root", Pass: "root", Database: "enode",
+		MaxOpenConns: 4, MaxIdleConns: 2, Dialect: p.dialect,
+		SchemaFile: tests.FixRelativeTestingPath("misc/enode.sql"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.MaxWait = 3 * time.Minute
+	if err := pool.Retry(func() error { return engine.Init() }); err != nil {
+		t.Fatalf("%s not ready: %v", p.repo, err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	return engine, port
 }

@@ -30,7 +30,8 @@ func newTestViews(t *testing.T, keywords string) (*adminViews, storage.Engine) {
 	cfg.Admin.Password = "boot-secret"
 	return &adminViews{
 		runtime: rt, engine: engine, served: withFilter(engine, filter), content: filter,
-		config: func() config.Config { return cfg },
+		configPath: "/etc/enode/enode.config.yaml",
+		config:     func() config.Config { return cfg },
 	}, engine
 }
 
@@ -149,13 +150,18 @@ func TestAdminViewsBansAndBlocks(t *testing.T) {
 
 func TestAdminViewsConfigIsRedactedAndFollowsTheReloader(t *testing.T) {
 	v, _ := newTestViews(t, "")
-	boot, err := v.Config()
+	bootView, err := v.Config()
 	if err != nil {
 		t.Fatal(err)
 	}
 	reloaded := config.Config{Name: "reloaded name"}
 	v.setConfig(func() config.Config { return reloaded })
-	after, _ := v.Config()
+	afterView, _ := v.Config()
+	boot, after := bootView.YAML, afterView.YAML
+	t.Logf("output: path at boot=%q after reload=%q", bootView.Path, afterView.Path)
+	if bootView.Path != "/etc/enode/enode.config.yaml" || afterView.Path != bootView.Path {
+		t.Fatalf("the config view does not name the loaded file")
+	}
 	t.Logf("input: boot config with admin.password set, then a reloader config")
 	t.Logf("output: boot has name=%t secret=%t mark=%t; after reload has new name=%t",
 		strings.Contains(boot, "boot name"), strings.Contains(boot, "boot-secret"),

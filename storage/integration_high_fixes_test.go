@@ -209,7 +209,9 @@ func TestMySQLFindBySearch(t *testing.T) {
 // must match a literal %, the way the memory and Mongo engines already do — not act
 // as a SQL wildcard. A word is matched by its alphanumeric runs ("a%b" is "a" and
 // "b", like "spider-man"), so the literal path is a term with no run at all: against
-// the pre-fix build `LIKE '%%%'` matches every name; with escaping only "a%b" does.
+// the pre-fix build `LIKE '%%%'` matches every name; with escaping only the name
+// holding a % does. The % stands next to an indexable word, because a search with
+// no indexable run at all is dropped before it reaches SQL (SearchNeedsScan).
 func TestMySQLFindBySearchEscapesWildcards(t *testing.T) {
 	requireIntegration(t)
 	engine, _ := startMySQL(t, "enode")
@@ -222,22 +224,31 @@ func TestMySQLFindBySearchEscapesWildcards(t *testing.T) {
 	client.StoreID = storeID
 
 	seed := []File{
-		{Hash: []byte("dddddddddddddddd"), Name: "a%b", Size: 100, Type: "Doc"},
-		{Hash: []byte("eeeeeeeeeeeeeeee"), Name: "aXb", Size: 200, Type: "Doc"},
+		{Hash: []byte("dddddddddddddddd"), Name: "report 50% done", Size: 100, Type: "Doc"},
+		{Hash: []byte("eeeeeeeeeeeeeeee"), Name: "report 50X done", Size: 200, Type: "Doc"},
 	}
 	for _, f := range seed {
 		engine.AddFile(f, client)
 		t.Logf("input: seeded %q", f.Name)
 	}
 
-	got := engine.FindBySearch(&SearchExpr{Kind: SearchText, Text: "%"})
+	const query = "report %"
+	got := engine.FindBySearch(&SearchExpr{Kind: SearchText, Text: query})
 	var names []string
 	for _, f := range got {
 		names = append(names, f.Name)
 	}
-	t.Logf("output: search %q → %d result(s) %v", "%", len(got), names)
-	if len(got) != 1 || names[0] != "a%b" {
-		t.Fatalf("got %v, want exactly [\"a%%b\"] — %% must be a literal, not a wildcard", names)
+	t.Logf("output: search %q → %d result(s) %v", query, len(got), names)
+	if len(got) != 1 || names[0] != seed[0].Name {
+		t.Fatalf("got %v, want exactly [%q] — %% must be a literal, not a wildcard", names, seed[0].Name)
+	}
+
+	// The same % with nothing indexable beside it would scan the whole table, so
+	// it is dropped rather than run.
+	alone := engine.FindBySearch(&SearchExpr{Kind: SearchText, Text: "%"})
+	t.Logf("output: search %q → %d result(s)", "%", len(alone))
+	if len(alone) != 0 {
+		t.Fatalf("search %q returned %d rows, want it dropped", "%", len(alone))
 	}
 }
 
