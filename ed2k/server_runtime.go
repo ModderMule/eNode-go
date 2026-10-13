@@ -1560,11 +1560,11 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	// One line for the packet, never one per record: a packet may hold as many
 	// records as the hard limit lets through.
 	if contentRefused > 0 {
-		logging.Warnf("offer files content filter remote=%s id=%d refused=%d of=%d",
+		logging.Infof("offer files content filter remote=%s id=%d refused=%d of=%d",
 			c.remoteHost, info.ID, contentRefused, len(records))
 	}
 	if zeroSize > 0 {
-		logging.Warnf("offer files zero size remote=%s id=%d dropped=%d of=%d",
+		logging.Infof("offer files zero size remote=%s id=%d dropped=%d of=%d",
 			c.remoteHost, info.ID, zeroSize, len(records))
 	}
 	if metaHashes > 0 {

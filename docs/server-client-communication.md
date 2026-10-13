@@ -87,11 +87,43 @@ DB engines' `time_offer DESC`.
 
 **A zero-size offer is refused.** If `FT_FILESIZE` is absent, or present but not an
 integer, the parsed size is `0` and the record is dropped before it reaches storage, with
-one `offer files zero size` warning per packet rather than per record. Such a file could
+one `offer files zero size` info line per packet rather than per record. Such a file could
 never be served — a client only asks for sources by `(hash, size)`, and eMule discards a
 zero-size search result outright (`srchybrid/SearchList.cpp:355`) — so it would sit in the
 index for good, searchable and unservable. Dropped records are charged against neither
 publish limit.
+
+**Open: the pre-17.3 size-less `OP_GETSOURCES` is not answered.** The opcode was
+originally just `<HASH 16>` (`srchybrid/opcodes.h:164` still documents it that way); the
+size was appended by the 17.3 change above. `parseGetSources` (`ed2k/server_runtime.go`)
+requires the size, so a request without one is dropped with
+`get sources parse failed … err=buffer: out of bounds` and the client gets no reply.
+Production logs (2026-10-13) show two shapes of this:
+
+- Bursts of about 15 failures from one client every 300 s — eMule's
+  one-frame-of-15-requests cadence (`srchybrid/DownloadQueue.cpp:1377-1387`), so most
+  likely an old eMule-derived client sending the bare 16-byte hash. The `uint32` read
+  fails.
+- A client that also offers zero-size files failing on `OP_GETSOURCES_OBFU`. Probably a
+  literal `uint32` size of `0`, which we read as the large-file marker and then fail on
+  the missing `uint64`. This is inferred from the correlation, not confirmed — both
+  branches log the same message.
+
+Neither affects current eMule, eMuleQt or eMuleAI, which always send the size. A fix, if
+we want these clients served:
+
+1. In `parseGetSources`, treat "no bytes after the hash" and "zero `uint32` with nothing
+   after it" as *size unknown* instead of an error; keep failing on a truncated size
+   (1-3 or 1-7 trailing bytes).
+2. For size unknown, answer from `Storage.GetSourcesByHash(hash)` — the lookup the
+   size-less UDP `OP_GLOBGETSOURCES (0x9a)` already uses — in `handleGetSources` and
+   `handleGetSourcesIPv6`, still behind `withheldHash`.
+3. Give the two parse failures distinct `err=` texts so the log tells them apart.
+
+The cost is the one 17.3 set out to remove: a hash-only answer mixes the sources of every
+size offered under that hash, so a client can be handed sources for a different file. That
+is already true of 0x9a. Unverified: what eserver 17.14/17.15 does with a 16-byte
+`OP_GETSOURCES` — worth a `tests/interop` case before implementing.
 
 ### Login precondition
 
