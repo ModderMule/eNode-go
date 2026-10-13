@@ -228,7 +228,7 @@ func run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("content filter: %w", err)
 	}
-	if contentFilter == nil {
+	if contentFilter.Idle() {
 		logging.Infof("content filter: disabled")
 	}
 	servedFiles := withFilter(engine, contentFilter)
@@ -613,6 +613,7 @@ func run(ctx context.Context, configPath string) error {
 		derived:   derived,
 		runtime:   runtime,
 		engine:    engine,
+		content:   contentFilter,
 		adminSrv:  adminSrv,
 		udpCfg:    udpCfg,
 		mainConn:  udpConn,

@@ -69,9 +69,13 @@ listener is closed and no client is disconnected.
 | `files.softLimit`, `files.hardLimit` | |
 | `tcp.loginTimeout`, `tcp.disconnectTimeout`, `tcp.connectionTimeout`, `tcp.maxConnectionsPerIP` | open connections pick up the new timeouts |
 | `udp.getSources`, `udp.getFiles` | |
+| `udp.rateLimitPerIPPerMinute` | an address keeps the budget it has left, capped at the new limit |
 | `udp.botDetection.*` | the list of flagged addresses is kept |
 | `servers` | new entries only; a removed entry stays until a restart |
 | `gossip.*` | including turning gossip on or off and adding seeds; the peer table is kept |
+| `filter.keywords` | new offers and searches are judged by the new words; a file already indexed stays indexed |
+| `filter.banThreshold`, `filter.keywordBanThreshold`, `filter.banMinutes` | a ban already running keeps its length |
+| `storage.countCacheSeconds` | |
 | `admin.username`, `admin.password` | |
 
 Every other changed key is listed under `restartRequired` and keeps the value the
@@ -131,7 +135,7 @@ route with the advertised figures only are served by the Meta API HTTP listener
 (`GET /healthz`, `GET /status`); see [meta-api.md](meta-api.md#health-and-status).
 
 `clients` and `files` are read from storage at most once every
-`storage.countCacheSeconds` (default 60, read at startup) and shared with the
+`storage.countCacheSeconds` (default 60) and shared with the
 status packets. `files` is the engine's estimate: exact on the memory engine,
 InnoDB's row estimate on mysql/mariadb and the collection's metadata count on
 mongodb. On mysql/mariadb it can differ from `SELECT COUNT(*) FROM files` by tens
@@ -187,7 +191,7 @@ Meta API accounts.
 |---|---|---|
 | Status | the page described above | `GET /stats.json` |
 | Clients | software and country distribution; the connected clients with address, country, software, nick, published files, High/Low ID, IPv6 and connected time. Filtered, sorted and paged by the server. | `GET /api/clients?q=&country=&software=&id=high\|low&sort=&dir=&offset=&limit=`, `GET /api/clients/summary` |
-| Files | the shared file index: browse, or search file names; click a file for its sources; the link icon in front of a row copies its `ed2k://|file|…|/` link | `GET /api/files?q=&cursor=&limit=`, `GET /api/files/{hash}/sources` |
+| Files | the shared file index: browse, or search file names; click a file for its sources and the client software and version of each; the link icon in front of a row copies its `ed2k://|file|…|/` link | `GET /api/files?q=&cursor=&limit=`, `GET /api/files/{hash}/sources` |
 | Peers | the gossip peer table (name, address, users, files, state, last seen, who told us) and the static server list | `GET /api/peers` |
 | Filter | what the IP filter, the country filter and the content filter have loaded and refused; their data files | `GET /api/filter` |
 | Bans | the user hashes and addresses refused at login, with their expiry | `GET /api/bans` |

@@ -31,6 +31,8 @@ type reloadTestConfig struct {
 	// gossip.intervalSeconds (0 leaves the default).
 	extraSeeds []uint16
 	interval   int
+	// keywords is filter.keywords.
+	keywords string
 }
 
 func (c reloadTestConfig) write(t *testing.T, path string) {
@@ -71,10 +73,12 @@ gossip:
   allowPrivatePeers: true
   seeds:
     - { ip: "127.0.0.1", port: %d }
-%sstorage:
+%sfilter:
+  keywords: %q
+storage:
   engine: memory
 `, c.name, filepath.Join(dir, "enode.log"), c.tcpPort, c.tcpPort+1, c.udpPort, c.udpPort+1,
-		c.adminPort, c.gossip, c.seedPort, gossipExtra.String())
+		c.adminPort, c.gossip, c.seedPort, gossipExtra.String(), c.keywords)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +121,19 @@ func gossipKnown(t *testing.T, adminPort uint16) int {
 		t.Fatalf("stats.json: %v", err)
 	}
 	return stats.GossipKnown
+}
+
+// filterKeywords is how many keywords the dashboard reports, -1 with the content filter off.
+func filterKeywords(t *testing.T, adminPort uint16) int {
+	t.Helper()
+	var stats admin.LiveStats
+	if err := json.Unmarshal([]byte(adminGet(t, adminPort, "/stats.json")), &stats); err != nil {
+		t.Fatalf("stats.json: %v", err)
+	}
+	if stats.ContentFilter == nil {
+		return -1
+	}
+	return stats.ContentFilter.Keywords
 }
 
 // connStillOpen reports whether the server has left the connection open: a read that
@@ -386,5 +403,62 @@ func TestRepeatedConfigReloads(t *testing.T) {
 		if len(res.Applied) != 0 || len(res.RestartRequired) != 0 {
 			t.Fatalf("unchanged file reported %+v", res)
 		}
+	}
+}
+
+// TestReloadFilterKeywords starts the server with no content filter at all and gives it
+// keywords by reload, changes them, and takes them away again.
+func TestReloadFilterKeywords(t *testing.T) {
+	cfg := reloadTestConfig{
+		name: "keywords", tcpPort: freePort(t), udpPort: freePort(t), adminPort: freePort(t), seedPort: freePort(t),
+	}
+	path := filepath.Join(t.TempDir(), "enode.config.yaml")
+	conn := startReloadServer(t, cfg, path)
+	if n := filterKeywords(t, cfg.adminPort); n != -1 {
+		t.Fatalf("content filter must be off at start, reports %d keyword(s)", n)
+	}
+
+	steps := []struct {
+		keywords string
+		want     int
+	}{
+		{"badword", 1},
+		{"badword|worse word|BADWORD", 2},
+		{"", -1},
+	}
+	cur := cfg
+	for _, step := range steps {
+		cur.keywords = step.keywords
+		cur.write(t, path)
+		code, res, raw := postReload(t, cfg.adminPort)
+		got, open := filterKeywords(t, cfg.adminPort), connStillOpen(conn)
+		t.Logf("input: filter.keywords -> %q", step.keywords)
+		t.Logf("output: %d %s; keywords=%d connection open=%t", code, raw, got, open)
+		if code != http.StatusOK {
+			t.Fatalf("reload failed: %d %s", code, raw)
+		}
+		if !slices.Equal(res.Applied, []string{"filter.keywords"}) || len(res.RestartRequired) != 0 {
+			t.Errorf("applied=%v restart=%v, want [filter.keywords] and nothing pending", res.Applied, res.RestartRequired)
+		}
+		if got != step.want {
+			t.Errorf("dashboard reports %d keyword(s), want %d", got, step.want)
+		}
+		if !open {
+			t.Fatal("the reload dropped the client connection")
+		}
+	}
+
+	// A keyword with no letter or digit fails validation and leaves the server as it was.
+	cur.keywords = "badword"
+	cur.write(t, path)
+	postReload(t, cfg.adminPort)
+	cur.keywords = "badword|---"
+	cur.write(t, path)
+	code, _, raw := postReload(t, cfg.adminPort)
+	got := filterKeywords(t, cfg.adminPort)
+	t.Logf("input: filter.keywords -> %q", cur.keywords)
+	t.Logf("output: %d %s; keywords=%d", code, raw, got)
+	if code != http.StatusUnprocessableEntity || got != 1 {
+		t.Fatalf("an invalid keyword must change nothing: %d keywords=%d", code, got)
 	}
 }

@@ -107,6 +107,18 @@ func (s *ServerRuntime) DisconnectClient(hash []byte) bool {
 	return true
 }
 
+// ClientSoftware names the software of the session logged in under a user hash, or ""
+// when there is none.
+func (s *ServerRuntime) ClientSoftware(hash []byte) string {
+	c := s.sessionByHash(hash)
+	if c == nil {
+		return ""
+	}
+	c.infoMu.RLock()
+	defer c.infoMu.RUnlock()
+	return c.software
+}
+
 // GossipEnabled reports whether a gossip peer table is attached.
 func (s *ServerRuntime) GossipEnabled() bool {
 	return s.gossip() != nil

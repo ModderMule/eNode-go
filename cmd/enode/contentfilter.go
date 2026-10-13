@@ -15,8 +15,9 @@ import (
 	"enode/storage"
 )
 
-// buildContentFilter loads the hash lists and keywords of the filter section. It
-// returns nil when none is configured; every consumer treats a nil filter as off.
+// buildContentFilter loads the hash lists and keywords of the filter section. With
+// none configured the filter is idle rather than nil, so a config reload can give it
+// keywords.
 func buildContentFilter(ctx context.Context, cfg config.Config) (*contentfilter.Filter, error) {
 	f := cfg.Filter
 	fc := contentfilter.Config{
@@ -26,6 +27,7 @@ func buildContentFilter(ctx context.Context, cfg config.Config) (*contentfilter.
 		BanThreshold:  f.BanThresholdOrDefault(),
 		BanMinutes:    f.BanMinutes,
 		BanFile:       cfg.BanFilePath(),
+		KeepEmpty:     true,
 
 		KeywordBanThreshold: f.KeywordBanThresholdOrDefault(),
 	}
@@ -125,7 +127,7 @@ func runUpdateFilters(ctx context.Context, configPath string, out io.Writer) err
 
 // contentFilterStats is the dashboard's view of the content filter; nil when it is off.
 func contentFilterStats(f *contentfilter.Filter, u *contentfilter.Updater) *admin.ContentFilterStats {
-	if f == nil {
+	if f.Idle() {
 		return nil
 	}
 	st := f.Stats()
@@ -204,6 +206,9 @@ func (f filteredFiles) BrowseFiles(cursor []byte, limit int) ([]storage.File, []
 
 // keep copies the rows that may be served; an engine may hand out a slice it still owns.
 func (f filteredFiles) keep(files []storage.File) []storage.File {
+	if f.filter.Idle() {
+		return files
+	}
 	kept := make([]storage.File, 0, len(files))
 	for _, file := range files {
 		if !f.filter.Withheld(file.Hash, file.Name) {

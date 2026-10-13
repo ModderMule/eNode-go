@@ -158,6 +158,8 @@ type SourceRow struct {
 	Port  uint16 `json:"port"`
 	LowID bool   `json:"lowId"`
 	IPv6  string `json:"ipv6"`
+	// Software is the client and its version as it logged in, empty when unknown.
+	Software string `json:"software"`
 }
 
 // PeersView is the server lists: what gossip learned and what was configured.

@@ -197,14 +197,17 @@ func NewServerRuntime(tcp TCPRuntimeConfig, udp UDPRuntimeConfig, store storage.
 
 // ApplyRuntimeConfig replaces the TCP and UDP settings while the server is running.
 // Connections and datagrams already in flight finish on the snapshot they loaded; the
-// next read sees the new one. Settings consumed only at construction (the LowID range,
-// the counter cache TTL, the UDP rate limit) are not affected.
+// next read sees the new one. The counter cache TTL and the UDP rate limit are handed on
+// to the objects that hold them. The LowID range is consumed only at construction and
+// is not affected.
 func (s *ServerRuntime) ApplyRuntimeConfig(tcp TCPRuntimeConfig, udp UDPRuntimeConfig) {
 	if tcp.ServerStatusInterval <= 0 {
 		tcp.ServerStatusInterval = defaultServerStatusInterval
 	}
 	s.tcpCfg.Store(&tcp)
 	s.udpCfg.Store(&udp)
+	s.counters.setTTL(tcp.CounterCacheTTL)
+	s.udpLimiter.SetRate(udp.RateLimitPerIPPerMinute)
 }
 
 // TCPConfig and UDPConfig return copies of the current settings.
@@ -615,6 +618,9 @@ type tcpClient struct {
 	closeMu    sync.Mutex
 	remoteHost string
 	statusStop chan struct{}
+	// writeTimeout bounds one write to the socket; see tcpWriteTimeout. Set once,
+	// before the session's goroutines start.
+	writeTimeout time.Duration
 
 	// peerIP is the connecting address, family-normalised (mapped v4 collapsed to
 	// plain IPv4). connectedV6 is true when the session itself is IPv6 — one of the
@@ -766,16 +772,17 @@ func newTCPClient(server *ServerRuntime, conn net.Conn, enableCrypt bool) *tcpCl
 	}
 	enableTCPKeepAlive(conn, defaultTCPKeepAlivePeriod)
 	return &tcpClient{
-		connectedAt: time.Now(),
-		server:      server,
-		conn:        conn,
-		packet:      packet,
-		crypt:       crypt,
-		module:      tcpModule(enableCrypt),
-		hasLowID:    true,
-		remoteHost:  host,
-		peerIP:      peerIP,
-		connectedV6: connectedV6,
+		connectedAt:  time.Now(),
+		server:       server,
+		conn:         conn,
+		packet:       packet,
+		crypt:        crypt,
+		module:       tcpModule(enableCrypt),
+		hasLowID:     true,
+		remoteHost:   host,
+		writeTimeout: tcpWriteTimeout,
+		peerIP:       peerIP,
+		connectedV6:  connectedV6,
 		info: storage.ClientInfo{
 			IPv4:  ipv4,
 			ID:    0,
@@ -789,8 +796,9 @@ const defaultTCPKeepAlivePeriod = 2 * time.Minute
 
 // tcpWriteTimeout bounds one write to a client socket. A healthy client drains even
 // a full 255-result search page in well under a second; one that has stopped reading
-// for this long is not coming back. A variable only so tests can shorten it.
-var tcpWriteTimeout = 30 * time.Second
+// for this long is not coming back. Each session carries its own copy, which a test
+// can shorten without touching other sessions.
+const tcpWriteTimeout = 30 * time.Second
 
 const (
 	// maxUDPGetSourcesHashes is how many files one UDP source request is answered
@@ -1975,14 +1983,14 @@ func (c *tcpClient) writeRaw(data []byte) error {
 	// Bounded, because writeMu is held across the write and other goroutines take it
 	// too: without a deadline a peer that stops reading blocks its own session forever
 	// and every peer that sends it OP_CALLBACKREQUESTED along with it.
-	_ = c.conn.SetWriteDeadline(time.Now().Add(tcpWriteTimeout))
+	_ = c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 	_, err := c.conn.Write(data)
 	if err != nil {
 		// A partial write leaves the peer mid-packet, and on an obfuscated session the
 		// RC4 keystream has already advanced past bytes it never received. Neither can
 		// be recovered, so drop the session; the read loop then releases it.
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
-			c.closeWithReason(fmt.Sprintf("write-timeout(%s)", tcpWriteTimeout))
+			c.closeWithReason(fmt.Sprintf("write-timeout(%s)", c.writeTimeout))
 		} else {
 			c.closeWithReason(fmt.Sprintf("write-error: %v", err))
 		}

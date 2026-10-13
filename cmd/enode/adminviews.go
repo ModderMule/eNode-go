@@ -72,7 +72,7 @@ func (v *adminViews) setConfig(get func() config.Config) {
 func (v *adminViews) Features() admin.Features {
 	info := v.access.Info()
 	return admin.Features{
-		Bans:         v.content != nil,
+		Bans:         !v.content.Idle(),
 		Bots:         v.runtime.UDPConfig().BotDetection.Enabled,
 		Spam:         v.spam != nil,
 		SpamLists:    v.spam != nil && v.content.LocalListsEnabled(),
@@ -159,7 +159,7 @@ func (v *adminViews) FileSources(hash string) ([]admin.SourceRow, error) {
 	sources := v.engine.GetSourcesByHash(raw)
 	rows := make([]admin.SourceRow, 0, len(sources))
 	for _, s := range sources {
-		row := admin.SourceRow{Port: s.Port, LowID: s.ID < lowIDCeiling}
+		row := admin.SourceRow{Port: s.Port, LowID: s.ID < lowIDCeiling, Software: v.runtime.ClientSoftware(s.UserHash)}
 		if row.LowID {
 			row.IP = fmt.Sprintf("LowID %d", s.ID)
 		} else {

@@ -36,9 +36,9 @@ const defaultCounterCacheTTL = time.Minute
 // cost at 2/TTL under any load.
 type counterCache struct {
 	engine storage.Engine
-	ttl    time.Duration
 
 	mu      sync.Mutex
+	ttl     time.Duration
 	clients int
 	files   int
 	fetched time.Time
@@ -53,6 +53,17 @@ func newCounterCache(engine storage.Engine, ttl time.Duration) *counterCache {
 		ttl = defaultCounterCacheTTL
 	}
 	return &counterCache{engine: engine, ttl: ttl}
+}
+
+// setTTL changes how long a reading is served; zero or less uses defaultCounterCacheTTL.
+// The reading already held is judged by the new value.
+func (c *counterCache) setTTL(ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = defaultCounterCacheTTL
+	}
+	c.mu.Lock()
+	c.ttl = ttl
+	c.mu.Unlock()
 }
 
 // Counts returns the cached client and file totals, refreshing them if stale.

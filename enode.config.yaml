@@ -204,6 +204,8 @@ filter:
   #
   # A source request carries only a hash, so a file indexed before its keyword was
   # added keeps answering source requests until it ages out of the index.
+  #
+  # Applied by a config reload, without a restart.
   keywords: ""
   # eD2K hash lists: one 32-hex-character file hash per line, "#" lines are comments,
   # text after ";" is ignored. Listed files are refused on publish and withheld from
@@ -620,7 +622,7 @@ storage:
   engine: memory
   # Seconds the advertised user and file totals (status packets, dashboard) are
   # served from one reading before the database is asked again. The file total is
-  # the engine's estimate on mysql and mongodb, not an exact count. Needs a restart.
+  # the engine's estimate on mysql and mongodb, not an exact count.
   countCacheSeconds: 60
   cleanup:
     # Expires offline clients and their sources. Without it, rows accumulate for

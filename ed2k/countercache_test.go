@@ -238,3 +238,44 @@ func TestNewCounterCacheDefaultTTL(t *testing.T) {
 		t.Fatalf("ttl=%s, want %s", cache.ttl, time.Minute)
 	}
 }
+
+// TestApplyRuntimeConfigUpdatesCacheTTLAndRateLimit covers the two settings a config
+// reload hands to objects built at startup rather than to the config snapshot.
+func TestApplyRuntimeConfigUpdatesCacheTTLAndRateLimit(t *testing.T) {
+	engine := &countingEngine{Engine: storage.NewMemoryEngine()}
+	tcp := TCPRuntimeConfig{CounterCacheTTL: time.Hour}
+	udp := UDPRuntimeConfig{RateLimitPerIPPerMinute: 2}
+	s := NewServerRuntime(tcp, udp, engine)
+
+	allowed := func(key string, calls int) int {
+		n := 0
+		for i := 0; i < calls; i++ {
+			if s.udpLimiter.Allow(key) {
+				n++
+			}
+		}
+		return n
+	}
+	s.Counts()
+	s.Counts()
+	before, limitedBefore := engine.queries(), allowed("a", 5)
+
+	tcp.CounterCacheTTL, udp.RateLimitPerIPPerMinute = time.Millisecond, 4
+	s.ApplyRuntimeConfig(tcp, udp)
+	time.Sleep(5 * time.Millisecond)
+	s.Counts()
+	after, limitedAfter := engine.queries(), allowed("b", 5)
+
+	udp.RateLimitPerIPPerMinute = 0
+	s.ApplyRuntimeConfig(tcp, udp)
+	off := allowed("b", 5)
+
+	t.Logf("input: ttl 1h limit 2/min, 2 reads, 5 queries; then ttl 1ms limit 4/min, 1 read, 5 queries; then limit 0, 5 queries")
+	t.Logf("output: storage queries %d -> %d; allowed %d, %d, %d", before, after, limitedBefore, limitedAfter, off)
+	if before != 2 || after != 4 {
+		t.Errorf("storage queries %d -> %d, want 2 -> 4: the new TTL was not applied", before, after)
+	}
+	if limitedBefore != 2 || limitedAfter != 4 || off != 5 {
+		t.Errorf("allowed %d, %d, %d, want 2, 4, 5: the new rate limit was not applied", limitedBefore, limitedAfter, off)
+	}
+}

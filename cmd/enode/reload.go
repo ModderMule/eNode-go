@@ -9,6 +9,7 @@ import (
 
 	"enode/admin"
 	"enode/config"
+	"enode/contentfilter"
 	"enode/ed2k"
 	"enode/logging"
 	"enode/storage"
@@ -52,6 +53,7 @@ type reloader struct {
 
 	runtime  *ed2k.ServerRuntime
 	engine   storage.Engine
+	content  *contentfilter.Filter
 	adminSrv *admin.Server
 
 	// udpCfg is the main UDP listener's config, the template for a separate gossip
@@ -100,17 +102,23 @@ func (r *reloader) Reload() (admin.ReloadResult, error) {
 		res.RestartRequired = append(res.RestartRequired, "servers (removed entries)")
 	}
 
-	// The two steps that can fail run first, and the first is undone if the second
-	// fails, so an error leaves nothing half-applied.
+	// The three steps that can fail run first, and the earlier ones are undone if a
+	// later one fails, so an error leaves nothing half-applied.
+	if err := r.applyKeywords(old, effective); err != nil {
+		return admin.ReloadResult{}, err
+	}
 	if err := applyLogging(old, effective); err != nil {
+		_ = r.applyKeywords(effective, old)
 		return admin.ReloadResult{}, err
 	}
 	if err := r.applyGossip(old, effective); err != nil {
 		_ = applyLogging(effective, old)
+		_ = r.applyKeywords(effective, old)
 		return admin.ReloadResult{}, err
 	}
 
 	r.runtime.ApplyRuntimeConfig(buildRuntimeConfigs(effective, r.derived))
+	r.content.SetSanctions(effective.Filter.BanThresholdOrDefault(), effective.Filter.KeywordBanThresholdOrDefault(), effective.Filter.BanMinutes)
 	r.runtime.SetStatsBoost(statsBoostFromConfig(effective))
 	if effective.StatsBoost != old.StatsBoost {
 		warnStatsBoost(effective)
@@ -165,6 +173,14 @@ func (r *reloader) close() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.stopGossipIO()
+}
+
+// applyKeywords hands the content filter filter.keywords when it changed.
+func (r *reloader) applyKeywords(old, cfg config.Config) error {
+	if cfg.Filter.Keywords == old.Filter.Keywords {
+		return nil
+	}
+	return r.content.SetKeywords(cfg.Filter.Keywords)
 }
 
 // applyGossip moves gossip from the old config to the new one: on, off, or reconfigured

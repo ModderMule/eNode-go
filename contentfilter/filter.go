@@ -63,6 +63,9 @@ type Config struct {
 	BanMinutes int
 	// BanFile is where the bans are kept across restarts, or "" for in memory only.
 	BanFile string
+	// KeepEmpty returns a Filter even when nothing is configured, so SetKeywords can
+	// give it keywords later. Set by the server, whose config reload does that.
+	KeepEmpty bool
 }
 
 // Stats is the admin view of the filter.
@@ -135,7 +138,8 @@ type listSlot struct {
 
 // Filter is the seam the protocol layer consults. The lists sit behind atomic pointers:
 // a reload replaces one wholesale, and the read path runs for every offered file and
-// every served row. A nil *Filter refuses nothing.
+// every served row. The keywords sit behind one too: SetKeywords replaces them when the
+// config is reloaded. A nil *Filter refuses nothing.
 type Filter struct {
 	cfg       Config
 	banlist   listSlot
@@ -147,10 +151,14 @@ type Filter struct {
 	localWhitelist listSlot
 	// appendMu serializes AddLocal's writes.
 	appendMu sync.Mutex
-	keywords *Matcher
-	bans     *banList
-	banCount atomic.Int64
-	stats    struct {
+	keywords atomic.Pointer[Matcher]
+	// The sanction settings, replaced by SetSanctions when the config is reloaded.
+	banThreshold        atomic.Int64
+	keywordBanThreshold atomic.Int64
+	banMinutes          atomic.Int64
+	bans                *banList
+	banCount            atomic.Int64
+	stats               struct {
 		refusedBanlist atomic.Int64
 		refusedFilter  atomic.Int64
 		refusedKeyword atomic.Int64
@@ -164,17 +172,20 @@ type Filter struct {
 // An enabled list whose file is missing is an error, because the operator named it and
 // silently indexing everything it was meant to refuse is the wrong failure mode —
 // unless AllowMissing says the updater is about to fetch it. Nothing enabled returns
-// (nil, nil): the caller stores no filter and pays nothing.
+// (nil, nil): the caller stores no filter and pays nothing. KeepEmpty returns an idle
+// Filter instead.
 func New(ctx context.Context, cfg Config) (*Filter, error) {
 	keywords, err := NewMatcher(cfg.Keywords)
 	if err != nil {
 		return nil, fmt.Errorf("filter.keywords: %w", err)
 	}
-	if keywords.Empty() && cfg.BanlistFile == "" && cfg.FilterFile == "" && cfg.WhitelistFile == "" &&
+	if !cfg.KeepEmpty && keywords.Empty() && cfg.BanlistFile == "" && cfg.FilterFile == "" && cfg.WhitelistFile == "" &&
 		cfg.LocalBanlistFile == "" && cfg.LocalFilterFile == "" && cfg.LocalWhitelistFile == "" {
 		return nil, nil
 	}
-	f := &Filter{cfg: cfg, keywords: keywords, bans: newBanList(cfg.BanFile)}
+	f := &Filter{cfg: cfg, bans: newBanList(cfg.BanFile)}
+	f.keywords.Store(keywords)
+	f.SetSanctions(cfg.BanThreshold, cfg.KeywordBanThreshold, cfg.BanMinutes)
 	if err := f.bans.load(); err != nil {
 		return nil, err
 	}
@@ -243,6 +254,53 @@ func (f *Filter) Withheld(hash []byte, name string) bool {
 	return true
 }
 
+// SetKeywords replaces the keywords with a new filter.keywords value; "" removes them.
+// Offers and searches are judged against the new words from then on. A file indexed
+// under the old words stays indexed, and is withheld from search results if its name
+// matches a new one. A value that does not parse changes nothing.
+func (f *Filter) SetKeywords(keywords string) error {
+	m, err := NewMatcher(keywords)
+	if err != nil {
+		return fmt.Errorf("filter.keywords: %w", err)
+	}
+	if f == nil {
+		if m.Empty() {
+			return nil
+		}
+		return errors.New("filter.keywords: no content filter to give them to")
+	}
+	f.keywords.Store(m)
+	logging.Infof("content filter: %d keyword(s)", m.Len())
+	return nil
+}
+
+// SetSanctions replaces the two sanction thresholds and the ban length. A session is
+// measured against the new thresholds from its next refused file on, and a ban already
+// running keeps the length it was given.
+func (f *Filter) SetSanctions(banThreshold, keywordBanThreshold, banMinutes int) {
+	if f == nil {
+		return
+	}
+	f.banThreshold.Store(int64(banThreshold))
+	f.keywordBanThreshold.Store(int64(keywordBanThreshold))
+	f.banMinutes.Store(int64(banMinutes))
+}
+
+// Idle reports whether the filter has nothing to refuse by: no keywords and no hash
+// list. Only a filter built with KeepEmpty can be idle. Bans are apart from this and
+// apply either way.
+func (f *Filter) Idle() bool {
+	if f == nil {
+		return true
+	}
+	for _, slot := range f.slots() {
+		if slot.path != "" {
+			return false
+		}
+	}
+	return f.keywords.Load().Empty()
+}
+
 // Whitelisted reports whether hash is on the whitelist or its local twin.
 func (f *Filter) Whitelisted(hash []byte) bool {
 	return f != nil && listed(&f.whitelist, &f.localWhitelist, hash)
@@ -288,11 +346,15 @@ func (f *Filter) AddLocal(list LocalList, hash []byte, comment string) error {
 // QueryBlocked reports whether a search asks for one of the keywords itself. Such a
 // search is answered with nothing, without consulting the index.
 func (f *Filter) QueryBlocked(terms []string) bool {
-	if f == nil || f.keywords.Empty() {
+	if f == nil {
+		return false
+	}
+	keywords := f.keywords.Load()
+	if keywords.Empty() {
 		return false
 	}
 	for _, term := range terms {
-		if f.keywords.Match(term) {
+		if keywords.Match(term) {
 			f.stats.blockedQueries.Add(1)
 			return true
 		}
@@ -306,7 +368,7 @@ func (f *Filter) BanThreshold() int {
 	if f == nil {
 		return 0
 	}
-	return f.cfg.BanThreshold
+	return int(f.banThreshold.Load())
 }
 
 // KeywordBanThreshold is how many distinct keyword-refused files get a session
@@ -315,15 +377,19 @@ func (f *Filter) KeywordBanThreshold() int {
 	if f == nil {
 		return 0
 	}
-	return f.cfg.KeywordBanThreshold
+	return int(f.keywordBanThreshold.Load())
 }
 
 // Ban refuses a publisher at login, by user hash and by address, for BanMinutes.
 func (f *Filter) Ban(userHash []byte, ip net.IP) {
-	if f == nil || f.cfg.BanMinutes <= 0 {
+	if f == nil {
 		return
 	}
-	f.bans.add(userHash, ip, time.Duration(f.cfg.BanMinutes)*time.Minute)
+	minutes := f.banMinutes.Load()
+	if minutes <= 0 {
+		return
+	}
+	f.bans.add(userHash, ip, time.Duration(minutes)*time.Minute)
 	f.banCount.Store(int64(f.bans.sweep()))
 }
 
@@ -428,7 +494,7 @@ func (f *Filter) Stats() Stats {
 		BanlistEntries:   f.banlist.list.Load().Len() + f.localBanlist.list.Load().Len(),
 		FilterEntries:    f.filter.list.Load().Len() + f.localFilter.list.Load().Len(),
 		WhitelistEntries: f.whitelist.list.Load().Len() + f.localWhitelist.list.Load().Len(),
-		Keywords:         f.keywords.Len(),
+		Keywords:         f.keywords.Load().Len(),
 		RefusedBanlist:   f.stats.refusedBanlist.Load(),
 		RefusedFilter:    f.stats.refusedFilter.Load(),
 		RefusedKeyword:   f.stats.refusedKeyword.Load(),
@@ -461,7 +527,7 @@ func (f *Filter) judge(hash []byte, name string) verdict {
 	if listed(&f.filter, &f.localFilter, hash) {
 		return verdictFilter
 	}
-	if name != "" && f.keywords.Match(name) {
+	if name != "" && f.keywords.Load().Match(name) {
 		return verdictKeyword
 	}
 	return verdictAllow

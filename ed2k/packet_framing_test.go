@@ -118,19 +118,16 @@ func TestProcessPacketDataZeroSizeCloses(t *testing.T) {
 }
 
 // A peer that stops reading must not hold writeMu forever: writeRaw gives up after
-// tcpWriteTimeout and drops the session.
+// the session's writeTimeout and drops the session.
 func TestWriteRawTimesOutOnStalledReader(t *testing.T) {
-	saved := tcpWriteTimeout
-	tcpWriteTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { tcpWriteTimeout = saved })
-
 	server, client := net.Pipe() // nobody reads client
 	t.Cleanup(func() { server.Close(); client.Close() })
 	rt := NewServerRuntime(TCPRuntimeConfig{Hash: []byte("0123456789abcdef")}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
 	c := newTCPClient(rt, server, false)
+	c.writeTimeout = 100 * time.Millisecond
 
 	payload := []byte{PrED2K, 0x01, 0x00, 0x00, 0x00, OpServerMessage}
-	t.Logf("input: %d-byte write to a peer that never reads, timeout=%s", len(payload), tcpWriteTimeout)
+	t.Logf("input: %d-byte write to a peer that never reads, timeout=%s", len(payload), c.writeTimeout)
 	start := time.Now()
 	err := c.writeRaw(payload)
 	took := time.Since(start)
@@ -140,7 +137,7 @@ func TestWriteRawTimesOutOnStalledReader(t *testing.T) {
 		t.Fatal("write to a stalled peer succeeded")
 	}
 	if took > 2*time.Second {
-		t.Fatalf("write took %s, want about %s", took, tcpWriteTimeout)
+		t.Fatalf("write took %s, want about %s", took, c.writeTimeout)
 	}
 	if !strings.HasPrefix(c.getCloseReason(), "write-timeout") {
 		t.Fatalf("want close reason write-timeout, got %q", c.getCloseReason())

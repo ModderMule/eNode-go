@@ -30,11 +30,17 @@ var reloadableKeys = []string{
 	"tcp.maxConnectionsPerIP",
 	"udp.getSources",
 	"udp.getFiles",
+	"udp.rateLimitPerIPPerMinute",
 	"udp.botDetection",
 	"files",
 	"admin.username",
 	"admin.password",
 	"gossip",
+	"filter.keywords",
+	"filter.banThreshold",
+	"filter.keywordBanThreshold",
+	"filter.banMinutes",
+	"storage.countCacheSeconds",
 	"statsBoost",
 }
 
@@ -78,11 +84,17 @@ func OverlayReloadable(base, next Config) Config {
 	out.TCP.MaxConnectionsPerIP = next.TCP.MaxConnectionsPerIP
 	out.UDP.GetSources = next.UDP.GetSources
 	out.UDP.GetFiles = next.UDP.GetFiles
+	out.UDP.RateLimitPerIPPerMinute = next.UDP.RateLimitPerIPPerMinute
 	out.UDP.BotDetection = next.UDP.BotDetection
 	out.Files = next.Files
 	out.Admin.Username = next.Admin.Username
 	out.Admin.Password = next.Admin.Password
 	out.Gossip = next.Gossip
+	out.Filter.Keywords = next.Filter.Keywords
+	out.Filter.BanThreshold = next.Filter.BanThreshold
+	out.Filter.KeywordBanThreshold = next.Filter.KeywordBanThreshold
+	out.Filter.BanMinutes = next.Filter.BanMinutes
+	out.Storage.CountCacheSeconds = next.Storage.CountCacheSeconds
 	out.StatsBoost = next.StatsBoost
 	return out
 }

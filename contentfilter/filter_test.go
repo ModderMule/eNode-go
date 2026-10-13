@@ -53,6 +53,81 @@ func TestNewNothingConfiguredReturnsNil(t *testing.T) {
 	}
 }
 
+// TestSetKeywords covers the config reload path: a filter built with nothing configured
+// is given keywords, has them replaced, and loses them again.
+func TestSetKeywords(t *testing.T) {
+	f, err := New(context.Background(), Config{KeepEmpty: true})
+	if err != nil || f == nil {
+		t.Fatalf("New with KeepEmpty = %v, %v; want an idle filter", f, err)
+	}
+	judge := func() (bool, bool) {
+		refused, _, _ := f.CheckOffer(testHash(1), "Some.Blocked.File.avi")
+		return refused, f.QueryBlocked([]string{"other"})
+	}
+	steps := []struct {
+		keywords            string
+		wantErr             bool
+		refused, queryBlock bool
+		count               int
+		idle                bool
+	}{
+		{"", false, false, false, 0, true},
+		{"blocked", false, true, false, 1, false},
+		{"other|another", false, false, true, 2, false},
+		{"blocked|---", true, false, true, 2, false},
+		{"", false, false, false, 0, true},
+	}
+	for _, step := range steps {
+		err := f.SetKeywords(step.keywords)
+		refused, queryBlock := judge()
+		count, idle := f.Stats().Keywords, f.Idle()
+		t.Logf("input: SetKeywords(%q) output: err=%v refused=%t queryBlocked=%t keywords=%d idle=%t",
+			step.keywords, err, refused, queryBlock, count, idle)
+		if (err != nil) != step.wantErr || refused != step.refused || queryBlock != step.queryBlock ||
+			count != step.count || idle != step.idle {
+			t.Errorf("SetKeywords(%q): got err=%v refused=%t queryBlocked=%t keywords=%d idle=%t, want %+v",
+				step.keywords, err, refused, queryBlock, count, idle, step)
+		}
+	}
+
+	var none *Filter
+	errEmpty, errSet := none.SetKeywords(""), none.SetKeywords("blocked")
+	t.Logf("input: nil filter output: SetKeywords(\"\")=%v SetKeywords(\"blocked\")=%v idle=%t", errEmpty, errSet, none.Idle())
+	if errEmpty != nil || errSet == nil || !none.Idle() {
+		t.Error("a nil filter is idle, accepts no keywords and takes an empty list")
+	}
+}
+
+// TestSetSanctions covers the thresholds and the ban length changed by a config reload.
+func TestSetSanctions(t *testing.T) {
+	f := newTestFilter(t)
+	user, ip := testHash(9), net.IPv4(1, 2, 3, 4)
+	t.Logf("input: built with banThreshold=3 banMinutes=10 output: banThreshold=%d keywordBanThreshold=%d",
+		f.BanThreshold(), f.KeywordBanThreshold())
+	if f.BanThreshold() != 3 {
+		t.Fatalf("BanThreshold = %d, want 3", f.BanThreshold())
+	}
+
+	f.SetSanctions(7, 9, 0)
+	f.Ban(user, ip)
+	bannedOff := f.Banned(user, ip)
+	t.Logf("input: SetSanctions(7, 9, 0), Ban output: banThreshold=%d keywordBanThreshold=%d banned=%t",
+		f.BanThreshold(), f.KeywordBanThreshold(), bannedOff)
+	if f.BanThreshold() != 7 || f.KeywordBanThreshold() != 9 || bannedOff {
+		t.Error("the new thresholds must apply, and banMinutes 0 must ban nobody")
+	}
+
+	f.SetSanctions(7, 9, 30)
+	f.Ban(user, ip)
+	bans := f.Bans()
+	t.Logf("input: SetSanctions(7, 9, 30), Ban output: banned=%t bans=%d", f.Banned(user, ip), len(bans))
+	if !f.Banned(user, ip) || len(bans) == 0 {
+		t.Fatal("banMinutes 30 must ban the publisher")
+	}
+	var none *Filter
+	none.SetSanctions(1, 1, 1)
+}
+
 func TestNilFilterRefusesNothing(t *testing.T) {
 	var f *Filter
 	refused, sanction, _ := f.CheckOffer(testHash(1), "blocked.avi")

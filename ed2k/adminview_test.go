@@ -86,6 +86,13 @@ func TestClientSnapshotAndDisconnect(t *testing.T) {
 		t.Fatalf("view lacks its store id or connect time: %+v", v)
 	}
 
+	software, noSoftware := rt.ClientSoftware(hash), rt.ClientSoftware(bytes.Repeat([]byte{0xee}, 16))
+	t.Logf("input: software of the session's hash, then of an unknown hash")
+	t.Logf("output: session=%q unknown=%q", software, noSoftware)
+	if software != "aMule 2.3.3" || noSoftware != "" {
+		t.Fatalf("software: session=%q unknown=%q", software, noSoftware)
+	}
+
 	unknown := rt.DisconnectClient(bytes.Repeat([]byte{0xee}, 16))
 	closedBefore := conn.closed
 	found := rt.DisconnectClient(hash)

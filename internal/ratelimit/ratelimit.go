@@ -5,19 +5,21 @@ package ratelimit
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Limiter allows perMinute events per key, with bursts up to perMinute.
 type Limiter struct {
-	perMinute float64
-	now       func() time.Time
+	now func() time.Time
+	// disabled is read without mu, so a limiter that is off costs one load.
+	disabled atomic.Bool
 
-	mu       sync.Mutex
-	buckets  map[string]*bucket
-	lastGC   time.Time
-	maxIdle  time.Duration
-	disabled bool
+	mu        sync.Mutex
+	perMinute float64
+	buckets   map[string]*bucket
+	lastGC    time.Time
+	maxIdle   time.Duration
 }
 
 type bucket struct {
@@ -33,18 +35,34 @@ func New(perMinute int) *Limiter {
 
 // NewWithClock is New with an injected clock, for tests.
 func NewWithClock(perMinute int, now func() time.Time) *Limiter {
-	return &Limiter{
+	l := &Limiter{
 		perMinute: float64(perMinute),
 		now:       now,
 		buckets:   map[string]*bucket{},
 		maxIdle:   2 * time.Minute,
-		disabled:  perMinute <= 0,
+	}
+	l.disabled.Store(perMinute <= 0)
+	return l
+}
+
+// SetRate changes the limit to perMinute events per key; perMinute <= 0 allows
+// everything. A key keeps the tokens it has left, capped at the new limit.
+func (l *Limiter) SetRate(perMinute int) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.perMinute = float64(perMinute)
+	l.disabled.Store(perMinute <= 0)
+	if perMinute <= 0 {
+		clear(l.buckets)
 	}
 }
 
 // Allow takes one token from key's bucket and reports whether there was one.
 func (l *Limiter) Allow(key string) bool {
-	if l == nil || l.disabled {
+	if l == nil || l.disabled.Load() {
 		return true
 	}
 	now := l.now()

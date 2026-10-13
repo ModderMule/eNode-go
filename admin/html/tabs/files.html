@@ -16,7 +16,7 @@
 <p class="desc">Files the content filter withholds are not listed. A search returns its whole capped answer; browsing pages through the files that have a source online.</p>
 <div id="fiSources" hidden>
 <h2 id="fiSourcesTitle">Sources</h2>
-<table><thead><tr><th>Address</th><th>ID</th><th>IPv6</th></tr></thead><tbody id="fiSourceRows"></tbody></table>
+<table><thead><tr><th>Address</th><th>ID</th><th>IPv6</th><th>Software</th></tr></thead><tbody id="fiSourceRows"></tbody></table>
 </div>
 </div>
 {{end}}
@@ -31,7 +31,7 @@
     document.getElementById('fiSources').hidden = false;
     setText('fiSourcesTitle', 'Sources of ' + f.name);
     fillTable('fiSourceRows', rows, function(s){
-      return [s.lowId ? s.ip : s.ip + ':' + s.port, s.lowId ? 'Low' : 'High', s.ipv6 || '—'];
+      return [s.lowId ? s.ip : s.ip + ':' + s.port, s.lowId ? 'Low' : 'High', s.ipv6 || '—', s.software || '—'];
     }, 'no source online');
   }
   // ed2kLink builds the file link the way eMule writes it: name percent-encoded,
