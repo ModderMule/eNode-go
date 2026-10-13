@@ -195,7 +195,7 @@ Meta API accounts.
 | Peers | the gossip peer table (name, address, users, files, state, last seen, who told us) and the static server list | `GET /api/peers` |
 | Filter | what the IP filter, the country filter and the content filter have loaded and refused; their data files | `GET /api/filter` |
 | Bans | the user hashes and addresses refused at login, with their expiry | `GET /api/bans` |
-| Bots | addresses whose UDP queries look automated; see [bot-detection.md](bot-detection.md) | `GET /api/bots` |
+| Bots | addresses whose UDP queries look automated | `GET /api/bots` |
 | Spam | offered files that scored as spam or fake, and the sessions whose share looks like spam; see [spam-detection.md](spam-detection.md) | `GET /api/spam` |
 | Blocks | how often each kind of refusal happened since the start | `GET /api/blocks` |
 | Health | the filters' data files (present, size, age, entries) and the last 100 warnings and errors | `GET /api/health` |

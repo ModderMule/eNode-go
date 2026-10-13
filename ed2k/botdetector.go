@@ -12,7 +12,7 @@ import (
 // signs of an automated querier: a rate no user produces, and gaps between queries
 // too even to be a person. It only observes. A flagged address is listed for the
 // operator and keeps being throttled by udp.rateLimitPerIPPerMinute like any other;
-// nothing is banned or dropped here. See docs/bot-detection.md.
+// nothing is banned or dropped here.
 
 const (
 	// botWindow is the sliding window the rate and the gaps are measured over.

@@ -237,7 +237,6 @@ type UDPConfig struct {
 
 // BotDetectionConfig is udp.botDetection. It only observes: a flagged address is
 // listed in the admin UI and stays subject to rateLimitPerIPPerMinute like any other.
-// See docs/bot-detection.md.
 type BotDetectionConfig struct {
 	// Enabled is a pointer so an absent key means on.
 	Enabled *bool `yaml:"enabled"`

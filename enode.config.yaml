@@ -95,7 +95,7 @@ udp:
   # the admin UI's Bots tab. It only observes: nothing is banned or dropped, and a
   # listed address stays subject to rateLimitPerIPPerMinute like any other. An address
   # is listed above floodQueriesPerMinute, or above minQueriesPerMinute when the gaps
-  # between its queries vary by less than maxIntervalStddevMs. See docs/bot-detection.md.
+  # between its queries vary by less than maxIntervalStddevMs.
   botDetection:
     enabled: true
     minQueriesPerMinute: 200
