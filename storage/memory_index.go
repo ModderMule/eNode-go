@@ -12,7 +12,7 @@ import (
 // every candidate with MatchSearchExpr, so the index only has to return a superset
 // of the files that match, and search answers stay exactly what the full scan gave.
 //
-// Matching is by case-insensitive substring (matchSearchExpr), which a plain word
+// Matching is by case-insensitive substring (searchMatcher), which a plain word
 // index cannot answer: "bin" must still find "cabinet". So names are split into
 // words — maximal runs of letters and digits of the lowercased name, the same
 // alnumRuns a query term is split with — and a query run is looked up as a
@@ -51,27 +51,30 @@ const (
 	candidateFloor = 65536
 )
 
-// fileSlab holds the memory engine's file records by id, in fixed-size chunks. A
-// single []File would copy every record, pointers and all, each time it doubled —
-// most of the publish time at a few million files, and a second copy of the whole
-// table at the peak.
-type fileSlab struct {
-	chunks [][]File
+// slab holds records by id, in fixed-size chunks. A single slice would copy every
+// record, pointers and all, each time it doubled — most of the publish time at a
+// few million files, and a second copy of the whole table at the peak.
+type slab[T any] struct {
+	chunks [][]T
 	n      int
 }
+
+// fileSlab is the slab the Mirror keeps its files in. The memory engine's own
+// records are the smaller memRec.
+type fileSlab = slab[File]
 
 // slabChunkBits sizes a chunk: 4096 records, under a megabyte.
 const slabChunkBits = 12
 
-func (s *fileSlab) at(id uint32) *File {
+func (s *slab[T]) at(id uint32) *T {
 	return &s.chunks[id>>slabChunkBits][id&(1<<slabChunkBits-1)]
 }
 
 // push stores f under the next id and returns it.
-func (s *fileSlab) push(f File) uint32 {
+func (s *slab[T]) push(f T) uint32 {
 	id := uint32(s.n)
 	if int(id>>slabChunkBits) == len(s.chunks) {
-		s.chunks = append(s.chunks, make([]File, 1<<slabChunkBits))
+		s.chunks = append(s.chunks, make([]T, 1<<slabChunkBits))
 	}
 	*s.at(id) = f
 	s.n++
@@ -79,7 +82,7 @@ func (s *fileSlab) push(f File) uint32 {
 }
 
 // len is how many ids have been handed out, live or not.
-func (s *fileSlab) len() int { return s.n }
+func (s *slab[T]) len() int { return s.n }
 
 func newNameIndex() nameIndex {
 	return nameIndex{
@@ -206,7 +209,7 @@ func (x *nameIndex) candidates(expr *SearchExpr, limit int) (ids []uint32, all b
 func (x *nameIndex) textCandidates(text string, limit int) ([]uint32, bool) {
 	terms := splitTerms(text)
 	if len(terms) == 0 {
-		// matchSearchExpr answers false for an all-whitespace leaf.
+		// The matcher answers false for an all-whitespace leaf.
 		return nil, false
 	}
 	type runSet struct {

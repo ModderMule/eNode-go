@@ -1,0 +1,106 @@
+{{define "tab-accounts"}}
+<div class="tab" id="tab-accounts" hidden>
+<h2>Meta API accounts</h2>
+<div class="tools">
+<input id="acQ" placeholder="search username or email" size="28">
+<select id="acState"><option value="">all states</option><option>pending</option><option>active</option><option>expired</option><option>disabled</option></select>
+<button id="acSearch">Search</button>
+<button id="acPrev">‹ prev</button><button id="acNext">next ›</button>
+<span class="desc" id="acPage" style="margin:0"></span>
+</div>
+<p class="desc tabmsg" id="msg-accounts"></p>
+<div class="layout">
+<div class="scroll"><table class="pick"><thead><tr><th>ID</th><th>User</th><th>State</th><th>Access until</th><th>Created</th></tr></thead><tbody id="acRows"></tbody></table></div>
+<div class="card" id="acDetail"><span class="off">Select an account.</span></div>
+</div>
+</div>
+{{end}}
+
+{{define "js-accounts"}}
+(function(){
+  var offset = 0, selected = 0, pageSize = 50;
+  function day(s){ return s ? s.replace('T', ' ').replace('Z', ' UTC') : '—'; }
+  function msg(t, bad){ tabMsg('accounts', t, bad); }
+  function table(head, rows){
+    var t = el('table'); var h = t.createTHead().insertRow();
+    head.forEach(function(x){ h.appendChild(el('th', x)); });
+    var b = t.createTBody();
+    rows.forEach(function(r){ var tr = b.insertRow(); r.forEach(function(x){ tr.appendChild(el('td', x)); }); });
+    return t;
+  }
+  async function load(){
+    var q = new URLSearchParams({q: document.getElementById('acQ').value, state: document.getElementById('acState').value, offset: offset});
+    var rows = await api('/api/accounts?' + q);
+    var tb = document.getElementById('acRows'); tb.replaceChildren();
+    rows.forEach(function(a){
+      var tr = tb.insertRow(); if(a.id === selected){ tr.className = 'sel'; }
+      tr.appendChild(el('td', a.id));
+      var u = el('td', a.username); if(a.email){ u.appendChild(el('div', a.email, 'off')); } tr.appendChild(u);
+      tr.appendChild(el('td', a.state, 's-' + a.state));
+      tr.appendChild(el('td', a.accessUntil ? day(a.accessUntil) : 'no expiry'));
+      tr.appendChild(el('td', day(a.createdAt)));
+      tr.onclick = function(){ selected = a.id; show(a.id); runTab('accounts', true); };
+    });
+    setText('acPage', rows.length ? (offset + 1) + '–' + (offset + rows.length) : 'no accounts');
+    document.getElementById('acNext').disabled = rows.length < pageSize;
+    document.getElementById('acPrev').disabled = offset === 0;
+  }
+  async function show(id){
+    try{ render(await api('/api/accounts/' + id)); }catch(e){ msg(e.message, true); }
+  }
+  async function change(id, action, body, confirmText){
+    if(confirmText && !confirm(confirmText)){ return; }
+    try{ render(await api('/api/accounts/' + id + '/' + action, 'POST', body || {})); await load(); msg(action + ' done'); }
+    catch(e){ msg(e.message, true); }
+  }
+  function render(a){
+    var d = document.getElementById('acDetail'); d.replaceChildren();
+    d.appendChild(el('h2', a.username + ' (#' + a.id + ')'));
+    d.appendChild(el('div', a.email || 'no email', 'off'));
+    var st = el('div'); st.appendChild(document.createTextNode('State: ')); st.appendChild(el('span', a.state, 's-' + a.state)); d.appendChild(st);
+    d.appendChild(el('div', 'Access until: ' + (a.accessUntil ? day(a.accessUntil) : 'no expiry')));
+    d.appendChild(el('div', 'Registered: ' + day(a.createdAt), 'off'));
+
+    var acts = el('div', undefined, 'tools');
+    if(a.state === 'disabled'){
+      var en = el('button', 'Enable'); en.onclick = function(){ change(a.id, 'enable'); }; acts.appendChild(en);
+    }else{
+      var dis = el('button', 'Disable', 'danger'); dis.onclick = function(){ change(a.id, 'disable', {}, 'Disable ' + a.username + '?'); }; acts.appendChild(dis);
+    }
+    if(a.accessUntil){
+      var days = el('input'); days.type = 'number'; days.value = '30'; days.style.width = '6em';
+      var adj = el('button', 'Move access by days'); adj.onclick = function(){ change(a.id, 'adjust', {days: parseInt(days.value, 10) || 0}); };
+      acts.appendChild(days); acts.appendChild(adj);
+    }
+    d.appendChild(acts);
+
+    d.appendChild(el('h2', 'Registration steps'));
+    if(!a.steps.length){ d.appendChild(el('div', 'none configured', 'off')); }
+    else{
+      d.appendChild(table(['Step', 'Status', 'Completed'], a.steps.map(function(s){ return [s.title + ' (' + s.id + ')', s.status, day(s.completedAt)]; })));
+      var open = a.steps.filter(function(s){ return s.status === 'pending' || s.status === 'failed'; });
+      if(open.length){
+        var sa = el('div', undefined, 'tools'); var sel = el('select');
+        open.forEach(function(s){ var o = el('option', s.title); o.value = s.id; sel.appendChild(o); });
+        var sk = el('button', 'Skip step'); sk.onclick = function(){ change(a.id, 'skip-step', {step: sel.value}, 'Mark this step as skipped for ' + a.username + '?'); };
+        sa.appendChild(sel); sa.appendChild(sk); d.appendChild(sa);
+      }
+    }
+    d.appendChild(el('h2', 'Payments'));
+    if(!a.payments.length){ d.appendChild(el('div', 'none', 'off')); }
+    else{
+      d.appendChild(table(['#', 'Provider', 'Plan', 'Status', 'Amount', 'Created', 'Credited', 'Revoked'], a.payments.map(function(p){
+        return [p.id, p.provider + (p.externalId ? ' ' + p.externalId : ''), p.plan + (p.periodDays ? ' (' + p.periodDays + 'd)' : ''),
+          p.status, p.amount ? p.amount + ' ' + p.currency : '', day(p.createdAt), day(p.creditedAt), day(p.revokedAt)];
+      })));
+    }
+  }
+  function first(){ offset = 0; runTab('accounts'); }
+  document.getElementById('acSearch').onclick = first;
+  document.getElementById('acQ').onkeydown = function(e){ if(e.key === 'Enter'){ first(); } };
+  document.getElementById('acState').onchange = first;
+  document.getElementById('acNext').onclick = function(){ offset += pageSize; runTab('accounts'); };
+  document.getElementById('acPrev').onclick = function(){ offset = Math.max(0, offset - pageSize); runTab('accounts'); };
+  tabs.accounts = {load: load, poll: false};
+})();
+{{end}}

@@ -1,0 +1,71 @@
+{{define "tab-clients"}}
+<div class="tab" id="tab-clients" hidden>
+<div class="mgrid">
+<div class="card"><div class="label">Client software</div><div id="clSoftware" class="meters"></div></div>
+<div class="card"><div class="label">Countries</div><div id="clCountries" class="meters"></div></div>
+</div>
+<h2>Connected now</h2>
+<div class="tools">
+<input id="clQ" placeholder="IP, 82.48.0.0/16, nick, IPv6, hash" size="30">
+<select id="clCountry"><option value="">all countries</option></select>
+<select id="clSoft"><option value="">all software</option></select>
+<select id="clID"><option value="">High + Low ID</option><option value="high">HighID</option><option value="low">LowID</option></select>
+<select id="clSort"><option value="connected">connected time</option><option value="files">files</option><option value="ip">IP</option><option value="nick">nick</option><option value="country">country</option><option value="software">software</option></select>
+<select id="clDir"><option value="desc">descending</option><option value="asc">ascending</option></select>
+<button id="clPrev">‹ prev</button><button id="clNext">next ›</button>
+<span class="desc" id="clCount" style="margin:0"></span>
+</div>
+<p class="desc tabmsg" id="msg-clients"></p>
+<div class="scroll"><table><thead><tr><th>IP</th><th>Country</th><th>Software</th><th>Nick</th><th>Files</th><th>ID</th><th>IPv6</th><th>Connected</th><th></th></tr></thead><tbody id="clRows"></tbody></table></div>
+</div>
+{{end}}
+
+{{define "js-clients"}}
+(function(){
+  var offset = 0, pageSize = 100, timer = 0;
+  function val(id){ return document.getElementById(id).value; }
+  // fillSelect keeps the current choice while the options are replaced.
+  function fillSelect(id, first, rows){
+    var sel = document.getElementById(id), cur = sel.value;
+    sel.replaceChildren(el('option', first));
+    sel.firstChild.value = '';
+    rows.forEach(function(r){
+      var o = el('option', (r.name || 'unknown') + ' (' + num(r.count) + ')'); o.value = r.name; sel.appendChild(o);
+    });
+    sel.value = cur;
+  }
+  async function load(){
+    var sum = await api('/api/clients/summary');
+    meters('clSoftware', sum.software, sum.total, 12);
+    meters('clCountries', sum.countries, sum.total, 20);
+    fillSelect('clCountry', 'all countries', sum.countries);
+    fillSelect('clSoft', 'all software', sum.software);
+    var q = new URLSearchParams({q: val('clQ'), country: val('clCountry'), software: val('clSoft'), id: val('clID'),
+      sort: val('clSort'), dir: val('clDir'), offset: offset, limit: pageSize});
+    var page = await api('/api/clients?' + q);
+    fillTable('clRows', page.rows, function(c){
+      var ip = el('a', c.ip + ':' + c.port); ip.href = '#clients';
+      ip.onclick = function(){ document.getElementById('clQ').value = c.ip; offset = 0; runTab('clients'); };
+      var kick = el('button', 'Disconnect', 'danger');
+      kick.onclick = function(){
+        if(!confirm('Disconnect ' + (c.nick || c.ip) + '? The client can log in again.')){ return; }
+        act('clients', '/api/clients/' + c.hash + '/disconnect', 'POST');
+      };
+      var id = el('span', c.lowId ? 'Low' : 'High', 'badge ' + (c.lowId ? 'warn' : 'ok'));
+      id.title = 'ID ' + c.id + ' · hash ' + c.hash;
+      return [ip, c.country || '—', c.software, c.nick, num(c.files), id,
+        c.ipv6 || (c.ipv6Capable ? 'capable' : '—'), fmtUptime(c.connectedSeconds), kick];
+    }, 'no clients match');
+    setText('clCount', page.matched ? (page.offset + 1) + '–' + (page.offset + page.rows.length) + ' of ' + num(page.matched)
+      + (page.matched !== page.total ? ' (filtered from ' + num(page.total) + ')' : '') : '');
+    document.getElementById('clPrev').disabled = offset === 0;
+    document.getElementById('clNext').disabled = page.offset + page.rows.length >= page.matched;
+  }
+  function again(){ offset = 0; runTab('clients'); }
+  ['clCountry', 'clSoft', 'clID', 'clSort', 'clDir'].forEach(function(id){ document.getElementById(id).onchange = again; });
+  document.getElementById('clQ').oninput = function(){ clearTimeout(timer); timer = setTimeout(again, 300); };
+  document.getElementById('clPrev').onclick = function(){ offset = Math.max(0, offset - pageSize); runTab('clients'); };
+  document.getElementById('clNext').onclick = function(){ offset += pageSize; runTab('clients'); };
+  tabs.clients = {load: load, poll: true};
+})();
+{{end}}

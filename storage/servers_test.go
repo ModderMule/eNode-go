@@ -149,3 +149,27 @@ func TestAddServerDeduplicatesAcrossEngines(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoveServer(t *testing.T) {
+	m := NewMemoryEngine()
+	m.AddServer(Server{IP: "203.0.113.5", Port: 4661})
+	m.AddServer(Server{IP: "203.0.113.6", Port: 4661})
+	held := m.ServersAll()
+
+	removed := m.RemoveServer(Server{IP: "203.0.113.5", Port: 4661})
+	again := m.RemoveServer(Server{IP: "203.0.113.5", Port: 4661})
+	wrongPort := m.RemoveServer(Server{IP: "203.0.113.6", Port: 4662})
+	left := m.ServersAll()
+	t.Logf("input: servers .5:4661 and .6:4661; remove .5:4661 twice, then .6:4662")
+	t.Logf("output: removed=%t again=%t wrongPort=%t left=%+v count=%d", removed, again, wrongPort, left, m.ServersCount())
+	if !removed || again || wrongPort {
+		t.Fatalf("removed=%t again=%t wrongPort=%t, want true false false", removed, again, wrongPort)
+	}
+	if len(left) != 1 || left[0].IP != "203.0.113.6" || m.ServersCount() != 1 {
+		t.Fatalf("left = %+v", left)
+	}
+	// A list handed out earlier is not rewritten under its holder.
+	if len(held) != 2 || held[0].IP != "203.0.113.5" {
+		t.Fatalf("an earlier ServersAll result changed: %+v", held)
+	}
+}

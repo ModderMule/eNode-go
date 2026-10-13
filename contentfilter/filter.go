@@ -64,6 +64,18 @@ type Stats struct {
 	Bans int
 }
 
+// ListInfo is one enabled hash list file as it is on disk and in memory.
+type ListInfo struct {
+	Name     string
+	Path     string
+	Exists   bool
+	Size     int64
+	Modified time.Time
+	// Entries is how many hashes the loaded list holds, which lags the file until
+	// the next reload.
+	Entries int
+}
+
 // verdict is why a file is refused.
 type verdict int
 
@@ -210,6 +222,71 @@ func (f *Filter) Ban(userHash []byte, ip net.IP) {
 	}
 	f.bans.add(userHash, ip, time.Duration(f.cfg.BanMinutes)*time.Minute)
 	f.banCount.Store(int64(f.bans.sweep()))
+}
+
+// BanFor refuses a publisher at login for d, whatever BanMinutes says. It is the
+// operator's own ban, set from the admin surface; one of userHash and ip may be nil.
+func (f *Filter) BanFor(userHash []byte, ip net.IP, d time.Duration) {
+	if f == nil || d <= 0 {
+		return
+	}
+	f.bans.add(userHash, ip, d)
+	f.banCount.Store(int64(f.bans.sweep()))
+}
+
+// BanKey bans what a BanEntry.Key names for d.
+func (f *Filter) BanKey(key string, d time.Duration) error {
+	userHash, ip, err := parseBanKey(key)
+	if err != nil {
+		return err
+	}
+	f.BanFor(userHash, ip, d)
+	return nil
+}
+
+// Bans lists the bans still running, soonest to expire first.
+func (f *Filter) Bans() []BanEntry {
+	if f == nil {
+		return nil
+	}
+	return f.bans.list()
+}
+
+// Unban lifts the ban a BanEntry.Key names and reports whether there was one.
+func (f *Filter) Unban(key string) (bool, error) {
+	if f == nil {
+		return false, nil
+	}
+	userHash, ip, err := parseBanKey(key)
+	if err != nil {
+		return false, err
+	}
+	internal := hashKey(userHash)
+	if internal == "" {
+		internal = ipKey(ip)
+	}
+	removed := f.bans.remove(internal)
+	f.banCount.Store(int64(f.bans.sweep()))
+	return removed, nil
+}
+
+// Lists describes the enabled hash list files for the admin surface.
+func (f *Filter) Lists() []ListInfo {
+	if f == nil {
+		return nil
+	}
+	var out []ListInfo
+	for _, slot := range f.slots() {
+		if slot.path == "" {
+			continue
+		}
+		info := ListInfo{Name: slot.name, Path: slot.path, Entries: slot.list.Load().Len()}
+		if st, err := os.Stat(slot.path); err == nil {
+			info.Exists, info.Size, info.Modified = true, st.Size(), st.ModTime()
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 // Banned reports whether a login from this user hash or address is refused.

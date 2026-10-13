@@ -1,0 +1,58 @@
+{{define "tab-filter"}}
+<div class="tab" id="tab-filter" hidden>
+<h2>Access filters</h2>
+<div class="tools">
+{{if .Features.FilterReload}}<button id="flReload" title="Re-read the IP filter, the hash lists and the country database from disk">Reload filter files</button>{{end}}
+{{if .Features.FilterUpdate}}<button id="flUpdate" title="Fetch the hash lists from the update service now">Update hash lists now</button>{{end}}
+</div>
+<p class="desc tabmsg" id="msg-filter"></p>
+<table id="flAccess"></table>
+<h2>Content filter</h2>
+<table id="flContent"></table>
+<h2>Data files</h2>
+<div class="scroll"><table><thead><tr><th>File</th><th>Entries</th><th>Size</th><th>Modified</th><th>Path</th></tr></thead><tbody id="flFiles"></tbody></table></div>
+</div>
+{{end}}
+
+{{define "js-filter"}}
+(function(){
+  function render(d){
+    var ip = d.ipFilter, geo = d.geoIP;
+    kvTable('flAccess', [
+      ['IP filter', !ip.enabled ? 'off' : num(ip.parsed) + ' ranges parsed · ' + num(ip.blocking) + ' blocking · '
+        + num(ip.merged) + ' after merging · ' + num(ip.skipped) + ' lines skipped'],
+      ['IP filter loaded', ip.enabled && ip.loadedAt ? fmtAge(ip.loadedAt) + ' ago' : '—'],
+      ['Refused by IP filter', num(ip.blocked)],
+      ['Country filter', !geo.enabled ? 'off' : (geo.loaded ? 'database loaded' : 'no database loaded') + ' · '
+        + num(geo.blockedCountries) + ' blocked countries'],
+      ['Refused by country', num(geo.blocked)]
+    ]);
+    var c = d.content;
+    kvTable('flContent', !c ? [['Content filter', 'off']] : [
+      ['Hash lists', num(c.banlistEntries) + ' ban list · ' + num(c.filterEntries) + ' filter list · ' + num(c.whitelistEntries) + ' whitelist'],
+      ['Keywords', num(c.keywords)],
+      ['Refused files', num(c.refusedBanlist) + ' ban list · ' + num(c.refusedFilter) + ' filter list · ' + num(c.refusedKeyword) + ' keyword'],
+      ['Withheld when serving', num(c.withheld)],
+      ['Blocked searches', num(c.blockedQueries)],
+      ['Active bans', num(c.bans)],
+      ['List updates', !c.updateEnabled ? 'off' : !c.lastUpdate ? 'not run yet'
+        : fmtAge(c.lastUpdate) + ' ago' + (c.lastUpdateOK ? '' : ' · failed: ' + c.lastUpdateMessage)]
+    ]);
+    fillTable('flFiles', d.files, dataFileCells, 'no filter reads a file');
+  }
+  var reload = document.getElementById('flReload');
+  if(reload){ reload.onclick = function(){ act('filter', '/api/filter/reload', 'POST', undefined, render, 'filter files reloaded'); }; }
+  var update = document.getElementById('flUpdate');
+  if(update){
+    update.onclick = function(){
+      act('filter', '/api/filter/update', 'POST', undefined, function(rows){
+        tabMsg('filter', rows.map(function(r){
+          return r.name + ': ' + (r.error ? 'failed (' + r.error + ')' : num(r.entries) + ' hashes');
+        }).join(' · '), rows.some(function(r){ return r.error; }));
+        runTab('filter', true);
+      });
+    };
+  }
+  tabs.filter = {load: async function(){ render(await api('/api/filter')); }, poll: true};
+})();
+{{end}}

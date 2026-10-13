@@ -73,3 +73,19 @@ func appendUniqueServer(list []Server, s Server) ([]Server, bool) {
 	}
 	return append(list, s), true
 }
+
+// removeServer drops the entry with s's address (ServerAddrKey) and reports whether
+// there was one. The result is a new slice: a caller may still hold the old one.
+func removeServer(list []Server, s Server) ([]Server, bool) {
+	key := ServerAddrKey(s)
+	out := make([]Server, 0, len(list))
+	removed := false
+	for _, existing := range list {
+		if ServerAddrKey(existing) == key {
+			removed = true
+			continue
+		}
+		out = append(out, existing)
+	}
+	return out, removed
+}

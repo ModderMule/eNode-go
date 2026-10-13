@@ -52,10 +52,10 @@ consequence, on any of the three engines:
 
 | After a restart | Result |
 |---|---|
-| Search for a known filename | **Hits** — names, sizes and counters all survive |
+| Search for a known filename | **Hits** — names, sizes and media tags all survive |
 | Source list for one of those files | **Empty**, until the owning client reconnects and re-offers |
 | `ClientsCount()` / dashboard "clients" | **0** |
-| `File.Sources` counter | The **pre-restart** value, until the first cleanup sweep |
+| Source counts in a search result | Database engines: the **pre-restart** value, until the first cleanup sweep. Memory engine: **0**, until a client re-offers |
 
 So the file carries clients, files and sources — the same three entities the
 database engines store — but the loader installs only the files. Clients and
@@ -66,9 +66,12 @@ Restoring them instead would be actively wrong: the server would hand out source
 for peers that are not connected to it, and LowID ids that the pool has since
 reassigned to somebody else.
 
-**The stale `File.Sources` count is parity, not a bug.** In SQL, `files.sources` is
-a `COUNT(*)` over every source row, online or not, and nothing recomputes it at
-startup either. `CleanupStale` brings both back in line on its first sweep.
+**The source counts differ by engine.** In SQL, `files.sources` is a `COUNT(*)` over
+every source row, online or not, and nothing recomputes it at startup, so a search
+result shows the stale count until `CleanupStale` runs. The memory engine stores no
+counts: it derives them from the live sources on every read, and after a restart there
+are none. The snapshot file still carries the counts as they stood when it was written;
+the loader does not use them.
 
 `servers` is not persisted, because no engine persists it — it is a plain in-RAM
 slice on all three, rebuilt from `servers:` on every boot by `seedServers`.

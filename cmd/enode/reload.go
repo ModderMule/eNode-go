@@ -128,6 +128,14 @@ func (r *reloader) Reload() (admin.ReloadResult, error) {
 	return res, nil
 }
 
+// effective returns the configuration in effect now: the boot config with every
+// reloadable key as the last reload left it.
+func (r *reloader) effective() config.Config {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.applied
+}
+
 // startGossipIO starts the gossip round loop and the server.met timer for the attached
 // handler, binding a separate gossip socket when the obfuscated one cannot be shared.
 // Called at startup and by a reload that turns gossip on.
@@ -302,7 +310,13 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		HardFiles: uint32(cfg.Files.HardLimitOrDefault()),
 
 		RateLimitPerIPPerMinute: cfg.UDP.RateLimitPerIPPerMinuteOrDefault(),
-		ServerSearch:            d.serverSearch,
+		BotDetection: ed2k.BotDetectionConfig{
+			Enabled:               cfg.UDP.BotDetection.EnabledOrDefault(),
+			MinQueriesPerMinute:   cfg.UDP.BotDetection.MinQueriesPerMinute,
+			FloodQueriesPerMinute: cfg.UDP.BotDetection.FloodQueriesPerMinute,
+			MaxIntervalStddevMs:   cfg.UDP.BotDetection.MaxIntervalStddevMs,
+		},
+		ServerSearch: d.serverSearch,
 	}
 	return tcp, udp
 }

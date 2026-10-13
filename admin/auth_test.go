@@ -107,7 +107,8 @@ func TestAdminAccessWithoutCredentials(t *testing.T) {
 		{"GET", "/accounts", remote, 403},
 		{"GET", "/api/accounts", remote, 403},
 		{"GET", "/api/accounts", "", 200},
-		{"GET", "/accounts", "", 200},
+		// The accounts page is a tab now; the old address redirects to it.
+		{"GET", "/accounts", "", 302},
 	}
 	for _, c := range cases {
 		code := do(s, c.method, c.path, c.remote, nil).Code

@@ -91,16 +91,13 @@ func FormatTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
+// handleAccountsPage keeps the old /accounts address working: the page is a tab now.
 func (s *Server) handleAccountsPage(w http.ResponseWriter, r *http.Request) {
 	if s.accounts == nil {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	if err := accountsTemplate.Execute(w, s.staticInfo()); err != nil {
-		logging.Warnf("admin accounts page render error: %v", err)
-	}
+	http.Redirect(w, r, "/#accounts", http.StatusFound)
 }
 
 func (s *Server) handleAccountList(w http.ResponseWriter, r *http.Request) {

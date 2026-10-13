@@ -316,6 +316,7 @@ type Server struct {
 	reload    func() (ReloadResult, error)
 	snapshot  func() LiveStats
 	accounts  AccountAdmin
+	views     Views
 	authLimit *ratelimit.Limiter
 	http      *http.Server
 	ln        net.Listener
@@ -339,6 +340,7 @@ func New(cfg Config, static StaticInfo, snapshot func() LiveStats) *Server {
 	mux.HandleFunc("GET /api/accounts/{id}", s.guard(true, s.handleAccountDetail))
 	mux.HandleFunc("POST /api/accounts/{id}/{action}", s.guard(true, s.handleAccountAction))
 	mux.HandleFunc("POST /api/reload-config", s.guard(true, s.handleReloadConfig))
+	s.registerViews(mux)
 	mux.HandleFunc("/", s.guard(false, s.handleIndex))
 	s.http = &http.Server{
 		Handler: mux,
@@ -382,7 +384,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := pageTemplate.Execute(w, s.staticInfo()); err != nil {
+	if err := pageTemplate.ExecuteTemplate(w, "dashboard.html", s.pageData()); err != nil {
 		logging.Warnf("admin dashboard render error: %v", err)
 	}
 }
@@ -393,4 +395,16 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(s.snapshot()); err != nil {
 		logging.Warnf("admin dashboard stats encode error: %v", err)
 	}
+}
+
+// pageData gathers what the page template renders.
+func (s *Server) pageData() pageData {
+	s.mu.RLock()
+	data := pageData{StaticInfo: s.static, Tabs: s.views != nil}
+	views := s.views
+	s.mu.RUnlock()
+	if views != nil {
+		data.Features = views.Features()
+	}
+	return data
 }

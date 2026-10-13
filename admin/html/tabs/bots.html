@@ -1,0 +1,18 @@
+{{define "tab-bots"}}
+<div class="tab" id="tab-bots" hidden>
+<h2>Bot detection</h2>
+<p class="desc tabmsg" id="msg-bots"></p>
+<div class="scroll"><table><thead><tr><th>Source</th><th>Country</th><th>Queries/min</th><th>Gap stddev</th><th>Reason</th><th>Flagged</th><th>First seen</th><th>Last seen</th></tr></thead><tbody id="boRows"></tbody></table></div>
+<p class="desc">Addresses whose UDP searches and source requests look automated: a very high rate, or a high rate at machine-even intervals. This list only observes. Nothing here is banned or dropped; the per-address UDP rate limit keeps applying. An IPv6 source is its /64.</p>
+</div>
+{{end}}
+
+{{define "js-bots"}}
+tabs.bots = {poll: true, load: async function(){
+  fillTable('boRows', await api('/api/bots'), function(b){
+    return [el('code', b.source), b.country || '—', num(Math.round(b.queriesPerMinute)),
+      Math.round(b.intervalStddevMs) + ' ms', el('span', b.reason, 'badge err'), num(b.detections),
+      fmtAge(b.firstSeen) + ' ago', fmtAge(b.lastSeen) + ' ago'];
+  }, 'no automated querier seen');
+}};
+{{end}}

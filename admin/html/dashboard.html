@@ -9,7 +9,7 @@
 @media (prefers-color-scheme:light){:root{--bg:#f4f6fa;--card:#ffffff;--fg:#1a1f27;--muted:#5c6675;--accent:#1769d1;--ok:#149a63;--warn:#9a6700;--err:#c53030;--line:#e2e6ee}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-.wrap{max-width:920px;margin:0 auto;padding:28px 20px 48px}
+.wrap{max-width:1100px;margin:0 auto;padding:28px 20px 48px}
 header{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 14px;margin-bottom:4px}
 h1{font-size:22px;margin:0}
 .desc{color:var(--muted);margin:2px 0 20px}
@@ -42,6 +42,33 @@ a{color:var(--accent)}
 button{font:inherit;font-size:13px;padding:4px 10px;border-radius:8px;border:1px solid var(--accent);background:var(--card);color:var(--accent);cursor:pointer}
 button:disabled{opacity:.6;cursor:default}
 #msg{min-height:1.5em;margin:0 0 4px}
+nav{display:flex;gap:2px;overflow-x:auto;white-space:nowrap;border-bottom:1px solid var(--line);margin:14px 0 20px}
+nav a{padding:8px 12px;color:var(--muted);text-decoration:none;border-bottom:2px solid transparent;font-size:14px}
+nav a.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab h2:first-child{margin-top:0}
+.tabmsg{min-height:1.5em;margin:0 0 6px}
+th{padding:9px 14px;text-align:left;font-weight:400;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.scroll{overflow-x:auto}
+.tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+input,select{font:inherit;font-size:14px;padding:5px 9px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+button.danger{border-color:var(--err);color:var(--err)}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+.meters{margin-top:8px}
+.meter{display:grid;grid-template-columns:8em 1fr 7em;gap:8px;align-items:center;font-size:13px;margin:4px 0}
+.meter .track{height:8px;border-radius:4px;background:var(--line);overflow:hidden}
+.meter .fill{height:100%;background:var(--accent)}
+.meter .n{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.log{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;max-height:480px;overflow:auto;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word;margin:0}
+.bad{color:var(--err)}
+.warnc{color:var(--warn)}
+.layout{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:16px}
+@media (max-width:860px){.layout{grid-template-columns:1fr}}
+table.pick tbody tr{cursor:pointer}
+table.pick tbody tr:hover{background:rgba(127,127,127,.08)}
+tr.sel{outline:2px solid var(--accent);outline-offset:-2px}
+.s-active{color:var(--ok);font-weight:600}
+.s-pending,.s-expired{color:var(--accent)}
+.s-disabled{color:var(--err);font-weight:600}
 </style>
 </head>
 <body>
@@ -56,6 +83,22 @@ button:disabled{opacity:.6;cursor:default}
 <p class="desc" style="margin-bottom:4px">{{.Description}} · {{.Version}}<span id="update"></span> · storage: {{.Engine}}</p>
 <p class="desc addr">IPv4: {{if .AdvertisedIP}}<b>{{.AdvertisedIP}}</b>{{else}}<span class="off">unresolved</span>{{end}} · IPv6: {{if .AdvertisedIPv6}}<b>{{.AdvertisedIPv6}}</b>{{else if .IPv6}}<span class="off">unresolved</span>{{else}}<span class="off">off</span>{{end}}</p>
 
+{{if .Tabs}}<nav id="tabs">
+<a href="#status" data-tab="status">Status</a>
+<a href="#clients" data-tab="clients">Clients</a>
+<a href="#files" data-tab="files">Files</a>
+<a href="#peers" data-tab="peers">Peers</a>
+<a href="#filter" data-tab="filter">Filter</a>
+{{if .Features.Bans}}<a href="#bans" data-tab="bans">Bans</a>{{end}}
+{{if .Features.Bots}}<a href="#bots" data-tab="bots">Bots</a>{{end}}
+<a href="#blocks" data-tab="blocks">Blocks</a>
+<a href="#health" data-tab="health">Health</a>
+<a href="#runtime" data-tab="runtime">Runtime</a>
+{{if .Accounts}}<a href="#accounts" data-tab="accounts">Accounts</a>{{end}}
+<a href="#config" data-tab="config">Config</a>
+</nav>{{end}}
+
+<div class="tab" id="tab-status">
 <div class="grid">
 <div class="card"><div class="label">Clients online</div><div class="value" id="clients">…</div></div>
 <div class="card"><div class="label">Files</div><div class="value" id="files">…</div><div class="desc" id="filesAdvertised" style="margin:0"></div></div>
@@ -73,7 +116,7 @@ button:disabled{opacity:.6;cursor:default}
 </section>
 
 <section id="metaApiSection" hidden>
-<h2>Meta API{{if .Accounts}} · <a href="/accounts">manage accounts</a>{{end}}</h2>
+<h2>Meta API{{if .Accounts}} · <a href="#accounts">manage accounts</a>{{end}}</h2>
 <table id="metaApiTable"></table>
 </section>
 
@@ -99,6 +142,21 @@ button:disabled{opacity:.6;cursor:default}
 <tr><td class="k">NAT traversal</td><td class="v">{{if .NAT}}<span class="on">on</span>{{else}}<span class="off">off</span>{{end}}</td></tr>
 <tr><td class="k">Server-independent rendezvous</td><td class="v">{{if .ServerIndependent}}<span class="on">on</span>{{else}}<span class="off">off</span>{{end}}</td></tr>
 </table>
+
+</div>
+{{if .Tabs}}
+{{template "tab-clients" .}}
+{{template "tab-files" .}}
+{{template "tab-peers" .}}
+{{template "tab-filter" .}}
+{{if .Features.Bans}}{{template "tab-bans" .}}{{end}}
+{{if .Features.Bots}}{{template "tab-bots" .}}{{end}}
+{{template "tab-blocks" .}}
+{{template "tab-health" .}}
+{{template "tab-runtime" .}}
+{{if .Accounts}}{{template "tab-accounts" .}}{{end}}
+{{template "tab-config" .}}
+{{end}}
 
 <footer>Live figures poll <a href="/stats.json">/stats.json</a> every 5s.</footer>
 </div>
@@ -408,8 +466,134 @@ async function reloadConfig(){
     if(t){ sessionStorage.removeItem('reloadMsg'); reloadMsg(t); }
   }catch(e){}
 })();
+
+// The tabs beyond Status. Each registers how it loads and whether it is polled; only
+// the visible one is refreshed. Everything a tab shows is inserted as text.
+var tabs = {};
+var currentTab = 'status';
+function el(tag, text, cls){ var e = document.createElement(tag); if(text !== undefined){ e.textContent = text; } if(cls){ e.className = cls; } return e; }
+function fmtBytes(n){
+  n = Number(n || 0);
+  var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'], i = 0;
+  while(n >= 1024 && i < units.length - 1){ n /= 1024; i++; }
+  return (i ? n.toFixed(n < 10 ? 2 : 1) : n) + ' ' + units[i];
+}
+function tabMsg(tab, text, bad){
+  var m = document.getElementById('msg-' + tab);
+  if(m){ m.textContent = text || ''; m.style.color = bad ? 'var(--err)' : ''; }
+}
+// api calls a JSON endpoint. A method makes it a write, which the server accepts only
+// with the admin header. The error carries the server's own message.
+async function api(path, method, body){
+  var opt = {cache: 'no-store'};
+  if(method){
+    opt.method = method;
+    opt.headers = {'X-Enode-Admin': '1'};
+    if(body !== undefined){ opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+  }
+  var r = await fetch(path, opt);
+  var text = await r.text();
+  var d = null;
+  try{ d = JSON.parse(text); }catch(e){}
+  if(!r.ok){
+    var err = new Error(r.status === 403 || r.status === 401
+      ? 'This tab needs loopback access, or admin.username and admin.password.'
+      : (d && d.error) || text.trim() || ('HTTP ' + r.status));
+    err.status = r.status;
+    throw err;
+  }
+  return d;
+}
+// fillTable replaces a table body. cells(row) returns one string or node per column.
+function fillTable(id, rows, cells, empty){
+  var tb = document.getElementById(id);
+  if(!tb){ return; }
+  tb.replaceChildren();
+  rows.forEach(function(row){
+    var tr = tb.insertRow();
+    cells(row).forEach(function(c){
+      var td = tr.insertCell();
+      if(c instanceof Node){ td.appendChild(c); }else{ td.textContent = c; }
+    });
+  });
+  if(!rows.length && empty){
+    var td = tb.insertRow().insertCell();
+    td.colSpan = 20; td.className = 'off'; td.textContent = empty;
+  }
+}
+function kvTable(id, rows){
+  var table = document.getElementById(id);
+  if(!table){ return; }
+  table.replaceChildren();
+  rows.forEach(function(r){
+    var tr = table.insertRow();
+    var k = tr.insertCell(); k.className = 'k'; k.textContent = r[0];
+    var v = tr.insertCell(); v.className = 'v'; v.textContent = r[1];
+  });
+}
+// meters draws a distribution as horizontal bars, the largest first.
+function meters(id, rows, total, limit){
+  var box = document.getElementById(id);
+  if(!box){ return; }
+  box.replaceChildren();
+  rows.slice(0, limit).forEach(function(r){
+    var pct = total ? 100 * r.count / total : 0;
+    var line = el('div', undefined, 'meter');
+    line.appendChild(el('span', r.name || 'unknown'));
+    var track = el('div', undefined, 'track'), fill = el('div', undefined, 'fill');
+    fill.style.width = pct + '%'; track.appendChild(fill); line.appendChild(track);
+    line.appendChild(el('span', num(r.count) + ' (' + pct.toFixed(1) + '%)', 'n'));
+    box.appendChild(line);
+  });
+  if(!rows.length){ box.appendChild(el('div', 'no clients', 'off')); }
+}
+function dataFileCells(f){
+  return [f.name, f.entries < 0 ? '—' : num(f.entries), f.exists ? fmtBytes(f.size) : 'missing',
+    f.exists && f.modified ? fmtAge(f.modified) + ' ago' : '—', el('code', f.path)];
+}
+// runTab loads a tab and shows what went wrong in its message line. quiet keeps a
+// message that an action just put there.
+async function runTab(name, quiet){
+  var t = tabs[name];
+  if(!t){ return; }
+  try{ await t.load(); if(!quiet){ tabMsg(name, ''); } }
+  catch(e){ tabMsg(name, e.message, true); }
+}
+// act sends a write and then either hands the answer to done or reloads the tab.
+async function act(tab, path, method, body, done, okText){
+  try{
+    var d = await api(path, method, body);
+    tabMsg(tab, okText || 'done');
+    if(done){ done(d); }else{ runTab(tab, true); }
+  }catch(e){ tabMsg(tab, e.message, true); }
+}
+function showTab(name){
+  if(!document.getElementById('tab-' + name)){ name = 'status'; }
+  currentTab = name;
+  document.querySelectorAll('.tab').forEach(function(t){ t.hidden = t.id !== 'tab-' + name; });
+  document.querySelectorAll('#tabs a').forEach(function(a){ a.className = a.dataset.tab === name ? 'active' : ''; });
+  runTab(name);
+}
+{{if .Tabs}}
+{{template "js-clients" .}}
+{{template "js-files" .}}
+{{template "js-peers" .}}
+{{template "js-filter" .}}
+{{if .Features.Bans}}{{template "js-bans" .}}{{end}}
+{{if .Features.Bots}}{{template "js-bots" .}}{{end}}
+{{template "js-blocks" .}}
+{{template "js-health" .}}
+{{template "js-runtime" .}}
+{{if .Accounts}}{{template "js-accounts" .}}{{end}}
+{{template "js-config" .}}
+{{end}}
+window.addEventListener('hashchange', function(){ showTab(location.hash.slice(1) || 'status'); });
+showTab(location.hash.slice(1) || 'status');
 refresh();
-setInterval(refresh, 5000);
+setInterval(function(){
+  refresh();
+  if(tabs[currentTab] && tabs[currentTab].poll){ runTab(currentTab, true); }
+}, 5000);
 </script>
 </body>
 </html>

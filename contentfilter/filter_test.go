@@ -2,6 +2,8 @@ package contentfilter
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -266,5 +268,91 @@ func TestBadKeywordIsAnError(t *testing.T) {
 	t.Logf("input: keywords %q output: err=%v", "ok|--", err)
 	if err == nil {
 		t.Fatal("a keyword with no letter or digit must be refused")
+	}
+}
+
+func TestBansAreListedAndLifted(t *testing.T) {
+	f := newTestFilter(t)
+	now := time.Unix(1_700_000_000, 0)
+	f.bans.now = func() time.Time { return now }
+
+	user := testHash(0x55)
+	f.BanFor(user, nil, time.Hour)
+	if err := f.BanKey("ip:203.0.113.9", 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.BanKey("ip:2001:db8:1:2::77", 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	bans := f.Bans()
+	t.Logf("input: ban hash %x for 1h, 203.0.113.9 for 30m, 2001:db8:1:2::77 for 10m", user)
+	t.Logf("output: bans=%+v count=%d", bans, f.Stats().Bans)
+	want := []string{"ip:2001:db8:1:2::/64", "ip:203.0.113.9", "hash:" + hex.EncodeToString(user)}
+	if len(bans) != 3 || f.Stats().Bans != 3 {
+		t.Fatalf("bans = %+v", bans)
+	}
+	for i, key := range want {
+		if bans[i].Key != key {
+			t.Errorf("ban %d = %q, want %q (soonest to expire first)", i, bans[i].Key, key)
+		}
+	}
+	if !f.Banned(nil, net.ParseIP("2001:db8:1:2:ffff::1")) || !f.Banned(user, nil) {
+		t.Fatal("a listed ban does not refuse its login")
+	}
+
+	removed, err := f.Unban("ip:2001:db8:1:2::/64")
+	again, _ := f.Unban("ip:2001:db8:1:2::/64")
+	_, badErr := f.Unban("nonsense")
+	t.Logf("input: unban the /64 twice, then a malformed key")
+	t.Logf("output: removed=%t err=%v again=%t badKey=%v remaining=%d", removed, err, again, badErr, f.Stats().Bans)
+	if !removed || err != nil || again {
+		t.Fatalf("unban: removed=%t err=%v again=%t", removed, err, again)
+	}
+	if !errors.Is(badErr, ErrBanKey) {
+		t.Fatalf("a malformed key answered %v, want ErrBanKey", badErr)
+	}
+	if f.Banned(nil, net.ParseIP("2001:db8:1:2::77")) || f.Stats().Bans != 2 {
+		t.Fatal("the lifted ban still applies")
+	}
+
+	// An expired ban is no longer listed.
+	now = now.Add(45 * time.Minute)
+	left := f.Bans()
+	t.Logf("input: 45 minutes later output: bans=%+v", left)
+	if len(left) != 1 || left[0].Key != want[2] {
+		t.Fatalf("after 45m bans = %+v, want only the hash", left)
+	}
+}
+
+func TestBanKeyRejectsMalformedKeys(t *testing.T) {
+	f := newTestFilter(t)
+	for _, key := range []string{"", "203.0.113.9", "ip:", "ip:not-an-address", "hash:abcd", "hash:zz112233445566778899aabbccddeeff", "user:x"} {
+		err := f.BanKey(key, time.Minute)
+		t.Logf("input: %q output: %v", key, err)
+		if !errors.Is(err, ErrBanKey) {
+			t.Errorf("BanKey(%q) = %v, want ErrBanKey", key, err)
+		}
+	}
+	if n := len(f.Bans()); n != 0 {
+		t.Fatalf("a malformed key banned something: %d bans", n)
+	}
+}
+
+func TestListsDescribeTheEnabledFiles(t *testing.T) {
+	f := newTestFilter(t)
+	lists := f.Lists()
+	t.Logf("input: ban list (2 hashes), filter list (2), whitelist (2)")
+	t.Logf("output: %+v", lists)
+	if len(lists) != 3 {
+		t.Fatalf("lists = %d, want 3", len(lists))
+	}
+	for _, l := range lists {
+		if !l.Exists || l.Entries != 2 || l.Size == 0 || l.Modified.IsZero() {
+			t.Errorf("list %+v is not described", l)
+		}
+	}
+	var none *Filter
+	if none.Lists() != nil || none.Bans() != nil {
+		t.Fatal("a nil filter must list nothing")
 	}
 }

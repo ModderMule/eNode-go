@@ -53,7 +53,7 @@ func TestOfferFilesDropsZeroSizeRecords(t *testing.T) {
 		names = append(names, f.Name)
 	}
 	t.Logf("output: FilesCount=%d stored=%v offeredFiles=%d closed=%d",
-		engine.FilesCount(), names, client.offeredFiles, conn.closed)
+		engine.FilesCount(), names, offeredCount(client), conn.closed)
 
 	if engine.FilesCount() != 1 {
 		t.Fatalf("only the sized record may be stored: FilesCount=%d want 1 (stored %v)",
@@ -64,9 +64,9 @@ func TestOfferFilesDropsZeroSizeRecords(t *testing.T) {
 	}
 	// Charged against neither publish limit: a client is not penalised for a record
 	// the server refuses.
-	if client.offeredFiles != 1 {
+	if offeredCount(client) != 1 {
 		t.Fatalf("a refused record must not burn the publish quota: offeredFiles=%d want 1",
-			client.offeredFiles)
+			offeredCount(client))
 	}
 	if conn.closed != 0 {
 		t.Fatalf("a zero-size record is dropped, not a drop-worthy offence: closed=%d want 0",

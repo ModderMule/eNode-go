@@ -145,13 +145,13 @@ func TestSearchMergesMetaRowsAfterEd2kFiles(t *testing.T) {
 	t.Logf("input: 3 eD2K files + 2 meta rows, search \"paging-\"")
 	for i, r := range records {
 		t.Logf("output: record %d name=%v hash=%x id=%d port=%d kind=%v catalog=%v",
-			i, r.Tags["name"], r.Hash, r.ID, r.Port, r.Tags[tagName(TagMetaKind)], r.Tags[tagName(TagMetaID)])
+			i, r.tagMap()["name"], r.Hash, r.ID, r.Port, r.tagMap()[tagName(TagMetaKind)], r.tagMap()[tagName(TagMetaID)])
 	}
 	if len(records) != 5 {
 		t.Fatalf("got %d records, want 3 eD2K + 2 meta", len(records))
 	}
 	for i := 0; i < 3; i++ {
-		if _, isMeta := records[i].Tags[tagName(TagMetaKind)]; isMeta {
+		if _, isMeta := records[i].tagMap()[tagName(TagMetaKind)]; isMeta {
 			t.Fatalf("record %d is a meta row; eD2K files must come first", i)
 		}
 	}
@@ -162,8 +162,8 @@ func TestSearchMergesMetaRowsAfterEd2kFiles(t *testing.T) {
 		if r.ID != 0 || r.Port != 0 {
 			t.Fatalf("meta record %d carries source %d:%d, want 0:0 (no source)", i, r.ID, r.Port)
 		}
-		if r.Tags[tagName(TagMetaKind)] != uint64(1) {
-			t.Fatalf("meta record %d FT_META_KIND = %v, want 1", i, r.Tags[tagName(TagMetaKind)])
+		if r.tagMap()[tagName(TagMetaKind)] != uint64(1) {
+			t.Fatalf("meta record %d FT_META_KIND = %v, want 1", i, r.tagMap()[tagName(TagMetaKind)])
 		}
 	}
 	if fake.callCount() != 1 || fake.calls[0] {
@@ -190,7 +190,7 @@ func TestSearchPagingIncludesMetaRows(t *testing.T) {
 	if int(count1+count2) != ed2kFiles+metaFiles || more1 != 1 || more2 != 0 {
 		t.Fatalf("pages %d+%d (more %d/%d), want %d rows over two pages", count1, count2, more1, more2, ed2kFiles+metaFiles)
 	}
-	if _, isMeta := records2[len(records2)-1].Tags[tagName(TagMetaKind)]; !isMeta {
+	if _, isMeta := records2[len(records2)-1].tagMap()[tagName(TagMetaKind)]; !isMeta {
 		t.Fatal("the last row of the last page should be a meta row")
 	}
 }
@@ -356,7 +356,7 @@ func TestAddFileEmitsMetaTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	got := records[0].Tags
+	got := records[0].tagMap()
 	t.Logf("input: %+v", *row.Meta)
 	t.Logf("output: tags=%v", got)
 
@@ -396,16 +396,16 @@ func TestAddFileWritesSizeZero(t *testing.T) {
 	}
 	got := records[0]
 	t.Logf("input: %q size=%d meta=%+v", row.Name, row.Size, *row.Meta)
-	t.Logf("output: size=%d tags=%v", got.Size, got.Tags)
+	t.Logf("output: size=%d tags=%v", got.Size, got.tagMap())
 
 	if got.Size != 0 {
 		t.Fatalf("size %d, want 0", got.Size)
 	}
-	if _, has := got.Tags[tagName(TagMetaTotalSize)]; has {
+	if _, has := got.tagMap()[tagName(TagMetaTotalSize)]; has {
 		t.Fatal("a total size was written for a release that has none")
 	}
-	if got.Tags[tagName(TagMetaKind)] != uint64(5) {
-		t.Fatalf("kind %v, want the web kind", got.Tags[tagName(TagMetaKind)])
+	if got.tagMap()[tagName(TagMetaKind)] != uint64(5) {
+		t.Fatalf("kind %v, want the web kind", got.tagMap()[tagName(TagMetaKind)])
 	}
 }
 
@@ -429,13 +429,13 @@ func TestOfferFilesRejectsMetaHash(t *testing.T) {
 	dispatchIncomingTCPPacket(t, client, offer)
 	sources := engine.GetSources(meta, 4096)
 	t.Logf("output: FilesCount=%d sourcesOfMetaHash=%d offeredFiles=%d closed=%d",
-		engine.FilesCount(), len(sources), client.offeredFiles, conn.closed)
+		engine.FilesCount(), len(sources), offeredCount(client), conn.closed)
 
 	if engine.FilesCount() != 1 || len(sources) != 0 {
 		t.Fatalf("the meta-hash record was stored: FilesCount=%d sources=%d", engine.FilesCount(), len(sources))
 	}
-	if client.offeredFiles != 1 || conn.closed != 0 {
-		t.Fatalf("offeredFiles=%d closed=%d, want 1/0: a refused record costs nothing", client.offeredFiles, conn.closed)
+	if offeredCount(client) != 1 || conn.closed != 0 {
+		t.Fatalf("offeredFiles=%d closed=%d, want 1/0: a refused record costs nothing", offeredCount(client), conn.closed)
 	}
 }
 
@@ -565,7 +565,7 @@ func countGlobSearchRecords(t *testing.T, datagram []byte) int {
 // pseudo-hash row (0x60-0x6c).
 func hasMetaTags(r FileRecord) bool {
 	for code := TagMetaKind; code <= TagMetaMagnet; code++ {
-		if _, ok := r.Tags[tagName(code)]; ok {
+		if _, ok := r.tagMap()[tagName(code)]; ok {
 			return true
 		}
 	}
@@ -583,30 +583,30 @@ func TestKadRowIsAnOrdinaryFileWithOneTag(t *testing.T) {
 	records := decodeSearchRecords(t, conn.takeWritten())
 	t.Logf("input: 1 eD2K file + 1 Kad row, search \"paging-\"")
 	for i, r := range records {
-		t.Logf("output: record %d hash=%x id=%d port=%d tags=%v", i, r.Hash, r.ID, r.Port, r.Tags)
+		t.Logf("output: record %d hash=%x id=%d port=%d tags=%v", i, r.Hash, r.ID, r.Port, r.tagMap())
 	}
 	if len(records) != 2 {
 		t.Fatalf("got %d records, want the eD2K file and the Kad row", len(records))
 	}
 	local, kad := records[0], records[1]
-	if _, marked := local.Tags[tagName(TagMetaNetwork)]; marked {
+	if _, marked := local.tagMap()[tagName(TagMetaNetwork)]; marked {
 		t.Fatal("the server's own file carries FT_META_NETWORK")
 	}
 	want := kadRows(1)[0]
 	if !bytes.Equal(kad.Hash, want.Hash) || metahash.IsMetaHash(kad.Hash) {
 		t.Fatalf("Kad row hash %x, want the file's own MD4 %x", kad.Hash, want.Hash)
 	}
-	if kad.Tags[tagName(TagMetaNetwork)] != uint64(MetaNetworkKad) {
-		t.Fatalf("FT_META_NETWORK = %v, want %d", kad.Tags[tagName(TagMetaNetwork)], MetaNetworkKad)
+	if kad.tagMap()[tagName(TagMetaNetwork)] != uint64(MetaNetworkKad) {
+		t.Fatalf("FT_META_NETWORK = %v, want %d", kad.tagMap()[tagName(TagMetaNetwork)], MetaNetworkKad)
 	}
 	if hasMetaTags(kad) {
-		t.Fatalf("the Kad row carries FT_META_* tags of a pseudo-hash row: %v", kad.Tags)
+		t.Fatalf("the Kad row carries FT_META_* tags of a pseudo-hash row: %v", kad.tagMap())
 	}
 	if kad.ID != 0 || kad.Port != 0 {
 		t.Fatalf("Kad row source %d:%d, want 0:0", kad.ID, kad.Port)
 	}
-	if kad.Tags["name"] != want.Name || kad.Tags[tagName(TagSources)] != uint64(want.Sources) {
-		t.Fatalf("Kad row name=%v sources=%v, want %q / %d", kad.Tags["name"], kad.Tags[tagName(TagSources)], want.Name, want.Sources)
+	if kad.tagMap()["name"] != want.Name || kad.tagMap()[tagName(TagSources)] != uint64(want.Sources) {
+		t.Fatalf("Kad row name=%v sources=%v, want %q / %d", kad.tagMap()["name"], kad.tagMap()[tagName(TagSources)], want.Name, want.Sources)
 	}
 }
 
@@ -634,17 +634,17 @@ func TestLocalFileTakesPrecedenceOverKadRow(t *testing.T) {
 			}
 			found++
 			t.Logf("output: %s record name=%v sources=%v id=%#x port=%d network=%v",
-				label, r.Tags["name"], r.Tags[tagName(TagSources)], r.ID, r.Port, r.Tags[tagName(TagMetaNetwork)])
-			if want := fmt.Sprintf("paging-%04d.bin", local); r.Tags["name"] != want {
-				t.Fatalf("%s: name %v, want the local %q", label, r.Tags["name"], want)
+				label, r.tagMap()["name"], r.tagMap()[tagName(TagSources)], r.ID, r.Port, r.tagMap()[tagName(TagMetaNetwork)])
+			if want := fmt.Sprintf("paging-%04d.bin", local); r.tagMap()["name"] != want {
+				t.Fatalf("%s: name %v, want the local %q", label, r.tagMap()["name"], want)
 			}
-			if r.Tags[tagName(TagSources)] != uint64(1) {
-				t.Fatalf("%s: sources %v, want the server's own count 1", label, r.Tags[tagName(TagSources)])
+			if r.tagMap()[tagName(TagSources)] != uint64(1) {
+				t.Fatalf("%s: sources %v, want the server's own count 1", label, r.tagMap()[tagName(TagSources)])
 			}
 			if r.ID != 0x0100007F || r.Port != 4662 {
 				t.Fatalf("%s: source %#x:%d, want the sharing client's", label, r.ID, r.Port)
 			}
-			if _, marked := r.Tags[tagName(TagMetaNetwork)]; marked {
+			if _, marked := r.tagMap()[tagName(TagMetaNetwork)]; marked {
 				t.Fatalf("%s: the local file carries FT_META_NETWORK", label)
 			}
 		}
@@ -700,10 +700,10 @@ func TestLocalFileTakesPrecedenceOverKadRow(t *testing.T) {
 		udp = append(udp, recs...)
 	}
 	t.Logf("input: UDP search \"food\", local food.bin and a Kad row with its hash; output: %d records", len(udp))
-	if len(udp) != 1 || udp[0].Tags["name"] != "food.bin" {
+	if len(udp) != 1 || udp[0].tagMap()["name"] != "food.bin" {
 		t.Fatalf("udp answer %v, want the local food.bin alone", udp)
 	}
-	if _, marked := udp[0].Tags[tagName(TagMetaNetwork)]; marked {
+	if _, marked := udp[0].tagMap()[tagName(TagMetaNetwork)]; marked {
 		t.Fatal("udp: the local file carries FT_META_NETWORK")
 	}
 }
@@ -723,7 +723,7 @@ func TestKadRowsReachEveryClient(t *testing.T) {
 	records := decodeSearchRecords(t, conn.takeWritten())
 	kad, pseudo := 0, 0
 	for _, r := range records {
-		if _, ok := r.Tags[tagName(TagMetaNetwork)]; ok {
+		if _, ok := r.tagMap()[tagName(TagMetaNetwork)]; ok {
 			kad++
 		}
 		if hasMetaTags(r) {

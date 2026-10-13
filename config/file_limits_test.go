@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -77,25 +76,25 @@ func TestFileLimitsExplicitValuesWin(t *testing.T) {
 	}
 }
 
-// TestFileLimitsRejectHardBelowSoft pins the fail-fast validation. The two are checked
-// in hard-then-soft order per record, so a hard limit under the soft one kills the
-// session before the warning could ever be sent — the operator has written a soft limit
-// that can never fire, and nothing would tell them.
-func TestFileLimitsRejectHardBelowSoft(t *testing.T) {
-	_, err := Load(writeFileLimitsConfig(t, "files:\n  softLimit: 1000\n  hardLimit: 500\n"))
-	t.Logf("input: files.softLimit = 1000, files.hardLimit = 500")
+// TestFileLimitsAllowHardBelowSoft: the hard limit is on the records of one packet and
+// the soft limit on the files of a session, so one does not bound the other. This was
+// a load error while both counted a session's records.
+func TestFileLimitsAllowHardBelowSoft(t *testing.T) {
+	cfg, err := Load(writeFileLimitsConfig(t, "files:\n  softLimit: 10000\n  hardLimit: 4000\n"))
+	t.Logf("input: files.softLimit = 10000, files.hardLimit = 4000")
 	t.Logf("output: err=%v", err)
 
-	if err == nil {
-		t.Fatal("hardLimit below softLimit loaded successfully, want a load error")
+	if err != nil {
+		t.Fatalf("a per-packet limit below the per-session one should load: %v", err)
 	}
-	if !strings.Contains(err.Error(), "files.hardLimit") || !strings.Contains(err.Error(), "files.softLimit") {
-		t.Errorf("error %q names neither key; an operator needs to know which to change", err)
+	if cfg.Files.SoftLimitOrDefault() != 10000 || cfg.Files.HardLimitOrDefault() != 4000 {
+		t.Errorf("limits = %d/%d, want 10000/4000",
+			cfg.Files.SoftLimitOrDefault(), cfg.Files.HardLimitOrDefault())
 	}
 }
 
-// TestFileLimitsAllowHardEqualToSoft: degenerate but coherent — "warn at N, drop at N"
-// collapses to dropping at N, because the hard check runs first. Legal, not an error.
+// TestFileLimitsAllowHardEqualToSoft: equal values are two unrelated limits that happen
+// to share a number.
 func TestFileLimitsAllowHardEqualToSoft(t *testing.T) {
 	cfg, err := Load(writeFileLimitsConfig(t, "files:\n  softLimit: 750\n  hardLimit: 750\n"))
 	t.Logf("input: files.softLimit = files.hardLimit = 750")

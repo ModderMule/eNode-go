@@ -67,10 +67,12 @@ type TCPRuntimeConfig struct {
 	NatRendezvousPort uint16
 	// MetaAPI is advertised in OP_SERVERIDENT when the Meta API is on.
 	MetaAPI MetaAPIAdvert
-	// SoftFileLimit and HardFileLimit cap how many files one session may publish.
-	// Past the soft limit the excess is ignored and the client is warned once; past
-	// the hard limit it is told why and disconnected. Zero means unlimited. Counted
-	// per session in handleOfferFiles, and advertised through UDPRuntimeConfig so a
+	// SoftFileLimit and HardFileLimit cap what one session may publish. The soft
+	// limit is how many distinct files it may source at once: a new file past it is
+	// ignored and the client is warned once. The hard limit is how many records one
+	// OP_OFFERFILES may declare: a packet that reaches it gets the client told why
+	// and disconnected. Zero means unlimited. Both are enforced in
+	// handleOfferFiles, and advertised through UDPRuntimeConfig so that a
 	// client is held to the numbers it was given. See docs/server-client-communication.md.
 	SoftFileLimit int
 	HardFileLimit int
@@ -104,6 +106,8 @@ type UDPRuntimeConfig struct {
 	// RateLimitPerIPPerMinute caps UDP searches and source requests per address
 	// (IPv6 per /64); 0 is off. See config udp.rateLimitPerIPPerMinute.
 	RateLimitPerIPPerMinute int
+	// BotDetection is udp.botDetection: which UDP queriers are listed as bots.
+	BotDetection BotDetectionConfig
 	// ServerSearch is advertised in the extended OP_SERVER_DESC_RES when
 	// serverSearch.mode is "gossip". An empty URL omits the tags.
 	ServerSearch ServerSearchAdvert
@@ -159,6 +163,10 @@ type ServerRuntime struct {
 	boost atomic.Pointer[StatsBoost]
 	// usersCeilingWarned is when warnUsersOverCeiling last logged, in Unix nanoseconds.
 	usersCeilingWarned atomic.Int64
+	// bots lists the UDP queriers that look automated; it observes and refuses nothing.
+	bots *botDetector
+	// blocks counts what the runtime itself refused, for the admin surface.
+	blocks blockCounters
 }
 
 // ipv6Enabled reports whether IPv6 is on at all (dual-stack accept, CT_MOD_IP_V6
@@ -178,6 +186,7 @@ func NewServerRuntime(tcp TCPRuntimeConfig, udp UDPRuntimeConfig, store storage.
 		counters: newCounterCache(store, tcp.CounterCacheTTL),
 		// A disabled limiter allows everything, so a zero config costs one branch.
 		udpLimiter: ratelimit.New(udp.RateLimitPerIPPerMinute),
+		bots:       newBotDetector(),
 	}
 	s.tcpCfg.Store(&tcp)
 	s.udpCfg.Store(&udp)
@@ -255,6 +264,7 @@ func (s *ServerRuntime) TCPHandler(enableCrypt bool) func(net.Conn) {
 		if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
 			key := addressKey(NormalizeIP(tcpAddr.IP))
 			if !s.acquireConnSlot(key) {
+				s.blocks.connLimit.Add(1)
 				logging.Debugf("tcp connection refused remote=%s reason=per-ip-limit(%d)", tcpAddr.IP, s.tcp().MaxConnsPerIP)
 				_ = conn.Close()
 				return
@@ -628,6 +638,12 @@ type tcpClient struct {
 	info     storage.ClientInfo
 	logged   bool
 	hasLowID bool
+	// nick and software are what the client called itself at login, kept for the
+	// admin client list only. Written once under infoMu.
+	nick     string
+	software string
+	// connectedAt is when the connection was accepted; set at construction.
+	connectedAt time.Time
 
 	// pendingResults holds the tail of a search whose first page has been sent, so
 	// OP_QUERY_MORE_RESULT can deliver the rest. Only this connection's own goroutine
@@ -647,20 +663,18 @@ type tcpClient struct {
 	// goroutine touches it, so it needs no lock.
 	headerBuf []byte
 
-	// offeredFiles counts the OP_OFFERFILES *records* this session has sent, across
-	// every packet; softLimitWarned keeps the soft-limit warning to one per session,
-	// and hardLimitHit makes the handler inert once the session has been dropped.
+	// softLimitWarned keeps the soft-limit warning to one per session, and
+	// hardLimitHit makes the offer handler inert once the session has been dropped.
 	// Like pendingResults these are touched only by this connection's own goroutine —
 	// offers arrive on this socket and nowhere else — so they need no lock.
 	//
-	// Records rather than distinct hashes, which is a real divergence from eserver and
-	// a deliberate one: a per-session hash set at a hard limit of 20,000 is ~320 KiB,
-	// which across the session counts docs/memory-footprint.md §4.2 plans for costs more
-	// than the index it would be protecting. For a conforming client the two counts are
-	// identical anyway — both eMule trees send each shared file exactly once per server
-	// session, gated on the GetPublishedED2K flag that is cleared only on connect and
-	// disconnect (srchybrid/SharedFileList.cpp:817,848, ServerConnect.cpp:227-228,292).
-	offeredFiles    int
+	// There is no count of offered files here. The soft limit is on the distinct
+	// files the session sources now, and storage already keeps that set per session
+	// to release its sources on disconnect, so handleOfferFiles asks storage
+	// (Engine.OfferedCount, Engine.HasOffered) instead of keeping a second copy. A
+	// counter of records sent, which this used to be, charged a re-offered file again
+	// each time: a client republishing a finished download, or one whose share list
+	// was reloaded, ran into the limit with far fewer files than it allows.
 	softLimitWarned bool
 	hardLimitHit    bool
 	// banlistHits holds the distinct ban-list files this session has offered, and
@@ -746,6 +760,7 @@ func newTCPClient(server *ServerRuntime, conn net.Conn, enableCrypt bool) *tcpCl
 	}
 	enableTCPKeepAlive(conn, defaultTCPKeepAlivePeriod)
 	return &tcpClient{
+		connectedAt: time.Now(),
 		server:      server,
 		conn:        conn,
 		packet:      packet,
@@ -946,6 +961,7 @@ func (c *tcpClient) processPacketData(data []byte) {
 
 	c.handlePacket(c.packet)
 	c.packet.Status = PsNew
+	c.packet.release()
 	if c.packet.HasExcess && len(c.packet.Excess) > 0 {
 		excess := append([]byte(nil), c.packet.Excess...)
 		c.packet.HasExcess = false
@@ -1054,6 +1070,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// allocated for the session. Told why, or the client just sees a server that
 	// drops it and retries forever.
 	if c.server.Content != nil && c.server.Content.Banned(req.Hash, c.peerIP) {
+		c.server.blocks.bannedLogins.Add(1)
 		logging.Warnf("login rejected remote=%s hash=%x: banned by the content filter", c.remoteHost, req.Hash)
 		c.sendServerMessage(msgBanned)
 		c.closeWithReason("content-ban")
@@ -1115,6 +1132,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// re-publish them per source. Absent tag → 0, i.e. no crypt advertised.
 	c.info.CryptOptions = cryptOptionsFromLoginFlags(loginFlags(req.Tags))
 	c.metaCapable = loginFlags(req.Tags)&SrvCapMetaSearch != 0
+	c.nick, c.software = loginNick(req.Tags), loginSoftware(req.Tags)
 	c.info.IPv6 = v6Bytes
 	// ipv6Capable is read cross-goroutine by the callback path (isV6Capable), so it
 	// is written under infoMu here rather than as a bare field assignment.
@@ -1411,21 +1429,26 @@ const (
 	msgHardFileLimit = "ERROR : This server accepts at most %d shares per client. Closing the connection."
 )
 
-// handleOfferFiles registers the files a client publishes, enforcing the per-session
-// soft and hard caps (files.softLimit / files.hardLimit, 0 = unlimited).
+// handleOfferFiles registers the files a client publishes, enforcing files.hardLimit
+// and files.softLimit (0 = unlimited).
 //
-// The count is cumulative across every OP_OFFERFILES of the session, which is the only
-// way either cap can bite: eMule sends at most min(softLimit, 200) files per packet and
-// republishes the remainder every 60 s until its whole share is registered
-// (srchybrid/SharedFileList.cpp:831-834,1229-1236), so no single frame ever reveals how
-// much a client is publishing. Lugdunum's "disconnects him (before receiving the whole
-// list)" describes the old single-huge-frame clients; against a modern client the same
-// rule has to be applied across packets.
+// The hard limit is on one packet: an OP_OFFERFILES declaring that many records or
+// more is refused whole and the session closed, which is what Lugdunum's "disconnects
+// him (before receiving the whole list)" describes. Both client trees send at most
+// 200 records per packet (srchybrid/SharedFileList.cpp:832-834,
+// eMuleQt/src/core/files/SharedFileList.cpp:54,880), so only a broken or abusive
+// client reaches it. It used to be the session's running total, which dropped an honest
+// client sharing more than the limit every time it had republished that many,
+// only for it to reconnect and start again.
 //
-// Note what the hard limit does and does not save: by the time this runs, GetFileList has
-// already parsed the whole payload and the zlib layer has already inflated it. What is
-// saved is the storage writes for the rest of this packet, and every packet the client
-// would have gone on to send.
+// The soft limit is on the distinct files the session sources at once, which storage
+// knows (Engine.OfferedCount). A file the session already sources is always accepted
+// and costs nothing, so a re-offer keeps its name and complete flag current; a new
+// file past the limit is skipped and the client warned once.
+//
+// The declared count is read before anything else, so a refused packet is neither
+// parsed nor stored. A zlib packet has been inflated by then; MaxTCPPacketSize and the
+// inflate cap bound that.
 func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	// closeWithReason only closes the socket; it does not stop dispatch of bytes that
 	// already arrived. processPacketData recurses into packet.Excess after handlePacket
@@ -1435,15 +1458,26 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	if c.hardLimitHit || c.banlistDropped {
 		return
 	}
+	softLimit, hardLimit := c.server.tcp().SoftFileLimit, c.server.tcp().HardFileLimit
+	if declared, ok := declaredFileCount(data); ok && hardLimit > 0 && declared >= uint32(hardLimit) {
+		id := c.snapshotInfo().ID
+		c.hardLimitHit = true
+		c.server.blocks.hardLimit.Add(1)
+		logging.Warnf("offer files hard limit remote=%s id=%d declared=%d hardLimit=%d: closing",
+			c.remoteHost, id, declared, hardLimit)
+		c.sendServerMessage(fmt.Sprintf(msgHardFileLimit, hardLimit))
+		c.closeWithReason("file-hard-limit")
+		return
+	}
 	// data.Bytes() is the whole payload regardless of the read pointer (buffer.go:90-92),
-	// and GetFileList below only advances that pointer: every write to b.data lives in a
-	// Put* method, none of which it can reach, and each value it returns is copied out —
-	// the hash through an explicit append, strings through GetString. So the payload is
-	// still intact on the error path below. This used to snapshot the frame into a copy
-	// first, duplicating the whole of every offer packet to serve one length and a
-	// 96-byte hex preview.
+	// and GetOfferedFiles below only advances that pointer: every write to b.data lives
+	// in a Put* method, none of which it can reach, and each value it returns is copied
+	// out — the hash through an explicit append, strings through GetString. So the
+	// payload is still intact on the error path below. This used to snapshot the frame
+	// into a copy first, duplicating the whole of every offer packet to serve one length
+	// and a 96-byte hex preview.
 	payloadLen := len(data.Bytes())
-	records, err := data.GetFileList()
+	records, err := data.GetOfferedFiles()
 	if err != nil {
 		previewHex := hex.EncodeToString(data.Bytes()[:min(payloadLen, 96)])
 		logging.Warnf("offer files parse failed remote=%s payloadLen=%d previewHex=%s err=%v",
@@ -1451,15 +1485,14 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 		return
 	}
 	const maxOfferFilesLog = 50
-	logging.Debugf("offer files remote=%s count=%d payloadLen=%d offeredSoFar=%d",
-		c.remoteHost, len(records), payloadLen, c.offeredFiles)
+	logging.Debugf("offer files remote=%s count=%d payloadLen=%d",
+		c.remoteHost, len(records), payloadLen)
 	if len(records) > maxOfferFilesLog {
 		logging.Debugf("offer files remote=%s truncated=%d", c.remoteHost, len(records)-maxOfferFilesLog)
 	}
 	// One snapshot for the whole batch: the identity cannot change mid-batch,
 	// and taking it per file would lock once per offered file.
 	info := c.snapshotInfo()
-	softLimit, hardLimit := c.server.tcp().SoftFileLimit, c.server.tcp().HardFileLimit
 	var zeroSize, metaHashes, contentRefused int
 	// The whole packet is written in one AddFiles call. Storing record by record cost
 	// a fixed set of round-trips per file, so a database outside the host turned one
@@ -1469,14 +1502,14 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	for i, record := range records {
 		if record.Size == 0 {
 			// No size tag at all, or one that did not decode as an integer
-			// (buffer.go:637-644). Such a record is unusable and permanent: a client
+			// (FileRecord.SetTag). Such a record is unusable and permanent: a client
 			// only ever asks for sources by (hash, size), and eMule discards a
 			// zero-size search result outright (srchybrid/SearchList.cpp:355), so it
 			// would sit in the index for good — searchable, never servable. eserver
 			// has policed published sizes since 17.3 (kiten-20071012.txt:189-190).
 			//
-			// Dropped before the counter so it is charged against neither publish
-			// limit: a client is not penalised for a record the server refuses.
+			// Dropped before the soft limit, so it is not charged against it: a
+			// client is not penalised for a record the server refuses.
 			zeroSize++
 			continue
 		}
@@ -1485,14 +1518,14 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 			// offer one — a pseudo-hash download never obtains a hashset, so it never
 			// enters the shared-file map — but a modified client can, and the row it
 			// advertises would then acquire "sources" that serve nothing. Dropped before
-			// the counter, like a zero size.
+			// the soft limit, like a zero size.
 			metaHashes++
 			continue
 		}
 		if refused, sanction := c.server.checkOffer(record.Hash, recordName(record)); refused {
 			// On a hash list or holding a filtered keyword. Dropped before the
-			// counter like the two cases above, so a refused file is charged against
-			// neither publish limit.
+			// soft limit like the two cases above, so a refused file is not charged
+			// against it.
 			contentRefused++
 			if sanction && c.noteBanlistHit(record.Hash) {
 				// Nothing of this packet is stored: the session is going away and
@@ -1507,48 +1540,25 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 			}
 			continue
 		}
-		c.offeredFiles++
-		if hardLimit > 0 && c.offeredFiles > hardLimit {
-			// Flushed before the drop: the records up to the cap were accepted, and
-			// were stored when this loop wrote each one as it went.
-			if len(batch) > 0 {
-				c.addFiles(batch, info)
-			}
-			c.hardLimitHit = true
-			logging.Warnf("offer files hard limit remote=%s id=%d offered=%d hardLimit=%d: closing",
-				c.remoteHost, info.ID, c.offeredFiles, hardLimit)
-			c.sendServerMessage(fmt.Sprintf(msgHardFileLimit, hardLimit))
-			c.closeWithReason("file-hard-limit")
-			return
-		}
-		if softLimit > 0 && c.offeredFiles > softLimit {
-			// continue, never break: the counter has to keep climbing or a client
-			// past the soft limit could never reach the hard one, and would sit
-			// there republishing a packet we fully parse and discard every 60 s.
-			if !c.softLimitWarned {
-				c.softLimitWarned = true
-				logging.Warnf("offer files soft limit remote=%s id=%d offered=%d softLimit=%d: ignoring excess",
-					c.remoteHost, info.ID, c.offeredFiles, softLimit)
-				c.sendServerMessage(fmt.Sprintf(msgSoftFileLimit, softLimit))
-			}
-			continue
-		}
 		file := fileFromRecord(record, info)
 		batch = append(batch, file)
-		// Logged as the record joins the batch rather than in a second pass, so the
-		// line means "accepted for storage" — a second pass would also log what the
-		// soft limit just dropped, and would be skipped entirely by the hard-limit
-		// return above.
 		if i < maxOfferFilesLog {
 			logging.Debugf("offer file remote=%s idx=%d hash=%x name=%q size=%d type=%q sourceID=%d sourcePort=%d",
 				c.remoteHost, i, record.Hash, file.Name, file.Size, file.Type, info.ID, info.Port)
 		}
 	}
+	batch, skipped := c.withinSoftLimit(batch, info, softLimit)
+	if skipped > 0 && !c.softLimitWarned {
+		c.softLimitWarned = true
+		logging.Warnf("offer files soft limit remote=%s id=%d softLimit=%d skipped=%d of=%d: ignoring excess",
+			c.remoteHost, info.ID, softLimit, skipped, len(records))
+		c.sendServerMessage(fmt.Sprintf(msgSoftFileLimit, softLimit))
+	}
 	if len(batch) > 0 {
 		c.addFiles(batch, info)
 	}
-	// One line for the packet, never one per record: a client at the hard limit can
-	// put 20,000 records in a single offer.
+	// One line for the packet, never one per record: a packet may hold as many
+	// records as the hard limit lets through.
 	if contentRefused > 0 {
 		logging.Warnf("offer files content filter remote=%s id=%d refused=%d of=%d",
 			c.remoteHost, info.ID, contentRefused, len(records))
@@ -2209,8 +2219,7 @@ func formatFileRecordsForLog(files []FileRecord, limit int) string {
 	}
 	parts := make([]string, 0, n+1)
 	for i := 0; i < n; i++ {
-		name, _ := files[i].Tags["name"].(string)
-		parts = append(parts, fmt.Sprintf("{hash=%x,id=%d,port=%d,size=%d,name=%q}", files[i].Hash, files[i].ID, files[i].Port, files[i].Size, name))
+		parts = append(parts, fmt.Sprintf("{hash=%x,id=%d,port=%d,size=%d,name=%q}", files[i].Hash, files[i].ID, files[i].Port, files[i].Size, files[i].Name))
 	}
 	if len(files) > n {
 		parts = append(parts, fmt.Sprintf("...+%d", len(files)-n))
@@ -2748,21 +2757,6 @@ func udpSend(conn UDPReplyConn, remote *net.UDPAddr, data []byte, crypt *UDPCryp
 }
 
 func fileFromRecord(record FileRecord, info storage.ClientInfo) storage.File {
-	file := storage.File{
-		Hash:       record.Hash,
-		Size:       record.Size,
-		SourceID:   info.ID,
-		SourcePort: info.Port,
-	}
-	if v, ok := record.Tags["name"].(string); ok {
-		file.Name = v
-	}
-	if v, ok := record.Tags["type"].(string); ok {
-		file.Type = v
-	}
-	if v, ok := tagUint32(record.Tags, "sources"); ok {
-		file.Sources = v
-	}
 	// storage.File.Completed is a per-source boolean on the way in (the engines
 	// store it as sources.complete) and a per-file aggregate on the way out
 	// (recomputed as SUM(complete)). Only the (id, port) sentinel says anything
@@ -2774,26 +2768,23 @@ func fileFromRecord(record FileRecord, info storage.ClientInfo) storage.File {
 	// had its own completeness discarded. Letting a client-supplied count reach
 	// a boolean column also let it inflate files.completed for a file it does
 	// not have, so the tag is advisory and deliberately ignored.
+	file := storage.File{
+		Hash:       record.Hash,
+		Name:       record.Name,
+		Size:       record.Size,
+		Type:       record.Type,
+		Sources:    record.Sources,
+		Title:      record.Title,
+		Artist:     record.Artist,
+		Album:      record.Album,
+		Runtime:    record.Length,
+		Bitrate:    record.Bitrate,
+		Codec:      record.Codec,
+		SourceID:   info.ID,
+		SourcePort: info.Port,
+	}
 	if record.Complete {
 		file.Completed = 1
-	}
-	if v, ok := record.Tags["title"].(string); ok {
-		file.Title = v
-	}
-	if v, ok := record.Tags["artist"].(string); ok {
-		file.Artist = v
-	}
-	if v, ok := record.Tags["album"].(string); ok {
-		file.Album = v
-	}
-	if v, ok := tagUint32(record.Tags, "length"); ok {
-		file.Runtime = v
-	}
-	if v, ok := tagUint32(record.Tags, "bitrate"); ok {
-		file.Bitrate = v
-	}
-	if v, ok := record.Tags["codec"].(string); ok {
-		file.Codec = v
 	}
 	if file.Type == "" && file.Name != "" {
 		file.Type = GetFileType(file.Name)
@@ -2813,7 +2804,16 @@ func (s *ServerRuntime) udpOpcodeEnabled(enabled bool, code uint8, remote *net.U
 	// Every opcode gated here answers one small datagram with many: the source
 	// address is spoofable, so without a per-address budget the server is an
 	// amplifier aimed wherever an attacker likes.
-	if !s.udpLimiter.Allow(addressKey(remote.IP)) {
+	//
+	// The bot detector sees the query first: the limiter would otherwise hide every
+	// rate above its own budget from it.
+	key := addressKey(remote.IP)
+	if s.bots.record(key, s.udp().BotDetection) {
+		s.blocks.bots.Add(1)
+		logging.Warnf("udp querier looks automated source=%s (observed only, not blocked)", key)
+	}
+	if !s.udpLimiter.Allow(key) {
+		s.blocks.rateLimited.Add(1)
 		logging.Debugf("udp opcode rate limited remote=%s opcode=0x%x", remote, code)
 		return false
 	}
@@ -3135,6 +3135,59 @@ func (c *tcpClient) addFiles(batch []storage.File, info storage.ClientInfo) {
 		return
 	}
 	c.server.Storage.AddFiles(batch, info)
+}
+
+// declaredFileCount peeks at the record count an OP_OFFERFILES payload starts with,
+// without moving the read pointer.
+func declaredFileCount(data *Buffer) (uint32, bool) {
+	rest := data.Bytes()[data.Pos():]
+	if len(rest) < 4 {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint32(rest), true
+}
+
+// withinSoftLimit returns the files of one offer the soft limit lets through, in
+// order, and how many it held back. A file the session already sources always
+// passes; a new one passes while the session sources fewer than softLimit files.
+//
+// The common case is one cheap call: while everything offered fits under the limit
+// even if all of it is new, nothing has to be told apart. Only a packet that could
+// cross the limit asks storage which of its files are already there.
+func (c *tcpClient) withinSoftLimit(batch []storage.File, info storage.ClientInfo, softLimit int) ([]storage.File, int) {
+	if softLimit <= 0 || len(batch) == 0 {
+		return batch, 0
+	}
+	have := c.server.Storage.OfferedCount(info)
+	if have+len(batch) <= softLimit {
+		return batch, 0
+	}
+	known := c.server.Storage.HasOffered(info, batch)
+	type fileKey struct {
+		hash [16]byte
+		size uint64
+	}
+	// A file listed twice in one packet is one file: its first record takes the
+	// budget and the rest ride on it.
+	admitted := make(map[fileKey]struct{})
+	room := softLimit - have
+	kept, skipped := batch[:0], 0
+	for i, file := range batch {
+		key := fileKey{size: file.Size}
+		copy(key.hash[:], file.Hash)
+		_, again := admitted[key]
+		switch {
+		case again || (i < len(known) && known[i]):
+		case room > 0:
+			room--
+			admitted[key] = struct{}{}
+		default:
+			skipped++
+			continue
+		}
+		kept = append(kept, file)
+	}
+	return kept, skipped
 }
 
 // capUDPSearchResults trims a UDP search answer to maxUDPSearchResults files.

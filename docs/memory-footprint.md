@@ -9,7 +9,9 @@ from a second process — not from `unsafe.Sizeof` arithmetic. Where a figure is
 arithmetic or an assumption, it says so.
 
 Measurement environment: Go 1.25.3, `darwin/arm64`, default `GOGC`, no `GOMEMLIMIT`,
-2026-07-30.
+2026-07-30. The file and source costs were measured again on 2026-10-13, after the
+memory engine's records were made compact (§2.2); the session costs are from the first
+date.
 
 ---
 
@@ -17,13 +19,16 @@ Measurement environment: Go 1.25.3, `darwin/arm64`, default `GOGC`, no `GOMEMLIM
 
 | Quantity | Cost |
 |---|---|
-| One distinct file (1 source, ~60-char name) | **~560 B** live heap |
-| Each additional source of a file | **~130 B** |
+| One distinct file (1 source, ~60-char name), name index included | **~360 B** live heap |
+| Each additional source of a file | **~55 B** |
 | One logged-in session (socket + goroutines + state) | **~16 KiB** RSS |
 | Idle server, nothing connected | **12 MiB** RSS |
 
-Which collapses to: **~0.6 GB per million files, ~160 MB per 10,000 online users**,
+Which collapses to: **~0.36 GB per million files, ~160 MB per 10,000 online users**,
 plus 50% headroom for the garbage collector (§6).
+
+Until 2026-10-13 a file cost ~560 B without the name index and ~730 B with it, and an
+additional source ~130–275 B.
 
 The file cost applies to the `memory` storage engine only. With `mysql` or
 `mongodb` the index lives in the database and the Go process pays only the session
@@ -40,66 +45,89 @@ for how that cap is configured and enforced.
 
 ### 2.1 Files — `MemoryEngine`
 
-Raw process samples, memory engine preloaded with N files, one source each,
-`The.Great.Release.%08d.S01E04.1080p.WEB-DL.x264-GROUP.mkv` names (62 chars), no
-audio/video metadata tags:
+In-package measurement, 2026-10-13: 200,000 files published through `Connect` and
+`AddFile` into a fresh engine, heap delta after a forced GC. Names are
+`The.Great.Release.%08d.S01E04.1080p.WEB-DL.x264-GROUP.mkv` (59 chars), each with a
+number of its own, so the name index gains one word per file. "Before" is the same
+measurement on the engine as it was until that day; both columns include the name
+index.
+
+| Shape | Before | Now |
+|---|---:|---:|
+| 59-char names, 1 source | 726 B | **358 B** |
+| 94-char names, 1 source | 757 B | 390 B |
+| 59-char names, 3 sources | 1187 B | 469 B |
+| 59-char names, 10 sources | 3201 B | 842 B |
+| 59-char names, 1 source, title + artist + codec + length + bitrate | 773 B | 502 B |
+| 59-char names, 1 source, client with an IPv6 address | 741 B | 358 B |
+
+So: **+32 B per 35 characters of filename**, and **~55 B per extra source** (a 24-byte
+source record, the slack of a list that doubles as it grows, and for the second source
+the entry that holds the list). An IPv6 address costs a file nothing: it is stored once
+per session. Media tags cost the record that holds them (96 B) plus their strings.
+
+On the `tests/membench` workload, whose names share words the way real file names do
+more than these do, a file costs 313–330 B from 100,000 to 5 million files, and the
+share of one large client 222 B a file (see
+[`memory-engine-benchmark.md`](memory-engine-benchmark.md)).
+
+Raw whole-process samples from 2026-07-30, before the name index and before the
+compact records, kept for the method: memory engine preloaded with N files, one source
+each, 62-char names, no audio/video metadata tags.
 
 | Files | Live heap | Heap sys | RSS | Live bytes/file |
 |---:|---:|---:|---:|---:|
 | 0 | 0.6 MiB | 3.8 MiB | 11.8 MiB | — |
-| 1,000,000 | 518.7 MiB | 599.2 MiB | 621.6 MiB | **544 B** |
-| 5,000,000 | 2708.9 MiB | 2739.2 MiB | 2814.6 MiB | **568 B** |
+| 1,000,000 | 518.7 MiB | 599.2 MiB | 621.6 MiB | 544 B |
+| 5,000,000 | 2708.9 MiB | 2739.2 MiB | 2814.6 MiB | 568 B |
 
 The per-file cost is not perfectly flat because Go maps double their bucket arrays:
-where you land in that cycle moves the figure between roughly 540 and 600 B. **560 B
-is the planning number.**
-
-A tighter in-package measurement (200k files, heap delta around a fresh engine) isolates
-the variables:
-
-| Shape | Bytes/file |
-|---|---:|
-| 200k files, 59-char names, 1 source | 450 B |
-| 200k files, 94-char names, 1 source | 482 B |
-| 200k files, 59-char names, 3 sources | 690 B |
-| 200k files, 59-char names, 10 sources | 1794 B |
-
-So: **+32 B per 35 characters of filename**, and **~120–150 B per extra source** (the
-spread is slice-growth slack — `m.sources[k]` doubles its capacity, so a file with 10
-sources carries 6 unused 72-byte slots).
-
-The whole-process figure runs ~100 B/file above the in-package one because the process
-carries the map-growth headroom of a much larger table, slightly longer names, and a
-distinct 16-byte user hash allocation per source record.
+where you land in that cycle moves the figure by a few percent. The whole-process probe
+has not been run again; the in-package figures above are the current ones.
 
 ### 2.2 Where the bytes go
 
-Struct sizes are exact (`unsafe.Sizeof`); the rest is the allocator's rounding and Go's
-map overhead:
+One file with one source and a 59-char name. Struct sizes are exact (`unsafe.Sizeof`,
+pinned by `TestMemoryRecordSizes`); the rest is the allocator's rounding and Go's map
+overhead:
 
 | Component | Bytes |
 |---|---:|
-| `storage.File` value in `m.files` | 152 |
-| `Name` string data (60 chars → 64-byte size class) | 64 |
-| `File.Hash` backing array | 16 |
-| `m.files` key string data (the 16-byte hash + 8-byte size) | 24 |
-| `m.sources` key string data (the 16-byte hash) | 16 |
-| `[]Source` header + 1-element backing array (`Source` = 72 B) | 96 |
-| `Source.UserHash` backing array | 16 |
-| Go map bucket/control overhead across two maps | ~180 |
-| **Total** | **~568** |
+| `memRec`, the file's record in the slab: name header, hash as `[16]byte`, size, the first source inline (24 B), a pointer to the media tags, the link to another size of the same hash, type and flags | 80 |
+| Name string data (59 chars → 64-byte size class) | 64 |
+| `files` map entry: 16-byte hash → 4-byte record id, with control bytes and growth slack | ~35 |
+| The session's list of what it offered: one 4-byte record id | 4–8 |
+| Name index: the words of the name, their posting entries and trigram lists | ~170 |
+| **Total** | **~358** |
 
-Two maps are keyed off the file hash — `files` by hash *and* size (24 bytes, see
-`storage.fileMapKey`), `sources` by the hash alone (16) — which is where a surprising
-amount of it goes: about a third of the per-file cost is map machinery and duplicated keys
-rather than payload. The measured figures above predate the 8-byte widening of the `files`
-key, so add ~1.5% to them; keying `sources` on the pair as well would have cost a further
-~55 B/file for the hash index the size-less UDP source query needs, which is why it does
-not.
+The name index share is this workload's: every name brings a word no other name has.
+Where the words are already known it is the posting entries alone, about 4 B per word
+of the name.
 
-Audio/video metadata (`Title`, `Artist`, `Album`, `Codec`) costs the length of those
-strings plus allocator rounding when a client supplies them — order 100 B/file. *Not
-measured*; the samples above were built without metadata tags.
+What a file no longer pays for, against the 726 B of the table above:
+
+- **One map instead of two.** `files` was keyed by hash *and* size and `sources` by the
+  hash, each with its own copy of the key as a string. Now `files` maps the bare hash
+  to the first record with it, and a second size of the same hash, which is rare, hangs
+  off that record. The size-less source query of legacy UDP is still one lookup.
+- **No source list for one source.** The first source of a hash lives in the record.
+  A second map, `more`, holds the lists of the files that have more.
+- **24 B per source instead of 88 B plus two allocations.** A source keeps the ed2k id,
+  the port, the size it offered, its crypt options and two flags, and a pointer to its
+  session's identity. The user hash and the IPv6 address are stored once per session
+  instead of being copied into every source.
+- **Media tags behind a pointer.** `Title`, `Artist`, `Album`, `Codec`, `Runtime`,
+  `Bitrate` and `Meta` took 96 B of every record. A file with none of them now pays 8.
+  The type is one byte: it can only be one of six values.
+- **4 B per offered file instead of ~40.** A session's offered files were a set keyed by
+  the 16-byte hash. They are a list of record ids; whether a session already sources a
+  file is read off the file's sources.
+- **No stored counts.** `Sources`, `Completed` and the result source of a record were
+  recomputed on every read already; they are no longer stored.
+
+`storage.File` and `storage.Source` are what callers see and what the snapshot file
+holds, unchanged. The layout above is private to the memory engine; the MySQL and
+MongoDB engines are not affected.
 
 ### 2.3 Sessions
 
@@ -118,72 +146,54 @@ separate driver process, so the numbers below are the server side only:
   Go's 2 KiB minimum.
 - **4 KiB read buffer** — `buf := make([]byte, 4096)` in `tcpClient.run`, one per
   connection for the life of the session.
+- **No packet payload between packets.** A packet's payload is gathered in a buffer of
+  its own (`Packet.recv`, sized by what arrives) and dropped once the packet has been
+  handled (`Packet.release`). Until 2026-10-13 the session kept the last payload until
+  the header of its next packet arrived: for a client that had just published, a
+  200-file offer of about 16 KiB, for the rest of the minute or of the session. The
+  figures in the table were taken with login packets only, so they do not show it.
 - **~3.4 KiB** of `tcpClient`, `Packet`, `net.TCPConn`/`netFD`/pollDesc, the
   `sessionsByHash` and `LowIDs` entries, and the engine's client record.
-- The engine's client record on its own is **214 B** (measured: 200k `Connect` calls,
-  `ClientInfo` = 96 B plus hash and two map entries) — i.e. 1.3% of a session. Almost
-  all of the per-user cost is the connection, not the bookkeeping.
+- The engine's client record on its own is **307 B** (measured 2026-10-13: 44,000
+  `Connect` calls; `ClientInfo` = 96 B, the identity its sources share, and two map
+  entries) — i.e. 2% of a session. Almost all of the per-user cost is the connection,
+  not the bookkeeping. On top of it a session's list of offered files costs 4–8 B per
+  file.
 
-### 2.4 Why the Rust ed2k-server needs half as much
+### 2.4 Against the Rust ed2k-server
 
 On the `tests/membench` workload at 5 M files (see
 [`memory-engine-benchmark.md`](memory-engine-benchmark.md)), the Rust ed2k-server holds
-**276 B/file** live and peaks at 1.57 GB RSS. The memory engine holds 568 B/file without
-the name index and 703 B/file with it, and peaks at 3.69 and 4.47 GB. The source analysis
-is in `ed2k-server-rust-comparison.local.md` §7.5.
+**276 B/file** live and peaks at 1.57 GB RSS. The memory engine holds **327 B/file** and
+peaks at 2.62 GB. Until 2026-10-13 it held 703 B/file and peaked at 4.42 GB; that gap,
+and where it came from, is analysed in `ed2k-server-rust-comparison.local.md` §7.5.
 
-The struct sizes below are exact (`unsafe.Sizeof`, 2026-10-01). Both structs have grown
-since §2.2: `File` from 152 to 160 B and `Source` from 72 to 88 B (crypt options, IPv6,
-store id). The other rows are arithmetic and add up to the measured 568 B.
+What the engine took from that comparison is in §2.2: a record of 80 B against Rust's
+~80 B `FileRecord`, the hash inside the record, the first source inline, a 24 B source,
+the client's address and hash in one place per user, and 4-byte file ids in the
+per-user list.
 
-| eNode-go, per file with one source | Bytes | ed2k-server (Rust) |
-|---|---:|---|
-| `storage.File` | 160 | one `FileRecord` of ~80 B in total |
-| ↳ of which media and meta fields this workload leaves empty (`Type`, `Title`, `Artist`, `Album`, `Codec`, `Runtime`, `Bitrate`, `Meta`) | ~96 | not stored |
-| `File.Hash` backing array (plus a 24 B slice header inside `File`) | 16 | `[u8; 16]` inside the record |
-| `Name`, one copy per file | ~64 | interned `Arc<str>`: the 30% repeated names cost nothing extra |
-| `files` map: 24 B key string, slot and growth slack | ~60 | none: the slab is the hash table (intrusive chains) |
-| `sources` map: 16 B key string, slot holding a 24 B slice header | ~65 | sources inline in the record (`SmallVec<[Source; 1]>`) |
-| `[]Source` backing array (`Source` = 88 B, 96 B size class) | 96 | a 24 B `Source` |
-| `Source.UserHash`, copied for every source | 16 | IPv6 and user details in a side table per user |
-| `offered` set entry | ~25 | none |
+What still differs:
 
-Three things make up the difference:
+- **The name index.** Rust keys its keyword index by a 32-bit FNV hash of each word and
+  never stores the word text. About every 10 minutes it packs its posting lists into
+  delta-varint blobs of 1–2 bytes per id. The memory engine stores every distinct word,
+  the byte-trigram lists that substring matching needs, and uncompressed 4-byte ids.
+  Rust matches whole words only, so it cannot answer a query for part of a word.
+- **The file table.** Rust's slab is its hash table (intrusive chains). The engine has
+  a Go map from hash to record id beside its slab, about 35 B a file.
+- **Media tags.** Rust stores none. The engine stores them for the files that have
+  them.
+- **The garbage collector.** With the default `GOGC=100` the heap may grow to twice its
+  live size before a collection (§6), so the peak sits well above live heap: 2.62 GB
+  against 1.56 GB. jemalloc frees memory straight away, so Rust peaks at 1.57 GB on
+  1.32 GB live.
 
-- **Fields this workload does not use.** The engine stores every media field inline in
-  each `File`, and crypt options and an IPv6 slice in each `Source`. Rust stores no media
-  fields and keeps IPv6 in a side table. That is about 150 B/file here. This part of the
-  gap is a difference in scope: a real server needs most of those fields.
-- **Separate small allocations.** Every Go slice is a 24 B header plus its own
-  allocation, rounded up to a size class. A `[]byte` hash costs 40 B where `[16]byte`
-  costs 16.
-- **Three hash tables instead of one.** `files`, `sources` and `offered` each carry key
-  strings and growth slack. Rust has a single table built into the slab.
-
-The name index widens the gap by about 135 B/file. Rust keys its keyword index by a
-32-bit FNV hash of each word and never stores the word text. About every 10 minutes it
-packs its posting lists into delta-varint blobs of 1–2 bytes per id. The memory engine
-stores every distinct word, the byte-trigram lists that substring matching needs, and
-uncompressed 4-byte ids. Rust matches whole words only, so it cannot answer a query for
-part of a word.
-
-The RSS gap is wider than the heap gap because of the garbage collector. With the
-default `GOGC=100` the heap may grow to twice its live size before a collection (§6), so
-the peak sits well above live heap: 4.47 GB against 3.35 GB. jemalloc frees memory
-straight away, so Rust peaks at 1.57 GB on 1.32 GB live.
-
-Ways to close the gap, largest saving first. Each is an estimate, not measured:
-
-1. Move the media fields and `Meta` into a record allocated only for files that carry
-   them: about −90 B/file.
-2. Store the file hash and the user hash as `[16]byte` and put IPv6 behind a pointer:
-   about −80 B/file.
-3. Keep the first source inside the file record and drop the `sources` map key for
-   single-source files: about −60 B/file.
-4. Intern repeated names.
-
-`File` and `Source` are shared with the MySQL and MongoDB engines, so items 1 and 2
-should be a layout private to the memory engine rather than changes to those types.
+Not adopted: **interning repeated names.** The Rust server built it and removed it
+again. On its live index of 1.17 M files 2.8% of the names were duplicates, which saved
+1.8 MB, while the table that found them cost 29 MB
+(`ed2k-server/src/state/name_interner.rs`). The 30% repeated names of the benchmark
+workload are far more than a server sees.
 
 ---
 
@@ -191,30 +201,31 @@ should be a layout private to the memory engine rather than changes to those typ
 
 Source: `eMuleQt/data/config/server.met`, ten servers, user and file counts as each
 advertises them (2024 snapshot). Assumes **1.2 sources per distinct file** — plausible
-for eD2K, where most files have one source and a small popular tail has many. The index
-column scales linearly in that assumption: 1.0 → −5%, 2.0 → +33%.
+for eD2K, where most files have one source and a small popular tail has many — which is
+369 B per file at the costs of §1. The index column scales in that assumption:
+1.0 → −3%, 2.0 → +12%.
 
 | Server | Users | Files | Index | Sessions | Total |
 |---|---:|---:|---:|---:|---:|
-| eMule Sunrise | 46,516 | 27,397,581 | 15.0 GiB | 727 MiB | **15.7 GiB** |
-| eMule Security | 24,361 | 12,181,708 | 6.6 GiB | 381 MiB | **7.0 GiB** |
-| !! Sharing-Devils No.2 !! | 6,405 | 3,385,106 | 1.8 GiB | 100 MiB | **1.9 GiB** |
-| !! Sharing-Devils No.1 !! | 5,791 | 2,890,296 | 1.6 GiB | 91 MiB | **1.7 GiB** |
-| GrupoTS Server | 5,210 | 2,179,848 | 1.2 GiB | 81 MiB | **1.3 GiB** |
-| !! Sharing-Devils No.3 !! | 4,166 | 1,827,294 | 997 MiB | 65 MiB | **1.1 GiB** |
-| Astra-3 | 3,635 | 1,687,637 | 943 MiB | 57 MiB | **1000 MiB** |
-| Akteon Server | 2,930 | 1,158,962 | 648 MiB | 46 MiB | **694 MiB** |
-| Astra-5 | 2,205 | 1,053,791 | 589 MiB | 35 MiB | **623 MiB** |
-| Akteon Server No2 | 1,371 | 828,206 | 463 MiB | 21 MiB | **484 MiB** |
-| **All ten combined** | **102,590** | **54,590,429** | **29.8 GiB** | **1.6 GiB** | **31.4 GiB** |
+| eMule Sunrise | 46,516 | 27,397,581 | 9.4 GiB | 727 MiB | **10.1 GiB** |
+| eMule Security | 24,361 | 12,181,708 | 4.2 GiB | 381 MiB | **4.6 GiB** |
+| !! Sharing-Devils No.2 !! | 6,405 | 3,385,106 | 1.2 GiB | 100 MiB | **1.3 GiB** |
+| !! Sharing-Devils No.1 !! | 5,791 | 2,890,296 | 1.0 GiB | 91 MiB | **1.1 GiB** |
+| GrupoTS Server | 5,210 | 2,179,848 | 767 MiB | 81 MiB | **848 MiB** |
+| !! Sharing-Devils No.3 !! | 4,166 | 1,827,294 | 643 MiB | 65 MiB | **708 MiB** |
+| Astra-3 | 3,635 | 1,687,637 | 594 MiB | 57 MiB | **651 MiB** |
+| Akteon Server | 2,930 | 1,158,962 | 408 MiB | 46 MiB | **454 MiB** |
+| Astra-5 | 2,205 | 1,053,791 | 371 MiB | 35 MiB | **406 MiB** |
+| Akteon Server No2 | 1,371 | 828,206 | 291 MiB | 21 MiB | **312 MiB** |
+| **All ten combined** | **102,590** | **54,590,429** | **18.8 GiB** | **1.6 GiB** | **20.4 GiB** |
 
 Two observations worth keeping in mind:
 
-- **The index dominates by 20:1.** Users are cheap; files are not. Sunrise's 46k
-  concurrent users cost less RAM than 1.3M of its 27.4M files.
+- **The index dominates by 12:1.** Users are cheap; files are not. Sunrise's 46k
+  concurrent users cost less RAM than 2.1M of its 27.4M files.
 - **The whole public network fits in one machine.** All ten servers' indices together
-  are 31 GiB — a single 64 GB host could hold the entire advertised eD2K index with the
-  memory engine.
+  are 20 GiB — a single 48 GB host could hold the entire advertised eD2K index with the
+  memory engine, GC headroom included.
 
 ---
 
@@ -244,18 +255,18 @@ gives a server over it.
   — mirroring `srchybrid/SharedFileList.cpp:832-834`. So one `OP_OFFERFILES` never carries
   more than 200 files and the server's soft limit can only lower that; the client
   republishes the remainder every 60 s (`kEd2kRepublishSecs`) until its whole share is
-  registered. The soft limit therefore bounds a client's **cumulative** share on the
+  registered. The soft limit therefore bounds a client's **whole** share on the
   server, not the size of one packet.
 - **What eNode-go does with it.** Both limits are configured under `files:` — `softLimit`
   defaulting to 10000, `hardLimit` to 20000, the values that used to be hardcoded in
-  `BuildGlobServStatResPacket` — and both are now enforced. `handleOfferFiles`
-  (`ed2k/server_runtime.go`) counts the records each session publishes, ignores everything
-  past the soft limit after one `WARNING` message, and disconnects past the hard one. The
-  advertised numbers and the enforced numbers come from the same two config keys, so a
-  client is never told one thing and held to another. The count is cumulative across the
-  session's packets, which is the only way either cap can bite given the 200-file packet
-  ceiling above; it counts records rather than distinct hashes, which is the same number
-  for a conforming client. See
+  `BuildGlobServStatResPacket` — and both are enforced. `handleOfferFiles`
+  (`ed2k/server_runtime.go`) holds the soft limit against the distinct files a session
+  sources: a new file past it is ignored, after one `WARNING` message, and a file the
+  session already sources can always be offered again. The hard limit is on one packet:
+  an `OP_OFFERFILES` declaring that many records or more gets the client disconnected,
+  which a client keeping to the 200-file packet ceiling above never is. The advertised
+  numbers and the enforced numbers come from the same two config keys, so a client is
+  never told one thing and held to another. See
   [`server-client-communication.md`](server-client-communication.md#per-client-publish-limits).
 
   This is what makes the middle row below a real ceiling rather than a projection. The
@@ -264,54 +275,50 @@ gives a server over it.
 
 ### 4.2 Scenarios at 44,000 online users
 
-Arithmetic from the measured unit costs in §2 — 560 B per distinct file, 130 B per extra
+Arithmetic from the measured unit costs in §2 — 358 B per distinct file, 55 B per extra
 source, 15.8 KiB per session, 12 MiB base — assuming **1.2 sources per distinct file**, the
 same dedup assumption as §3.
-
-The unit costs were re-measured for this section on 2026-09-13 under Go 1.27.0,
-`darwin/arm64` (the §2 figures are Go 1.25.3), in-package, heap delta around a fresh
-`MemoryEngine`: 300k files with 62-char names and one source each came to **483 B/file**, a
-second source on 20% of them added **80 B per extra source** (499 B/file overall at 1.2
-sources), and 44,000 `Connect()` calls cost **239 B per client record**. All within the
-map-growth spread of §2.1, so the planning numbers stand.
 
 Sessions are noise at this scale: 44,000 × 15.8 KiB = **0.66 GiB** regardless of the index.
 
 | Files published per user | Offer records | Distinct files | Index | Total live | Provision (×1.5) |
 |---|---:|---:|---:|---:|---:|
-| **589** — the network average¹ | 25.9 M | 21.6 M | 11.8 GiB | 12.5 GiB | **~19 GiB** |
-| **10,000** — every user at the default soft limit | 440 M | 366.7 M | 200.1 GiB | 200.8 GiB | **~300 GiB** |
-| **100,000** — every user at a raised `files.softLimit` | 4.4 B | 3.67 B | 2001 GiB | 2002 GiB | **~3 TiB** |
+| **589** — the network average¹ | 25.9 M | 21.6 M | 7.4 GiB | 8.1 GiB | **~12 GiB** |
+| **10,000** — every user at the default soft limit | 440 M | 366.7 M | 126.0 GiB | 126.7 GiB | **~190 GiB** |
+| **100,000** — every user at a raised `files.softLimit` | 4.4 B | 3.67 B | 1260 GiB | 1261 GiB | **~1.9 TiB** |
 
 ¹ 27,397,581 files / 46,516 users, from eMule Sunrise in the §3 table — the largest server
 on the public network, and the closest thing to a measured files-per-user figure we have.
 
-Dedup sensitivity, as in §3: 1.0 source per file → +15%, 2.0 → −30%.
+Dedup sensitivity, as in §3: 1.0 source per file → +16%, 2.0 → −33%.
 
 Inverted, the same model says what a given box holds with 44,000 users connected:
 
 | Host RAM | Distinct files | Sustainable files published per user |
 |---:|---:|---:|
-| 16 GB | 18.3 M | ~500 |
-| 32 GB | 37.9 M | ~1,030 |
-| 64 GB | 76.9 M | ~2,100 |
-| 128 GB | 155 M | ~4,230 |
-| 256 GB | 311 M | ~8,500 |
+| 16 GB | 29.1 M | ~790 |
+| 32 GB | 60.1 M | ~1,640 |
+| 64 GB | 122 M | ~3,330 |
+| 128 GB | 246 M | ~6,720 |
+| 256 GB | 495 M | ~13,500 |
 
 ### 4.3 Reading those tables
 
 - **Only the first row is a real machine.** 44k users sharing at eD2K-typical rates is
-  ~19 GiB provisioned — comfortable on a 32 GB host with `GOMEMLIMIT` set (§6). If every
-  user filled the default `files.softLimit` of 10,000, the same server is a 300 GiB working
-  set, and a `softLimit` raised to 100,000 is 3 TiB. Those are the DB engines' territory
+  ~12 GiB provisioned — comfortable on a 16 GB host with `GOMEMLIMIT` set (§6). If every
+  user filled the default `files.softLimit` of 10,000, the same server is a 190 GiB working
+  set, and a `softLimit` raised to 100,000 is 1.9 TiB. Those are the DB engines' territory
   (§7), where the same 44k sessions cost ~0.7 GiB of Go process.
 - **Search no longer scans the table.** `MemoryEngine.FindBySearch` used to scan the
   whole map under `RLock`, about 3 s per selective query at 5 M files. Since 2026-09-30
   it answers from the name index in `storage/memory_index.go`, at about 130 µs for a
   rare word at 5 M. Only a query with no term of 3 or more bytes, or with every term in a
-  large share of the files, still scans, and a scan stops at the `MaxSearchResults` cap.
-  The index costs 35–135 B per file on top of the figures above; the high end is the
-  synthetic worst case of `docs/memory-engine-benchmark.md`.
+  large share of the files, still scans. A search with more matches than the
+  `MaxSearchResults` cap reads up to 20,000 of them and returns the ones with the most
+  sources, which costs a few milliseconds for a common word
+  (`docs/memory-engine-benchmark.md`). The index is included in the figures above; it
+  costs from about 4 B per word of a name, where the words are known, to ~170 B per file
+  where every name brings a word of its own.
 - **`pendingResults` scales with users, not files.** 44,000 sessions each pinning a
   1000-file search tail is ~8.6 GiB on top of the index (§8), and it is the one per-session
   cost that is not a flat 16 KiB.
@@ -369,7 +376,7 @@ build monotonically and generate almost no garbage — do not plan from those.
 
 - Provision **~1.5× the table in §3**, and set **`GOMEMLIMIT`** to the box's usable
   memory so the collector tightens up instead of the OOM killer arriving. For Sunrise
-  that means a 24–32 GB host; for the mid-tier servers 3–4 GB; for Akteon No2 under 1 GB.
+  that means a 16–24 GB host; for the mid-tier servers 2–3 GB; for Akteon No2 under 1 GB.
 - **Kernel socket buffers are not in RSS.** On Linux budget another ~4–10 KiB per idle
   TCP connection outside the process — for 46k users that is another ~250 MB of kernel
   memory, and `net.core.rmem_default`/`wmem_default` control it.
@@ -380,8 +387,8 @@ build monotonically and generate almost no garbage — do not plan from those.
   [`docs/storage-snapshot.md`](storage-snapshot.md).
 - `cleanup` (see `storage.CleanupStale`) is what keeps the index from growing without
   bound. With `keepZeroSourceFiles` on, files whose last source left stay resident
-  forever — that is a policy choice with a directly measurable RAM price of 560 B per
-  retained file.
+  forever — that is a policy choice with a directly measurable RAM price of about 360 B
+  per retained file.
 
 ---
 
@@ -394,7 +401,7 @@ all. The process then costs:
 - ~16 KiB per online session (identical — it is the connection, not the engine),
 - plus the transient working set of in-flight searches.
 
-So eMule Sunrise's 46,516 users would be **~730 MiB of Go process**, and the 15 GiB of
+So eMule Sunrise's 46,516 users would be **~730 MiB of Go process**, and the 9.4 GiB of
 index becomes the database's problem, where it is paged rather than resident. That is
 the trade: RAM for query latency.
 
@@ -498,4 +505,4 @@ active, `net.core.somaxconn` 4096, default socket buffer sizes.
 - **RAM is now the first wall on a large memory-engine index.** Until 2026-09-30
   `FindBySearch` was a full map scan under `RLock`, which became a CPU and lock-hold
   problem long before memory ran out. It now answers from the name index (§4.3), and
-  §2.4 lists what would bring the per-file cost down.
+  §2.2 says where a file's bytes go.

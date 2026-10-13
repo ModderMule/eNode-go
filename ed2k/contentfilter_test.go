@@ -83,7 +83,7 @@ func TestOfferFilesRefusedByContentFilter(t *testing.T) {
 	t.Logf("input: OP_OFFERFILES of 5 files; #1 on the ban list, #2 on the filter list, #3 named with a keyword")
 	offerFiles(t, client, 0, 5)
 	t.Logf("output: FilesCount=%d offeredFiles=%d banlistHits=%d closed=%d messages=%q",
-		engine.FilesCount(), client.offeredFiles, len(client.banlistHits), conn.closed, serverMessages(t, conn))
+		engine.FilesCount(), offeredCount(client), len(client.banlistHits), conn.closed, serverMessages(t, conn))
 
 	if engine.FilesCount() != 2 {
 		t.Fatalf("FilesCount = %d, want 2: only files #0 and #4 may be indexed", engine.FilesCount())
@@ -93,8 +93,8 @@ func TestOfferFilesRefusedByContentFilter(t *testing.T) {
 			t.Errorf("refused file #%d has %d source(s)", i, n)
 		}
 	}
-	if client.offeredFiles != 2 {
-		t.Errorf("offeredFiles = %d, want 2: a refused record must not count toward the limits", client.offeredFiles)
+	if offeredCount(client) != 2 {
+		t.Errorf("offeredFiles = %d, want 2: a refused record must not count toward the limits", offeredCount(client))
 	}
 	if len(client.banlistHits) != 1 {
 		t.Errorf("banlistHits = %d, want 1: only the ban-list record is held against the publisher", len(client.banlistHits))

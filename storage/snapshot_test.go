@@ -106,17 +106,20 @@ func TestSnapshotRoundTrip(t *testing.T) {
 			if !ok {
 				t.Fatal("fixture file missing from the source engine")
 			}
-			// The stored record carries no counters; the snapshot writes the live ones.
-			want.Sources, want.Completed = countSources(src.sources[hashKey(want.Hash)], want.Size)
 			got, ok := dst.fileByKey(snapshotSeedKey(0))
 			if !ok {
 				t.Fatal("file absent after load")
 			}
 			t.Logf("output: restored %+v", got)
 			if !bytes.Equal(got.Hash, want.Hash) || got.Name != want.Name || got.Size != want.Size ||
-				got.Type != want.Type || got.Sources != want.Sources || got.Completed != want.Completed ||
-				got.Bitrate != want.Bitrate || got.Codec != want.Codec {
+				got.Type != want.Type || got.Bitrate != want.Bitrate || got.Codec != want.Codec {
 				t.Fatalf("restored file differs:\n got %+v\nwant %+v", got, want)
+			}
+			// The counts are the live ones on both sides: one source where the file was
+			// written, none where it was loaded, as no client is connected there.
+			if want.Sources != 1 || want.Completed != 1 || got.Sources != 0 || got.Completed != 0 {
+				t.Fatalf("counts written %d/%d and restored %d/%d, want 1/1 and 0/0",
+					want.Sources, want.Completed, got.Sources, got.Completed)
 			}
 		})
 	}
@@ -162,10 +165,13 @@ func TestSnapshotLoadMatchesDatabaseRestart(t *testing.T) {
 	if len(sources) != 0 {
 		t.Fatalf("no source may resolve until a client re-offers, got %d", len(sources))
 	}
-	// files.sources is a COUNT(*) over all rows in SQL and is not recomputed at
-	// startup, so a stale count here is parity, not a bug. CleanupStale fixes it.
-	if restored.Sources != 1 {
-		t.Fatalf("File.Sources must survive as written, got %d want 1", restored.Sources)
+	// The memory engine stores no source counts: every read derives them from the
+	// live sources, of which a restored engine has none. files.sources in SQL does
+	// keep a stale COUNT(*) across a restart, but no answer of this engine ever
+	// showed its equivalent, so there is nothing to carry over.
+	if restored.Sources != 0 || found[0].Sources != 0 {
+		t.Fatalf("a restored file reports %d source(s) (search: %d) with no client connected",
+			restored.Sources, found[0].Sources)
 	}
 }
 
@@ -501,10 +507,10 @@ func TestSnapshotRoundTripKeepsTwoSizesOfOneHash(t *testing.T) {
 	if dst.FilesCount() != 2 {
 		t.Fatalf("both records must survive the round trip, FilesCount=%d want 2", dst.FilesCount())
 	}
-	if _, ok := dst.files[fileMapKey(hash, 100)]; !ok {
+	if _, ok := dst.fileByKey(fileMapKey(hash, 100)); !ok {
 		t.Fatal("the size-100 record is missing after load")
 	}
-	if _, ok := dst.files[fileMapKey(hash, 200)]; !ok {
+	if _, ok := dst.fileByKey(fileMapKey(hash, 200)); !ok {
 		t.Fatal("the size-200 record is missing after load")
 	}
 }

@@ -1,0 +1,35 @@
+{{define "tab-runtime"}}
+<div class="tab" id="tab-runtime" hidden>
+<div class="grid">
+<div class="card"><div class="label">Heap in use</div><div class="value" id="ruHeap">…</div><div class="desc" id="ruHeapSub" style="margin:0"></div></div>
+<div class="card"><div class="label">Memory from OS</div><div class="value" id="ruSys">…</div></div>
+<div class="card"><div class="label">Goroutines</div><div class="value" id="ruGo">…</div></div>
+<div class="card"><div class="label">Per indexed file</div><div class="value" id="ruPerFile">…</div><div class="desc" style="margin:0">heap ÷ files, whole process</div></div>
+</div>
+<p class="desc tabmsg" id="msg-runtime"></p>
+<h2>Go runtime</h2>
+<table id="ruTable"></table>
+<h2>Storage</h2>
+<table id="ruStorage"></table>
+</div>
+{{end}}
+
+{{define "js-runtime"}}
+tabs.runtime = {poll: true, load: async function(){
+  var d = await api('/api/runtime');
+  setText('ruHeap', fmtBytes(d.heapAlloc));
+  setText('ruHeapSub', num(d.heapObjects) + ' objects');
+  setText('ruSys', fmtBytes(d.sys));
+  setText('ruGo', num(d.goroutines));
+  setText('ruPerFile', d.bytesPerFile ? num(d.bytesPerFile) + ' B' : '—');
+  kvTable('ruTable', [
+    ['Go version', d.goVersion],
+    ['CPUs', d.numCPU + ' · GOMAXPROCS ' + d.goMaxProcs],
+    ['Heap', fmtBytes(d.heapAlloc) + ' allocated · ' + fmtBytes(d.heapInUse) + ' in use'],
+    ['Garbage collections', num(d.numGC) + ' · ' + d.gcPauseTotalMs.toFixed(1) + ' ms paused in total'
+      + (d.lastGC ? ' · last ' + fmtAge(d.lastGC) + ' ago' : '')],
+    ['Memory figures read', d.sampledAt ? fmtAge(d.sampledAt) + ' ago' : '—']
+  ]);
+  kvTable('ruStorage', d.storage.map(function(kv){ return [kv.key, kv.value]; }));
+}};
+{{end}}

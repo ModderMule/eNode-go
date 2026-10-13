@@ -67,7 +67,7 @@ func TestOfferFilesBeforeLoginStoresNothingAndDropsSession(t *testing.T) {
 	msgs := serverMessages(t, conn)
 	sources := engine.GetSourcesByHash(offerHash(0))
 	t.Logf("output: stored=%d sources=%d offeredFiles=%d messages=%q closed=%d reason=%q",
-		engine.FilesCount(), len(sources), client.offeredFiles, msgs, conn.closed, client.getCloseReason())
+		engine.FilesCount(), len(sources), offeredCount(client), msgs, conn.closed, client.getCloseReason())
 
 	if engine.FilesCount() != 0 {
 		t.Errorf("stored %d files, want 0 — an unauthenticated session published to the index", engine.FilesCount())
@@ -77,8 +77,8 @@ func TestOfferFilesBeforeLoginStoresNothingAndDropsSession(t *testing.T) {
 	}
 	// Zero, not three: the gate runs in handleED2K before handleOfferFiles is entered, so
 	// a refused session cannot spend any of its own publish quota.
-	if client.offeredFiles != 0 {
-		t.Errorf("offeredFiles=%d, want 0 — the gate must refuse before the handler counts", client.offeredFiles)
+	if offeredCount(client) != 0 {
+		t.Errorf("offeredFiles=%d, want 0 — the gate must refuse before the handler counts", offeredCount(client))
 	}
 	if len(msgs) != 1 || msgs[0] != msgNotLoggedIn {
 		t.Errorf("messages=%q, want exactly one %q", msgs, msgNotLoggedIn)
@@ -179,7 +179,7 @@ func TestOfferFilesPipelinedBehindASuccessfulLoginIsStored(t *testing.T) {
 
 	msgs := serverMessages(t, conn)
 	t.Logf("output: logged=%t stored=%d offeredFiles=%d messages=%q closed=%d",
-		client.isLogged(), engine.FilesCount(), client.offeredFiles, msgs, conn.closed)
+		client.isLogged(), engine.FilesCount(), offeredCount(client), msgs, conn.closed)
 
 	if !client.isLogged() {
 		t.Fatal("the login in this segment should have succeeded")
@@ -209,13 +209,13 @@ func TestOfferFilesAfterLoginIsUnchanged(t *testing.T) {
 
 	msgs := serverMessages(t, conn)
 	t.Logf("output: stored=%d offeredFiles=%d messages=%q closed=%d",
-		engine.FilesCount(), client.offeredFiles, msgs, conn.closed)
+		engine.FilesCount(), offeredCount(client), msgs, conn.closed)
 
 	if engine.FilesCount() != 3 {
 		t.Errorf("stored %d files, want 3", engine.FilesCount())
 	}
-	if client.offeredFiles != 3 {
-		t.Errorf("offeredFiles=%d, want 3", client.offeredFiles)
+	if offeredCount(client) != 3 {
+		t.Errorf("offeredFiles=%d, want 3", offeredCount(client))
 	}
 	if len(msgs) != 0 {
 		t.Errorf("messages=%q, want none", msgs)

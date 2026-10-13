@@ -54,7 +54,7 @@ func TestNumericConstraintRejectsUnknownForms(t *testing.T) {
 		{"rating tag 0xf7", numericLeaf(0xf7, SearchOpGreaterEqual, 1)},
 	}
 	for _, tc := range cases {
-		_, prune := matchSearchExpr(tc.expr, File{}, "")
+		_, prune := (*searchMatcher)(nil).matchNode(tc.expr, File{}, "")
 		sql, _ := BuildSearchWhere(tc.expr, DialectMariaDB)
 		_, _, mongoPrune := mongoFilterNode(tc.expr)
 		t.Logf("input: %s TagType=%#08x, output: memoryPrune=%t sql=%q mongoPrune=%t", tc.name, tc.expr.TagType, prune, sql, mongoPrune)

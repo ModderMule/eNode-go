@@ -1,0 +1,14 @@
+{{define "tab-blocks"}}
+<div class="tab" id="tab-blocks" hidden>
+<h2>Block statistics</h2>
+<p class="desc tabmsg" id="msg-blocks"></p>
+<table><thead><tr><th>Reason</th><th>Count</th><th>Counts what</th></tr></thead><tbody id="blRows"></tbody></table>
+<p class="desc">Counted since the server started.</p>
+</div>
+{{end}}
+
+{{define "js-blocks"}}
+tabs.blocks = {poll: true, load: async function(){
+  fillTable('blRows', await api('/api/blocks'), function(b){ return [b.reason, num(b.count), b.what]; }, 'nothing counted');
+}};
+{{end}}

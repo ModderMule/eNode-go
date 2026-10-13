@@ -1,0 +1,35 @@
+{{define "tab-health"}}
+<div class="tab" id="tab-health" hidden>
+<h2>Data files</h2>
+<p class="desc tabmsg" id="msg-health"></p>
+<div class="scroll"><table><thead><tr><th>File</th><th>Entries</th><th>Size</th><th>Modified</th><th>Path</th></tr></thead><tbody id="heFiles"></tbody></table></div>
+<h2>Recent warnings and errors</h2>
+<div class="tools"><label><input type="checkbox" id="heWarn" checked> show warnings</label><span class="desc" id="heCount" style="margin:0"></span></div>
+<div class="log" id="heLog"></div>
+</div>
+{{end}}
+
+{{define "js-health"}}
+(function(){
+  var last = null;
+  function render(){
+    if(!last){ return; }
+    fillTable('heFiles', last.files, dataFileCells, 'no data files in use');
+    var showWarn = document.getElementById('heWarn').checked;
+    var rows = last.log.filter(function(l){ return showWarn || l.level === 'error'; });
+    var box = document.getElementById('heLog');
+    box.replaceChildren();
+    rows.forEach(function(l){
+      var line = el('div');
+      line.appendChild(el('span', new Date(l.time).toLocaleTimeString() + ' ', 'off'));
+      line.appendChild(el('span', l.level.toUpperCase() + ' ', l.level === 'error' ? 'bad' : 'warnc'));
+      line.appendChild(document.createTextNode(l.message));
+      box.appendChild(line);
+    });
+    if(!rows.length){ box.appendChild(el('div', 'nothing logged', 'off')); }
+    setText('heCount', num(last.log.length) + ' shown of ' + num(last.logTotal) + ' since start');
+  }
+  document.getElementById('heWarn').onchange = render;
+  tabs.health = {poll: true, load: async function(){ last = await api('/api/health'); render(); }};
+})();
+{{end}}

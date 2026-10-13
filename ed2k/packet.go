@@ -387,6 +387,18 @@ func (p *Packet) Append(chunk []byte) {
 	}
 }
 
+// release drops the payload of a packet that has been handled.
+//
+// The receive buffer itself needs no shrinking: Init allocates one per packet, sized
+// by what arrives, and Append hands it to Data when the packet is complete. But Data
+// then stayed referenced from the session until the header of its next packet
+// arrived, so every idle connection kept its last payload alive — for a client that
+// has just published, a 200-file offer of some 16 KiB, for the rest of the minute
+// or of the session.
+func (p *Packet) release() {
+	p.Data = NewBuffer(0)
+}
+
 // appendMetaTags adds the FT_META_* tags after the classic ones. Kind, version and
 // catalogue id are always sent — a capable client drops a row without them — and the
 // optional strings only when present, so a row stays as small as its release allows.

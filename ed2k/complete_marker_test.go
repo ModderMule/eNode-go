@@ -59,12 +59,11 @@ func TestFileFromRecordCompleteMarkerWinsOverTag(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			record := FileRecord{
+			record := recordWithTags(FileRecord{
 				Hash:     []byte("0123456789abcdef"),
 				Size:     1024,
 				Complete: tc.complete,
-				Tags:     tc.tags,
-			}
+			}, tc.tags)
 			file := fileFromRecord(record, info)
 
 			t.Logf("input: completeSentinel=%t tags=%v", tc.complete, tc.tags)

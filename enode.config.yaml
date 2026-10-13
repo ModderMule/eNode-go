@@ -91,29 +91,42 @@ udp:
   # address nobody verified, so without a budget the server is an amplifier. Status
   # pings are not counted. 0 turns it off.
   rateLimitPerIPPerMinute: 120
+  # Lists the addresses whose UDP searches and source requests look automated, in
+  # the admin UI's Bots tab. It only observes: nothing is banned or dropped, and a
+  # listed address stays subject to rateLimitPerIPPerMinute like any other. An address
+  # is listed above floodQueriesPerMinute, or above minQueriesPerMinute when the gaps
+  # between its queries vary by less than maxIntervalStddevMs. See docs/bot-detection.md.
+  botDetection:
+    enabled: true
+    minQueriesPerMinute: 200
+    floodQueriesPerMinute: 600
+    maxIntervalStddevMs: 50
 
 # How many files one client may publish to this server. Per-client publish caps, not
 # server capacity figures — the soft limit is the only lever the protocol gives a server
 # over how large its index grows. See docs/server-client-communication.md#per-client-publish-limits, and
 # docs/memory-footprint.md §4 for what a given cap costs in RAM.
 #
-# Counted cumulatively across every OP_OFFERFILES of one TCP session, which is the only
-# way either cap can bite: eMule sends at most min(softLimit, 200) files per packet and
-# republishes the remainder every 60 s until its whole share is registered, so no single
-# packet reveals how much a client is publishing.
+# The two limit different things. softLimit is on the session: how many distinct files
+# a client may have published at a time. hardLimit is on one OP_OFFERFILES packet: how
+# many records it may declare. eMule sends at most min(softLimit, 200) files per packet
+# and one packet a minute until its whole share is registered, so a conforming client
+# never reaches hardLimit however much it shares; softLimit is what caps it.
 #
 # Both are also advertised at OP_GLOBSERVSTATRES offsets +16/+20 and stored by clients as
 # the server.met ST_SOFTFILES / ST_HARDFILES tags, so a client is held to the numbers it
 # was given. 0 means unlimited on either key; omitting a key uses the default shown.
-# hardLimit below softLimit is rejected at load — the client would be disconnected before
-# the soft-limit warning could ever be sent.
 files:
-  # Past this the excess is ignored and the client gets one WARNING message per session;
-  # it stays connected. Lugdunum's default is 1000; 10000 is what eNode-go has always
+  # Distinct files one client may have published at a time. A file it already
+  # publishes can always be offered again and is not counted twice; a new file past
+  # the limit is ignored and the client gets one WARNING message per session. It stays
+  # connected. Lugdunum's default is 1000; 10000 is what eNode-go has always
   # advertised, kept so enabling enforcement does not also change what clients are told.
   softLimit: 10000
-  # Past this the client is sent an ERROR message and disconnected. Lugdunum's default
-  # is 4000.
+  # Records one OP_OFFERFILES packet may declare. A packet declaring this many or more
+  # is refused whole, and the client is sent an ERROR message and disconnected. Keep it
+  # above 200, the most a conforming client sends in one packet. Lugdunum's default is
+  # 4000.
   hardLimit: 20000
 
 # Server-to-server gossip: the Lugdunum OP_SERVER_LIST_REQ/RES handshake. When on,
@@ -560,11 +573,14 @@ ipv6:
     - "https://www.cloudflare.com/cdn-cgi/trace"
     - "https://6.ipw.cn"
 
-# Local admin status dashboard: a single self-contained HTML page (served with only
-# the Go standard library) showing live client/file/LowID/server counts, listening
-# ports, enabled features, version and uptime. Default on and bound to loopback, so
-# it is reachable only from this machine. It has no authentication — widen bindIP to
-# expose it only if you add your own access control. See docs/admin-status-dashboard.md.
+# Local admin dashboard: a self-contained tabbed HTML page (served with only the Go
+# standard library). The Status tab shows live client/file/LowID/server counts,
+# listening ports, enabled features, version and uptime; the other tabs list clients,
+# files, peer servers, filters, bans, automated queriers, refusals, health, runtime,
+# accounts and the effective configuration, and can disconnect or ban a client, edit the
+# server list and reload the filters. Default on and bound to loopback, so it is
+# reachable only from this machine. Everything beyond the Status tab needs loopback or
+# the username and password below. See docs/admin-status-dashboard.md.
 admin:
   enabled: true
   bindIP: "127.0.0.1"   # loopback only; "0.0.0.0" / "::" exposes it on all interfaces

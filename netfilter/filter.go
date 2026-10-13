@@ -2,7 +2,9 @@ package netfilter
 
 import (
 	"context"
+	"errors"
 	"net"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -46,10 +48,12 @@ type Config struct {
 // inbound datagram and every accepted connection. A nil *Filter blocks nothing, so
 // callers need no branch when filtering is off.
 type Filter struct {
-	ipf   atomic.Pointer[IPFilter]
-	geo   *GeoIP
-	cfg   Config
-	stats struct {
+	ipf atomic.Pointer[IPFilter]
+	// ipfLoaded is when ipf was last replaced, in Unix nanoseconds.
+	ipfLoaded atomic.Int64
+	geo       *GeoIP
+	cfg       Config
+	stats     struct {
 		blockedIP  atomic.Int64
 		blockedGeo atomic.Int64
 	}
@@ -75,7 +79,7 @@ func New(ctx context.Context, cfg Config) (*Filter, error) {
 		if err != nil {
 			return nil, err
 		}
-		f.ipf.Store(ipf)
+		f.storeIPFilter(ipf)
 		logging.Infof("ipfilter: %s loaded, %d range(s) parsed, %d blocking, %d merged, %d line(s) skipped",
 			cfg.IPFilterFile, ipf.Parsed, ipf.Blocking, ipf.Len(), ipf.Skipped)
 		if cfg.IPFilterReloadMinutes > 0 {
@@ -122,6 +126,100 @@ func (f *Filter) Stats() (byIPFilter, byGeoIP int64) {
 	return f.stats.blockedIP.Load(), f.stats.blockedGeo.Load()
 }
 
+// Info is the admin view of the access filter: what each half has loaded.
+type Info struct {
+	IPFilterEnabled bool
+	IPFilterFile    string
+	// Parsed, Blocking, Merged and Skipped are the counts the load reported.
+	Parsed   int
+	Blocking int
+	Merged   int
+	Skipped  int
+	// IPFilterLoaded is when the range list now in use was read.
+	IPFilterLoaded time.Time
+
+	GeoIPEnabled  bool
+	GeoIPDatabase string
+	// GeoIPLoaded reports whether a country database is open.
+	GeoIPLoaded      bool
+	BlockedCountries int
+}
+
+// FileInfo is one data file of the access filter as it is on disk.
+type FileInfo struct {
+	Name     string
+	Path     string
+	Exists   bool
+	Size     int64
+	Modified time.Time
+}
+
+// Info reports what the filter has loaded. It never consults Blocked, which counts.
+func (f *Filter) Info() Info {
+	if f == nil {
+		return Info{}
+	}
+	out := Info{
+		IPFilterEnabled: f.cfg.IPFilterEnabled,
+		IPFilterFile:    f.cfg.IPFilterFile,
+		GeoIPEnabled:    f.cfg.GeoIPEnabled,
+		GeoIPDatabase:   f.cfg.GeoIPDatabase,
+	}
+	if ipf := f.ipf.Load(); ipf != nil {
+		out.Parsed, out.Blocking, out.Merged, out.Skipped = ipf.Parsed, ipf.Blocking, ipf.Len(), ipf.Skipped
+		out.IPFilterLoaded = time.Unix(0, f.ipfLoaded.Load())
+	}
+	out.GeoIPLoaded, out.BlockedCountries = f.geo.Ready()
+	return out
+}
+
+// Files describes the enabled data files for the admin surface.
+func (f *Filter) Files() []FileInfo {
+	if f == nil {
+		return nil
+	}
+	var out []FileInfo
+	add := func(name, path string) {
+		info := FileInfo{Name: name, Path: path}
+		if st, err := os.Stat(path); err == nil {
+			info.Exists, info.Size, info.Modified = true, st.Size(), st.ModTime()
+		}
+		out = append(out, info)
+	}
+	if f.cfg.IPFilterEnabled {
+		add("ipfilter", f.cfg.IPFilterFile)
+	}
+	if f.cfg.GeoIPEnabled {
+		add("GeoIP database", f.cfg.GeoIPDatabase)
+	}
+	return out
+}
+
+// Reload re-reads the range list and reopens the country database now. A half that
+// fails keeps what it had; the errors are joined.
+func (f *Filter) Reload() error {
+	if f == nil {
+		return nil
+	}
+	var errs []error
+	if f.cfg.IPFilterEnabled {
+		ipf, err := LoadIPFilter(f.cfg.IPFilterFile, f.cfg.IPFilterMinLevel)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			f.storeIPFilter(ipf)
+			logging.Infof("ipfilter reloaded: %d range(s) parsed, %d blocking, %d merged, %d skipped",
+				ipf.Parsed, ipf.Blocking, ipf.Len(), ipf.Skipped)
+		}
+	}
+	if f.geo != nil && f.geo.fileExists() {
+		if err := f.geo.reloadDatabase(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // Country exposes the country code for an address, or "" when unknown or GeoIP is
 // off. Separate from Blocked so logs and the dashboard can report a country without
 // implying a verdict.
@@ -161,11 +259,17 @@ func (f *Filter) reloadIPFilterLoop(ctx context.Context, every time.Duration) {
 				// minutes to avoid one pointer store, which is not worth it.
 				continue
 			}
-			f.ipf.Store(ipf)
+			f.storeIPFilter(ipf)
 			logging.Infof("ipfilter reloaded: %d range(s) parsed, %d blocking, %d merged, %d skipped",
 				ipf.Parsed, ipf.Blocking, ipf.Len(), ipf.Skipped)
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// storeIPFilter swaps a freshly read range list in and notes when.
+func (f *Filter) storeIPFilter(ipf *IPFilter) {
+	f.ipf.Store(ipf)
+	f.ipfLoaded.Store(time.Now().UnixNano())
 }

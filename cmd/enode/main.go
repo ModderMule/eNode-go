@@ -380,6 +380,7 @@ func run(ctx context.Context, configPath string) error {
 	// failure is fatal because the operator asked for it. Static server facts are
 	// captured once; the live counters come from a snapshot read per request.
 	var adminSrv *admin.Server
+	var views *adminViews
 	if cfg.Admin.EnabledOrDefault() {
 		// Daily GitHub release check; Info() is nil-receiver safe, so a disabled
 		// checker simply leaves the dashboard without an update hint.
@@ -434,13 +435,21 @@ func run(ctx context.Context, configPath string) error {
 		if metaAPI != nil && metaAPI.accounts != nil {
 			adminSrv.SetAccounts(accountAdmin{svc: metaAPI.accounts})
 		}
+		// The tabs beyond Status. They read the boot config until the reloader, which
+		// owns the effective one, exists.
+		views = &adminViews{
+			runtime: runtime, engine: engine, served: servedFiles,
+			access: accessFilter, content: contentFilter, updater: filterUpdater,
+			config: func() config.Config { return cfg },
+		}
+		adminSrv.SetViews(views)
 		if err := adminSrv.Start(); err != nil {
 			return fmt.Errorf("admin dashboard failed to bind %s:%d: %w", cfg.Admin.BindIP, cfg.Admin.Port, err)
 		}
 		defer adminSrv.Close()
 		logging.Infof("admin dashboard: http://%s:%d/", adminDisplayHost(cfg.Admin.BindIP), cfg.Admin.Port)
 		if !adminBindIsLoopback(cfg.Admin.BindIP) && cfg.Admin.Username == "" {
-			logging.Warnf("admin dashboard bound to %s without admin.username/password: off-box clients see the status page (never accounts)", cfg.Admin.BindIP)
+			logging.Warnf("admin dashboard bound to %s without admin.username/password: off-box clients see the status page only", cfg.Admin.BindIP)
 		}
 	} else {
 		logging.Infof("admin dashboard: disabled")
@@ -604,6 +613,7 @@ func run(ctx context.Context, configPath string) error {
 	}
 	if adminSrv != nil {
 		adminSrv.SetReloader(reload.Reload)
+		views.setConfig(reload.effective)
 	}
 
 	<-ctx.Done()

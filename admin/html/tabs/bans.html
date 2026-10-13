@@ -1,0 +1,32 @@
+{{define "tab-bans"}}
+<div class="tab" id="tab-bans" hidden>
+<h2>Bans</h2>
+<div class="tools">
+<input id="baKey" placeholder="ip:203.0.113.9 or hash:32 hex digits" size="38">
+<input id="baMinutes" type="number" min="1" value="1440" style="width:8em" title="minutes">
+<button id="baAdd">Ban</button>
+</div>
+<p class="desc tabmsg" id="msg-bans"></p>
+<table><thead><tr><th>Banned</th><th>Until</th><th>Remaining</th><th></th></tr></thead><tbody id="baRows"></tbody></table>
+<p class="desc">A banned user hash or address is refused at login; a client that is already connected stays until it is disconnected. An IPv6 address is banned as its /64. Bans are kept in memory and end with a restart.</p>
+</div>
+{{end}}
+
+{{define "js-bans"}}
+(function(){
+  function render(rows){
+    fillTable('baRows', rows, function(b){
+      var rm = el('button', 'Lift ban');
+      rm.onclick = function(){ act('bans', '/api/bans/' + encodeURIComponent(b.key), 'DELETE', undefined, render); };
+      return [el('code', b.key), new Date(b.until).toLocaleString(), fmtUptime(b.remainingSeconds), rm];
+    }, 'nobody is banned');
+  }
+  document.getElementById('baAdd').onclick = function(){
+    var key = document.getElementById('baKey').value.trim();
+    // A bare address or hash is accepted too.
+    if(key && !/^(ip|hash):/.test(key)){ key = (/^[0-9a-fA-F]{32}$/.test(key) ? 'hash:' : 'ip:') + key; }
+    act('bans', '/api/bans', 'POST', {key: key, minutes: parseInt(document.getElementById('baMinutes').value, 10) || 0}, render);
+  };
+  tabs.bans = {load: async function(){ render(await api('/api/bans')); }, poll: true};
+})();
+{{end}}

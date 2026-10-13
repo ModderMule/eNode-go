@@ -111,8 +111,7 @@ func (c *tcpClient) noteBanlistHit(hash []byte) bool {
 
 // recordName is the file name an offered record carries, or "" when it has none.
 func recordName(record FileRecord) string {
-	name, _ := record.Tags["name"].(string)
-	return name
+	return record.Name
 }
 
 // searchTerms collects the words a search asks for. The excluded side of an AND-NOT is

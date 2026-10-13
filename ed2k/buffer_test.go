@@ -148,8 +148,8 @@ func TestGetFileList(t *testing.T) {
 	if f.Complete {
 		t.Fatalf("expected partial file")
 	}
-	if f.Tags["name"].(string) != "movie.mkv" {
-		t.Fatalf("name mismatch: %#v", f.Tags["name"])
+	if f.tagMap()["name"].(string) != "movie.mkv" {
+		t.Fatalf("name mismatch: %#v", f.tagMap()["name"])
 	}
 	if f.Size != 0x100000001 {
 		t.Fatalf("size mismatch: got %d", f.Size)

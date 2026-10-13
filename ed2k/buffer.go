@@ -36,15 +36,36 @@ type NamedTag struct {
 	Type uint8
 }
 
+// FileRecord is one entry of a file list (OP_OFFERFILES, OP_SEARCHRESULT). The tags a
+// server reads are decoded straight into fields; a record used to carry every tag
+// in a map[string]any, which was most of what parsing an offer allocated.
+//
+// A field holds what the last tag of its name carried, and its zero value when that
+// tag was absent or of another type, which is what a lookup in the map gave.
 type FileRecord struct {
 	Hash     []byte
 	Complete bool
 	ID       uint32
 	Port     uint16
-	Tags     map[string]any
 	SizeLo   uint32
 	SizeHi   uint32
 	Size     uint64
+	Name     string
+	Type     string
+	Sources  uint32
+	Title    string
+	Artist   string
+	Album    string
+	Length   uint32
+	Bitrate  uint32
+	Codec    string
+	// Extra holds the tags without a field above, in wire order. GetFileList fills
+	// it; GetOfferedFiles does not, as an offer's other tags are never read.
+	Extra []NamedTag
+
+	// sizeLo and sizeHi are the two size tags as sent, before either is narrowed:
+	// Size is their sum, and a client may send "size" itself as a 64-bit value.
+	sizeLo, sizeHi uint64
 }
 
 type TagDecodeError struct {
@@ -631,58 +652,62 @@ func (b *Buffer) GetTags() ([]NamedTag, error) {
 	return tags, nil
 }
 
+// GetFileList decodes a file list, keeping every tag: the ones a record has no field
+// for go to its Extra.
 func (b *Buffer) GetFileList() ([]FileRecord, error) {
-	count, err := b.GetUInt32LE()
-	if err != nil {
-		return nil, err
+	return b.getFileList(true)
+}
+
+// GetOfferedFiles decodes the file list of an OP_OFFERFILES. It is GetFileList
+// without Extra, so a record costs its hash and its strings and nothing else.
+func (b *Buffer) GetOfferedFiles() ([]FileRecord, error) {
+	return b.getFileList(false)
+}
+
+// Tag returns the value of the last Extra tag called name, or nil.
+func (r *FileRecord) Tag(name string) any {
+	for i := len(r.Extra) - 1; i >= 0; i-- {
+		if r.Extra[i].Name == name {
+			return r.Extra[i].Value
+		}
 	}
-	if err := checkWireCount(count, b.Remaining(), minFileRecordBytes, "file records"); err != nil {
-		return nil, err
+	return nil
+}
+
+// SetTag stores one decoded tag in its field and reports whether it has one. The
+// size fields are set from "size" and "sizehi", in whichever order they arrive.
+func (r *FileRecord) SetTag(name string, value any) bool {
+	switch name {
+	case "name":
+		r.Name, _ = value.(string)
+	case "type":
+		r.Type, _ = value.(string)
+	case "title":
+		r.Title, _ = value.(string)
+	case "artist":
+		r.Artist, _ = value.(string)
+	case "album":
+		r.Album, _ = value.(string)
+	case "codec":
+		r.Codec, _ = value.(string)
+	case "sources":
+		r.Sources = tagUint32(value)
+	case "length":
+		r.Length = tagUint32(value)
+	case "bitrate":
+		r.Bitrate = tagUint32(value)
+	case "size":
+		r.sizeLo, _ = value.(uint64)
+		r.SizeLo = uint32(r.sizeLo)
+		r.Size = r.sizeLo + r.sizeHi*0x100000000
+	case "sizehi":
+		r.sizeHi, _ = value.(uint64)
+		r.SizeHi = uint32(r.sizeHi)
+		r.Size = r.sizeLo + r.sizeHi*0x100000000
+	default:
+		return false
 	}
-	files := make([]FileRecord, 0, min(count, maxFileRecordPrealloc))
-	for i := uint32(0); i < count; i++ {
-		hash := append([]byte(nil), b.Get(16)...)
-		if len(hash) != 16 {
-			return nil, ErrOutOfBounds
-		}
-		id, err := b.GetUInt32LE()
-		if err != nil {
-			return nil, err
-		}
-		port, err := b.GetUInt16LE()
-		if err != nil {
-			return nil, err
-		}
-		tags, err := b.GetTags()
-		if err != nil {
-			return nil, fmt.Errorf("filelist decode failed file-idx=%d hash=%x id=%d port=%d: %w", i, hash, id, port, err)
-		}
-		record := FileRecord{
-			Hash:     hash,
-			Complete: true,
-			ID:       id,
-			Port:     port,
-			Tags:     make(map[string]any, len(tags)),
-		}
-		for _, t := range tags {
-			record.Tags[t.Name] = t.Value
-		}
-		if id == ValPartialID && port == ValPartialPort {
-			record.Complete = false
-		} else if id == ValCompleteID && port == ValCompletePort {
-			record.Complete = true
-		}
-		if v, ok := tagUint64(record.Tags, "size"); ok {
-			record.SizeLo = uint32(v)
-			record.Size = v
-		}
-		if v, ok := tagUint64(record.Tags, "sizehi"); ok {
-			record.SizeHi = uint32(v)
-			record.Size += v * 0x100000000
-		}
-		files = append(files, record)
-	}
-	return files, nil
+	return true
 }
 
 // checkWireCount rejects an element count that could not possibly be backed by
@@ -707,22 +732,77 @@ func checkWireCount(count uint32, remaining, minBytesEach int, what string) erro
 	return nil
 }
 
-// tagUint64 reads a normalized integer tag. GetTagValue returns every integer
-// width as uint64, so a single assertion covers TAGTYPE_UINT8/16/32/64 alike.
-func tagUint64(tags map[string]any, key string) (uint64, bool) {
-	v, ok := tags[key].(uint64)
-	return v, ok
-}
-
-// tagUint32 reads an integer tag destined for a uint32 field, saturating rather
-// than wrapping if a client sends an implausibly large value.
-func tagUint32(tags map[string]any, key string) (uint32, bool) {
-	v, ok := tagUint64(tags, key)
+// tagUint32 reads a decoded integer tag destined for a uint32 field, saturating
+// rather than wrapping if a client sends an implausibly large value. GetTagValue
+// returns every integer width as uint64, so one assertion covers
+// TAGTYPE_UINT8/16/32/64 alike; any other type reads as zero.
+func tagUint32(value any) uint32 {
+	v, ok := value.(uint64)
 	if !ok {
-		return 0, false
+		return 0
 	}
 	if v > math.MaxUint32 {
-		return math.MaxUint32, true
+		return math.MaxUint32
 	}
-	return uint32(v), true
+	return uint32(v)
+}
+
+// getFileList is GetFileList; keepExtra says whether tags without a field are kept.
+func (b *Buffer) getFileList(keepExtra bool) ([]FileRecord, error) {
+	count, err := b.GetUInt32LE()
+	if err != nil {
+		return nil, err
+	}
+	if err := checkWireCount(count, b.Remaining(), minFileRecordBytes, "file records"); err != nil {
+		return nil, err
+	}
+	files := make([]FileRecord, 0, min(count, maxFileRecordPrealloc))
+	for i := uint32(0); i < count; i++ {
+		hash := append([]byte(nil), b.Get(16)...)
+		if len(hash) != 16 {
+			return nil, ErrOutOfBounds
+		}
+		id, err := b.GetUInt32LE()
+		if err != nil {
+			return nil, err
+		}
+		port, err := b.GetUInt16LE()
+		if err != nil {
+			return nil, err
+		}
+		record := FileRecord{
+			Hash:     hash,
+			Complete: !(id == ValPartialID && port == ValPartialPort),
+			ID:       id,
+			Port:     port,
+		}
+		if err := b.getFileTags(&record, keepExtra); err != nil {
+			return nil, fmt.Errorf("filelist decode failed file-idx=%d hash=%x id=%d port=%d: %w", i, hash, id, port, err)
+		}
+		files = append(files, record)
+	}
+	return files, nil
+}
+
+// getFileTags reads one record's tag list into its fields. It is GetTags without
+// the slice: the count check and the error text are the same.
+func (b *Buffer) getFileTags(record *FileRecord, keepExtra bool) error {
+	startPos := b.Pos()
+	count, err := b.GetUInt32LE()
+	if err != nil {
+		return err
+	}
+	if err := checkWireCount(count, b.Remaining(), minTagBytes, "tags"); err != nil {
+		return err
+	}
+	for i := uint32(0); i < count; i++ {
+		tag, err := b.GetTag()
+		if err != nil {
+			return fmt.Errorf("tags decode failed start=%d idx=%d: %w", startPos, i, err)
+		}
+		if !record.SetTag(tag.Name, tag.Value) && keepExtra {
+			record.Extra = append(record.Extra, tag)
+		}
+	}
+	return nil
 }

@@ -111,12 +111,14 @@ func Infof(format string, args ...any) {
 func Warnf(format string, args ...any) {
 	if enabled(LevelWarn) {
 		sugar.Warnf(format, args...)
+		recent.add(LevelWarn, format, args)
 	}
 }
 
 func Errorf(format string, args ...any) {
 	if enabled(LevelError) {
 		sugar.Errorf(format, args...)
+		recent.add(LevelError, format, args)
 	}
 }
 

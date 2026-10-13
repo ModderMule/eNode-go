@@ -62,6 +62,11 @@ udp:
   # UDP searches and source requests one address (an IPv6 /64) may make per minute;
   # the rest are dropped unanswered. Status pings are not counted. 0 turns it off.
   rateLimitPerIPPerMinute: 120
+  botDetection:
+    enabled: true
+    minQueriesPerMinute: 200
+    floodQueriesPerMinute: 600
+    maxIntervalStddevMs: 50
 
 gossip:
   enabled: true

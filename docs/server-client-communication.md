@@ -150,7 +150,7 @@ that something external could have depended on.
 ### Per-client publish limits
 
 How many files a single client may publish, and what happens when it tries to publish more.
-Both are configured under `files:` in `enode.config.yaml`, enforced per TCP session, and
+Both are configured under `files:` in `enode.config.yaml`, enforced in `handleOfferFiles`, and
 advertised on the wire so a client sees the numbers it is actually held to. For what a
 given cap costs in RAM at scale see [`memory-footprint.md`](memory-footprint.md) §4.
 
@@ -166,13 +166,15 @@ Lugdunum's eserver, whose documentation is vendored at
 > server disconnects him (before receiving the whole list). That is to save bandwidth,
 > because some lazy people share all their files. Default value : 4000"*
 
-The hard limit is therefore not simply a larger soft limit:
+The hard limit is therefore not simply a larger soft limit. The two count different
+things:
 
 | | soft limit | hard limit |
 |---|---|---|
+| **What it counts** | the distinct files a session sources at a time | the records one `OP_OFFERFILES` packet declares |
 | **What it is** | a quota on the index | an abuse response |
-| **What it protects** | server RAM — how large the index grows | server bandwidth — receiving a huge list at all |
-| **Effect** | excess records ignored; the client stays connected | the session is closed |
+| **What it protects** | server RAM — how large the index grows | server bandwidth and CPU — receiving a huge list at all |
+| **Effect** | new files past it are ignored; the client stays connected | the packet is refused whole and the session is closed |
 | **Client is told** | one `WARNING` message per session | one `ERROR` message, then the close |
 | **eserver default** | 1000 | 4000 |
 | **eNode-go default** | 10000 | 20000 |
@@ -181,33 +183,50 @@ eserver's accounting reflects the split: it publishes both in its stats line
 (`eserver-17.14-strings.txt:20339`) but counts hard-limit drops with the *refusals*,
 alongside blacklisting and ipfilter (`:20958`).
 
-**The count is cumulative across every offer of one session**, which is the only way either
-cap can fire. eMule caps a single packet at 200 files regardless of the server's limit
-(`srchybrid/SharedFileList.cpp:832-834`; a server's soft limit can only lower that) and
-republishes the remainder every 60 s until its whole share is registered (`:1229-1236`).
-Lugdunum's "before receiving the whole list" describes the old single-huge-frame clients;
-against a modern client the same rule has to be applied across packets.
+**The hard limit is on one packet.** An `OP_OFFERFILES` that declares `hardLimit` records
+or more is refused: nothing of it is parsed or stored, the client is sent the `ERROR`
+message and the session is closed. That is Lugdunum's "before receiving the whole list".
+Both eMule trees cap a packet at 200 files whatever the server's limits
+(`srchybrid/SharedFileList.cpp:832-834`, `eMuleQt/src/core/files/SharedFileList.cpp:54,880`;
+a server's soft limit can only lower that) and send one packet a minute until the whole
+share is registered (`:1229-1236`). So a conforming client never reaches the hard limit,
+however much it shares, and only a broken or abusive one is disconnected. Keep `hardLimit`
+above 200.
 
-The counter counts *records received*, not distinct hashes — a deliberate divergence from
-eserver, which limits rows in its store. It is exact for the clients that matter: both
-eMule trees send each shared file exactly once per session, gated on a published flag that
-is cleared only on connect and disconnect (`SharedFileList.cpp:817,848`,
-`ServerConnect.cpp:227-228,292`). A per-session hash set was rejected on cost — ~320 KiB per
-session at a hard limit of 20,000 is more than the index it would protect.
+**The soft limit is on the session's files.** It is held against the number of distinct
+files the session sources now, which storage keeps per session anyway to release them on
+disconnect (`Engine.OfferedCount`). Two consequences:
+
+- A file the session already sources can always be offered again and costs nothing. A
+  client republishes a file when a download completes, so its complete flag stays current
+  even for a session at its limit.
+- A new file past the limit is skipped, and the first time that happens the client is
+  sent the `WARNING` message.
+
+Most packets need one in-memory lookup for this: while everything a packet offers would fit
+under the limit even if all of it were new, nothing has to be told apart. Only a packet that
+could cross the limit asks storage which of its files the session already sources
+(`Engine.HasOffered`), which on MySQL and MongoDB is one indexed query.
+
+Until 2026-10 both limits counted every *record* a session sent, re-offers included, and the
+hard limit was that running total. A client sharing 50,000 files reached 20,000 records
+about 100 minutes in, was dropped, reconnected and started over, for as long as it ran; and
+a client that re-offered its files ran into the soft limit with far fewer files than it
+allows.
 
 **Configuration:**
 
 ```yaml
 files:
-  softLimit: 10000   # warn once, ignore the excess; 0 = unlimited
-  hardLimit: 20000   # message, then disconnect;      0 = unlimited
+  softLimit: 10000   # distinct files per session: warn once, ignore new ones; 0 = unlimited
+  hardLimit: 20000   # records per packet: message, then disconnect;         0 = unlimited
 ```
 
 `0` means unlimited on either key, the convention `tcp.maxConnections` already uses. An
 absent key takes the default above; the fields are `*int` precisely so an explicit `0` can
-be told from an omitted key. `hardLimit` below `softLimit` is rejected at load — the two are
-checked hard-first per record, so the session would be closed before the soft warning could
-ever be sent. `hardLimit == softLimit` is allowed and collapses to "drop at N".
+be told from an omitted key. A negative value is rejected at load. `hardLimit` may be below
+`softLimit`: one is a packet size and the other a session total, so neither bounds the
+other. (It was a load error while both counted a session's records.)
 
 **On the wire:** both are published at `OP_GLOBSERVSTATRES (0x97)` payload offsets **+16**
 and **+20**, read positionally by eMule (`srchybrid/UDPSocket.cpp:337-342,403-404`) and
@@ -223,8 +242,8 @@ two config keys.
 WARNING : This server accepts 10000 shares per client. Some of your shares are ignored.
 ```
 
-eserver's own text, verbatim (`eserver-17.14-strings.txt:20786`). Over the hard limit, one
-message then the close:
+eserver's own text, verbatim (`eserver-17.14-strings.txt:20786`). For a packet at the hard
+limit, one message then the close:
 
 ```
 ERROR : This server accepts at most 20000 shares per client. Closing the connection.
@@ -241,31 +260,33 @@ close, so the user would have no way to learn why they keep being disconnected.
   packet cap (`SharedFileList.cpp:814-828`), so what survives is the client's own
   highest-priority share. Anything skipped is gone for that session — the client has
   already marked it published and will not re-offer it.
-- **The counter never decreases**, including when `CleanupStale` drops a file the session
-  published. Both limits are defined against what a client *tries to publish*.
-- **A reconnect resets the counter.** Left alone deliberately: on the memory engine
-  `Disconnect` deletes that client's sources outright, so both sides restart from zero
-  together; on MySQL and MongoDB `Connect` is keyed on the user hash and `AddFile` upserts,
-  so a plain republish revives the identical rows. The only real bypass is a client that
-  shuffles which files it publishes first on each cycle, which costs it a full login per
-  `hardLimit` files.
-- **A large sharer will be dropped on a cycle.** At the defaults a client sharing 50,000
-  files reaches 20,000 records about 100 minutes in, is dropped, reconnects, and is dropped
-  again. Faithful to eserver (the same at 4,000/200 ≈ 20 minutes), but a behaviour change
-  for an existing deployment where nothing was enforced. Raise `hardLimit`, or set it to
-  `0`, to keep the old behaviour.
+- **The count follows what the session sources**, not what it sent. A record the server
+  refuses (no size, a meta pseudo-hash, the content filter) is not counted. On the memory
+  engine a file is counted by its hash, so the same hash at two sizes is one file; on MySQL
+  and MongoDB, where a source belongs to a `(hash, size)` row, it is two.
+- **A reconnect starts from zero.** On the memory engine `Disconnect` deletes the client's
+  sources outright. On MySQL and MongoDB the rows stay, offline, and a republish revives
+  them; only the ones the new session has offered count against it.
+- **A large sharer keeps its session.** A client sharing 50,000 files at the defaults
+  publishes its first 10,000, is warned once, and stays connected with those 10,000
+  indexed. Raise `softLimit` to index more of it; docs/memory-footprint.md §4 says what
+  that costs.
+- **`hardLimit` is advertised but means something else to the server now.** Clients store
+  and display it and compare it against nothing, so advertising a per-packet figure in the
+  `hardFiles` field changes nothing for them.
 
 **Where the code is:**
 
 | What | Where |
 |---|---|
 | Config keys, defaults, validation | `config/config.go` — `FilesConfig`, `setDefaults` |
-| Enforcement | `ed2k/server_runtime.go` — `handleOfferFiles`, and the `offeredFiles` / `softLimitWarned` / `hardLimitHit` fields on `tcpClient` |
+| Enforcement | `ed2k/server_runtime.go` — `handleOfferFiles`, `withinSoftLimit`, and the `softLimitWarned` / `hardLimitHit` fields on `tcpClient` |
+| Files per session | `storage/factory.go` — `Engine.OfferedCount`, `Engine.HasOffered` |
 | Login gate | `ed2k/server_runtime.go` — `requireLogin`, and the exemption switch at the head of `handleED2K` |
 | Message texts | `ed2k/server_runtime.go` — `msgSoftFileLimit`, `msgHardFileLimit`, `msgNotLoggedIn` |
 | Advertising | `ed2k/udpoperations.go` — `BuildGlobServStatResPacket`, `UDPConfig.SoftFiles/HardFiles` |
 | Wiring | `cmd/enode/main.go` — both runtime configs, from one accessor each |
-| Tests | `ed2k/offer_limits_test.go`, `ed2k/offer_prelogin_test.go`, `config/file_limits_test.go` |
+| Tests | `ed2k/offer_limits_test.go`, `ed2k/offer_prelogin_test.go`, `config/file_limits_test.go`, `storage/offered_contract_test.go` |
 
 ### Search paging
 

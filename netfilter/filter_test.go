@@ -218,3 +218,58 @@ func TestNilGeoIPIsSafe(t *testing.T) {
 		t.Fatal("a nil *GeoIP must be inert")
 	}
 }
+
+func TestInfoAndReloadFollowTheFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ipfilter.dat")
+	if err := os.WriteFile(path, []byte("198.51.100.0 - 198.51.100.255 , 0 , one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := New(context.Background(), Config{IPFilterEnabled: true, IPFilterFile: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := f.Info()
+	files := f.Files()
+	t.Logf("input: a one-range ipfilter file")
+	t.Logf("output: info=%+v files=%+v", before, files)
+	if !before.IPFilterEnabled || before.Parsed != 1 || before.Merged != 1 || before.IPFilterLoaded.IsZero() || before.GeoIPEnabled {
+		t.Fatalf("info = %+v", before)
+	}
+	if len(files) != 1 || !files[0].Exists || files[0].Path != path {
+		t.Fatalf("files = %+v", files)
+	}
+	// Reading the state must not count as a refusal.
+	if byIP, _ := f.Stats(); byIP != 0 {
+		t.Fatalf("Info counted %d refusals", byIP)
+	}
+
+	two := "198.51.100.0 - 198.51.100.255 , 0 , one\n203.0.113.0 - 203.0.113.255 , 0 , two\n"
+	if err := os.WriteFile(path, []byte(two), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = f.Reload()
+	after := f.Info()
+	blocked, _ := f.Blocked(net.ParseIP("203.0.113.9"))
+	t.Logf("input: a second range written, then Reload")
+	t.Logf("output: err=%v info=%+v newRangeBlocked=%t", err, after, blocked)
+	if err != nil || after.Parsed != 2 || !blocked {
+		t.Fatalf("reload did not pick the new range up: err=%v info=%+v", err, after)
+	}
+
+	// A file that went missing keeps the list that was loaded.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	err = f.Reload()
+	still, _ := f.Blocked(net.ParseIP("203.0.113.9"))
+	t.Logf("input: the file removed, then Reload output: err=%v stillBlocked=%t", err, still)
+	if err == nil || !still {
+		t.Fatalf("a failed reload must report it and keep the list: err=%v stillBlocked=%t", err, still)
+	}
+
+	var none *Filter
+	if none.Reload() != nil || none.Info().IPFilterEnabled || none.Files() != nil {
+		t.Fatal("a nil filter must reload to nothing")
+	}
+}

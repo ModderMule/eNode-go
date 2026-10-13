@@ -161,8 +161,22 @@ func (c TCPConfig) MaxConnectionsPerIPOrDefault() int {
 // more than hardLimit files, the server disconnects him (before receiving the whole
 // list)". eserver's defaults are 1000 and 4000; ours stay at the values eNode-go has
 // always advertised, so enabling enforcement does not also change what clients are
-// told. Both are enforced per TCP session in handleOfferFiles and advertised at
-// OP_GLOBSERVSTATRES offsets +16/+20. See docs/server-client-communication.md.
+// told.
+//
+// SoftLimit is how many distinct files one session may source at a time. A file it
+// already sources can always be offered again and costs nothing; a new file past
+// the limit is ignored, and the client is sent one WARNING per session.
+//
+// HardLimit is how many records one OP_OFFERFILES packet may declare. A packet that
+// declares that many or more is refused whole, and the client is sent an ERROR and
+// disconnected. It is a limit on the packet, not on the session: a conforming client
+// sends at most 200 records per packet however much it shares, so it is never
+// disconnected by it, and the soft limit is what caps its share. Until this was
+// changed the hard limit counted every record of the session, and a client sharing
+// more than the limit was dropped each time it had republished that many.
+//
+// Both are enforced in handleOfferFiles and advertised at OP_GLOBSERVSTATRES offsets
+// +16/+20. See docs/server-client-communication.md.
 //
 // Pointers, not plain ints, for the same reason the *bool toggles are pointers: zero
 // is a meaningful value here (it means unlimited), so an absent key has to be
@@ -217,7 +231,27 @@ type UDPConfig struct {
 	// Status pings are not counted. A pointer so an explicit 0 (off) differs from
 	// absent (DefaultUDPRateLimitPerIPPerMinute).
 	RateLimitPerIPPerMinute *int `yaml:"rateLimitPerIPPerMinute"`
+	// BotDetection lists the addresses whose UDP queries look automated.
+	BotDetection BotDetectionConfig `yaml:"botDetection"`
 }
+
+// BotDetectionConfig is udp.botDetection. It only observes: a flagged address is
+// listed in the admin UI and stays subject to rateLimitPerIPPerMinute like any other.
+// See docs/bot-detection.md.
+type BotDetectionConfig struct {
+	// Enabled is a pointer so an absent key means on.
+	Enabled *bool `yaml:"enabled"`
+	// MinQueriesPerMinute is the rate below which an address is never flagged.
+	MinQueriesPerMinute int `yaml:"minQueriesPerMinute"`
+	// FloodQueriesPerMinute flags an address on its rate alone.
+	FloodQueriesPerMinute int `yaml:"floodQueriesPerMinute"`
+	// MaxIntervalStddevMs flags an address above MinQueriesPerMinute whose gaps
+	// between queries vary by less than this many milliseconds.
+	MaxIntervalStddevMs int `yaml:"maxIntervalStddevMs"`
+}
+
+// EnabledOrDefault reports whether bot detection runs, defaulting to true.
+func (c BotDetectionConfig) EnabledOrDefault() bool { return boolOrDefault(c.Enabled, true) }
 
 // DefaultUDPRateLimitPerIPPerMinute leaves a real client plenty: eMule sends one
 // global search per server and at most one OP_GLOBGETSOURCES per server per
@@ -820,6 +854,21 @@ func setDefaults(cfg *Config) error {
 	if cfg.Admin.Port == 0 {
 		cfg.Admin.Port = 4560
 	}
+	// The thresholds a real client never reaches: eMule sends a server one global
+	// search and about one source request a minute.
+	bots := &cfg.UDP.BotDetection
+	if bots.MinQueriesPerMinute == 0 {
+		bots.MinQueriesPerMinute = 200
+	}
+	if bots.FloodQueriesPerMinute == 0 {
+		bots.FloodQueriesPerMinute = 600
+	}
+	if bots.MaxIntervalStddevMs == 0 {
+		bots.MaxIntervalStddevMs = 50
+	}
+	if bots.MinQueriesPerMinute < 0 || bots.MaxIntervalStddevMs < 0 || bots.FloodQueriesPerMinute < bots.MinQueriesPerMinute {
+		return fmt.Errorf("udp.botDetection: minQueriesPerMinute and maxIntervalStddevMs must not be negative, and floodQueriesPerMinute must not be below minQueriesPerMinute")
+	}
 	if (cfg.Admin.Username == "") != (cfg.Admin.Password == "") {
 		return fmt.Errorf("admin.username and admin.password must be set together, or both left empty")
 	}
@@ -896,22 +945,18 @@ func setDefaults(cfg *Config) error {
 		return fmt.Errorf("storage.mysql.dialect %q is invalid: use %q or %q",
 			cfg.Storage.MySQL.Dialect, storage.DialectMariaDB, storage.DialectMySQL)
 	}
-	// The publish caps are rejected rather than clamped, on the same reasoning as the
-	// dialect above: both mistakes below are typos with a silent, wrong-behaviour
-	// outcome, and this package has no logger to warn through.
+	// A negative publish cap is rejected rather than clamped, on the same reasoning as
+	// the dialect above: it is a typo with a silent, wrong-behaviour outcome, and this
+	// package has no logger to warn through.
 	//
-	// hardLimit below softLimit is the interesting one. The two are checked in that
-	// order per record, so the session is closed before the soft warning could ever be
-	// sent — the operator has written a soft limit that can never fire and would have
-	// no way to tell.
+	// hardLimit below softLimit used to be rejected too, while both counted the
+	// records of a session: the session was closed before the soft warning could be
+	// sent. The hard limit is now on one packet and the soft limit on the session's
+	// files, so the two no longer order each other.
 	softFiles, hardFiles := cfg.Files.SoftLimitOrDefault(), cfg.Files.HardLimitOrDefault()
 	if softFiles < 0 || hardFiles < 0 {
 		return fmt.Errorf("files.softLimit (%d) and files.hardLimit (%d) must not be negative; 0 means unlimited",
 			softFiles, hardFiles)
-	}
-	if softFiles > 0 && hardFiles > 0 && hardFiles < softFiles {
-		return fmt.Errorf("files.hardLimit (%d) is below files.softLimit (%d): a client would be disconnected before the soft-limit warning could be sent",
-			hardFiles, softFiles)
 	}
 	if b := cfg.StatsBoost; b.Users < 0 || b.LowIDUsers < 0 || b.Files < 0 {
 		return fmt.Errorf("statsBoost.users (%d), statsBoost.lowIDUsers (%d) and statsBoost.files (%d) must not be negative",

@@ -1,0 +1,51 @@
+{{define "tab-files"}}
+<div class="tab" id="tab-files" hidden>
+<h2>Shared files</h2>
+<div class="tools">
+<input id="fiQ" placeholder="search file names (empty = browse)" size="34">
+<button id="fiSearch">Search</button>
+<button id="fiFirst">« first</button><button id="fiNext">next ›</button>
+<span class="desc" id="fiCount" style="margin:0"></span>
+</div>
+<p class="desc tabmsg" id="msg-files"></p>
+<div class="scroll"><table><thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Sources</th><th>Complete</th><th>Hash</th></tr></thead><tbody id="fiRows"></tbody></table></div>
+<p class="desc">Files the content filter withholds are not listed. A search returns its whole capped answer; browsing pages through the files that have a source online.</p>
+<div id="fiSources" hidden>
+<h2 id="fiSourcesTitle">Sources</h2>
+<table><thead><tr><th>Address</th><th>ID</th><th>IPv6</th></tr></thead><tbody id="fiSourceRows"></tbody></table>
+</div>
+</div>
+{{end}}
+
+{{define "js-files"}}
+(function(){
+  var cursor = '', next = '';
+  async function sources(f){
+    var rows = await api('/api/files/' + f.hash + '/sources');
+    document.getElementById('fiSources').hidden = false;
+    setText('fiSourcesTitle', 'Sources of ' + f.name);
+    fillTable('fiSourceRows', rows, function(s){
+      return [s.lowId ? s.ip : s.ip + ':' + s.port, s.lowId ? 'Low' : 'High', s.ipv6 || '—'];
+    }, 'no source online');
+  }
+  async function load(){
+    var q = document.getElementById('fiQ').value.trim();
+    var page = await api('/api/files?' + new URLSearchParams({q: q, cursor: cursor, limit: 100}));
+    next = page.next;
+    fillTable('fiRows', page.rows, function(f){
+      var name = el('a', f.name); name.href = '#files';
+      name.onclick = function(){ sources(f).catch(function(e){ tabMsg('files', e.message, true); }); };
+      return [name, fmtBytes(f.size), f.type || '—', num(f.sources), num(f.completed), el('code', f.hash)];
+    }, q ? 'no file matches' : 'no files');
+    setText('fiCount', num(page.rows.length) + (q ? ' matches' : ' files on this page'));
+    document.getElementById('fiNext').disabled = !next;
+    document.getElementById('fiFirst').disabled = !cursor;
+  }
+  function first(){ cursor = ''; document.getElementById('fiSources').hidden = true; runTab('files'); }
+  document.getElementById('fiSearch').onclick = first;
+  document.getElementById('fiFirst').onclick = first;
+  document.getElementById('fiQ').onkeydown = function(e){ if(e.key === 'Enter'){ first(); } };
+  document.getElementById('fiNext').onclick = function(){ cursor = next; runTab('files'); };
+  tabs.files = {load: load, poll: false};
+})();
+{{end}}

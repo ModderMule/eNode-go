@@ -3,6 +3,7 @@ package storage
 import (
 	"bufio"
 	"compress/gzip"
+	"encoding/binary"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -38,10 +39,11 @@ import (
 // would publish sources for peers that are not connected, and hand out LowID ids
 // that the pool has since reassigned to somebody else.
 //
-// File.Sources is restored as written even though the live source lists come back
-// empty. That is not a bug: MySQL's files.sources is a COUNT(*) over all source
-// rows, online or not, and nothing recomputes it at startup either. CleanupStale
-// brings both engines back in line on its first sweep.
+// File.Sources and File.Completed are written, as the counts stood, but not
+// restored: the memory engine stores no counts and derives them from the live
+// sources on every read, which after a load are none. MySQL's files.sources does
+// survive a restart as a stale COUNT(*), but nothing the memory engine answers
+// ever showed its equivalent, so nothing is lost by not keeping it.
 //
 // `servers` is not persisted, because no engine persists it — it is a plain in-RAM
 // slice on all three, rebuilt from the config on every boot by seedServers.
@@ -220,28 +222,33 @@ func (m *MemoryEngine) WriteSnapshot(path string, compress bool) (SnapshotStats,
 		Version:      snapshotVersion,
 		WrittenAt:    time.Now(),
 		Engine:       "memory",
-		Files:        uint64(len(m.files)),
+		Files:        uint64(m.count),
 		Clients:      uint64(len(m.clients)),
 		NextClientID: m.nextClientID,
 	}
-	for _, sources := range m.sources {
+	for _, sources := range m.more {
 		header.Sources += uint64(len(sources))
 	}
-	keys := make([]byte, 0, len(m.files)*fileMapKeyLen)
-	for k := range m.files {
-		if len(k) != fileMapKeyLen {
-			// Defensive: every key is a fileMapKey, hash+size. A short one could not
-			// be matched to its sources on load. Note this is not a cheap guard to get
-			// wrong — skipping every key empties the buffer, and an empty buffer is
-			// indistinguishable below from "the engine holds nothing", which returns
-			// success having written no file at all.
+	// A key is a fileMapKey, hash+size, built from the record. An empty buffer is
+	// indistinguishable below from "the engine holds nothing", which returns success
+	// having written no file at all.
+	keys := make([]byte, 0, m.count*fileMapKeyLen)
+	for id := range m.recs.len() {
+		rec := m.recs.at(uint32(id))
+		if rec.flags&recLive == 0 {
 			continue
 		}
-		keys = append(keys, k...)
+		keys = append(keys, rec.hash[:]...)
+		keys = binary.BigEndian.AppendUint64(keys, rec.size)
+	}
+	for _, head := range m.files {
+		if m.recs.at(head).first.peer != nil {
+			header.Sources++
+		}
 	}
 	clients := make([]ClientInfo, 0, len(m.clients))
-	for _, info := range m.clients {
-		clients = append(clients, cloneClientInfo(info))
+	for _, client := range m.clients {
+		clients = append(clients, cloneClientInfo(client.info))
 	}
 	m.mu.RUnlock()
 
@@ -359,19 +366,15 @@ func (m *MemoryEngine) LoadSnapshot(path string) (SnapshotStats, error) {
 	}
 	stats.Files = len(files)
 
-	var recs fileSlab
-	for _, file := range files {
-		recs.push(file)
-	}
-
 	m.mu.Lock()
 	// The name index is rebuilt with the records. A load runs at startup, before any
 	// session can search, so holding the lock for it costs nobody.
-	m.setFilesLocked(recs)
-	// The source map is left empty rather than merged, matching `online = 0`, and
-	// nextClientID keeps climbing so a restored StoreID can never be reissued to a
-	// live session — the memory-engine equivalent of clients.id AUTO_INCREMENT.
-	m.sources = make(map[string][]Source)
+	//
+	// The files come back without sources rather than merged with what the file
+	// held, matching `online = 0`, and nextClientID keeps climbing so a restored
+	// StoreID can never be reissued to a live session — the memory-engine equivalent
+	// of clients.id AUTO_INCREMENT.
+	m.installFilesLocked(files)
 	if header.NextClientID > m.nextClientID {
 		m.nextClientID = header.NextClientID
 	}
@@ -390,15 +393,15 @@ var gzipMagic = [2]byte{0x1f, 0x8b}
 
 // batchAt copies the entries for keys[from:to] out of the maps under one read lock.
 //
-// Copying rather than referencing matters: Source carries []byte fields that AddFile
-// would otherwise mutate in place under a later lock, while the gob encoder is still
-// reading them.
+// Copying rather than referencing matters: a File's hash is the record's own bytes,
+// which a later offer may overwrite under a later lock, while the gob encoder is
+// still reading them.
 func (m *MemoryEngine) batchAt(keys []byte, from, to int) SnapshotBatch {
 	batch := SnapshotBatch{
 		Files:   make([]File, 0, (to-from)/fileMapKeyLen),
 		Sources: make([]SnapshotSources, 0, (to-from)/fileMapKeyLen),
 	}
-	// A source bucket is keyed on the hash alone, so the two sizes of one hash share
+	// A source list belongs to the hash alone, so the two sizes of one hash share
 	// it and would otherwise be written — and counted — twice. Emitting each hash at
 	// most once per batch removes that in every realistic case; a hash whose sizes
 	// straddle a batch boundary can still duplicate, which is harmless because the
@@ -416,20 +419,18 @@ func (m *MemoryEngine) batchAt(keys []byte, from, to int) SnapshotBatch {
 			continue
 		}
 		hk := key[:snapshotHashLen]
-		// The stored record carries no counters (the engine derives them from the
-		// live source lists), so write the counts as they stand — what a DB engine's
-		// files.sources / files.completed hold at shutdown.
-		file.Sources, file.Completed = countSources(m.sources[hk], file.Size)
-		batch.Files = append(batch.Files, cloneFile(file))
+		// fileByKey copies the record out with the counts as they stand — what a DB
+		// engine's files.sources / files.completed hold at shutdown.
+		batch.Files = append(batch.Files, file)
 		if _, dup := seen[hk]; dup {
 			continue
 		}
 		seen[hk] = struct{}{}
-		if sources := m.sources[hk]; len(sources) > 0 {
-			cloned := make([]Source, 0, len(sources))
-			for _, s := range sources {
-				cloned = append(cloned, cloneSource(s))
-			}
+		var cloned []Source
+		m.eachSourceLocked(m.files[hashArray([]byte(hk))], func(s *memSource) {
+			cloned = append(cloned, cloneSource(s.source()))
+		})
+		if len(cloned) > 0 {
 			batch.Sources = append(batch.Sources, SnapshotSources{
 				FileHash: append([]byte(nil), file.Hash...),
 				Sources:  cloned,
@@ -533,11 +534,6 @@ func cloneClientInfo(info ClientInfo) ClientInfo {
 	info.Hash = append([]byte(nil), info.Hash...)
 	info.IPv6 = append([]byte(nil), info.IPv6...)
 	return info
-}
-
-func cloneFile(file File) File {
-	file.Hash = append([]byte(nil), file.Hash...)
-	return file
 }
 
 func cloneSource(s Source) Source {

@@ -27,13 +27,14 @@
 - NAT 穿透服务端（`OP_VC_NAT_HEADER`、`OP_NAT_REGISTER`、`OP_NAT_SYNC2`）：双栈 UDP 打洞，支持 LowID↔LowID 与被防火墙隔离的 IPv6↔IPv6 对端（每个客户端保存一个 v4 和一个 v6 候选端点，优先 v6）；由 `natTraversal.ipv6` 控制（默认开启，需 `ipv6.enabled`）。注册表以用户 hash 为键、与登录无关，因此 `natTraversal.serverIndependent`（默认开启）可为**位于不同服务器或未连接任何服务器**的客户端配对——跨服务器 / 无服务器 LowID↔LowID——并通过 `SRV_TCPFLG_NAT_RENDEZVOUS (0x8000)` 及 `OP_SERVERIDENT` 中的 NAT 端口标签对外通告。详见 [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md) §9。
 - IPv6 双栈：接受 IPv6 登录、记录并校验各客户端的 IPv6、发布 IPv6 源，并在 `OP_SERVERLIST` 中通告 IPv6 对端服务器（兼容 eMuleAI/eMuleQt 的 `CT_MOD_*`）。详见 [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md)。设置 `ipv6.enabled: false` 可恢复纯 IPv4 行为。
 - 支持大于 4 GiB 的文件
-- 管理状态面板：仅用 Go 标准库（零第三方依赖）通过 HTTP 提供的单页自包含 HTML，展示实时的客户端 / 文件 / LowID / 对等服务器数量、监听端口、已启用特性、版本与运行时长。默认开启且仅绑定 `127.0.0.1`；实时数据轮询 `/stats.json` 接口。详见 [`docs/admin-status-dashboard.md`](docs/admin-status-dashboard.md)。公开的 `GET /healthz` 与 `GET /status` 由 Meta API 的 HTTP 监听端口提供，详见 [`docs/meta-api.md`](docs/meta-api.md#health-and-status)。
+- 管理面板：仅用 Go 标准库（零第三方依赖）通过 HTTP 提供的自包含分页（标签页）HTML。状态页展示实时的客户端 / 文件 / LowID / 对等服务器数量、监听端口、已启用特性、版本与运行时长；其余标签页列出客户端、文件、对等服务器、过滤器、封禁、自动化查询者、拒绝统计、健康状况、运行时、账户以及生效配置（隐藏密钥）。默认开启且仅绑定 `127.0.0.1`；状态页之外的内容需要回环访问或配置 `admin.username` / `admin.password`。详见 [`docs/admin-status-dashboard.md`](docs/admin-status-dashboard.md)。公开的 `GET /healthz` 与 `GET /status` 由 Meta API 的 HTTP 监听端口提供，详见 [`docs/meta-api.md`](docs/meta-api.md#health-and-status)。
 - 内存引擎快照：可将内存中的索引按周期及关闭时持久化为 gob 文件，并在启动时重新载入，
   重启后无需再依赖客户端重新上报来重建索引。默认关闭；恢复后的状态与 mysql 引擎重启后
   完全一致。详见 [`docs/storage-snapshot.md`](docs/storage-snapshot.md)。
 - 每个客户端的文件发布上限：Lugdunum 的 `softLimit` / `hardLimit`，现已可配置并真正生效。
-  超过软上限时向客户端发送一次警告并忽略多出的文件；超过硬上限时告知原因并断开连接。
-  计数在整个会话内累计，因为 eMule 单个数据包最多只发送 200 个文件。
+  软上限是单个客户端同时可发布的不同文件数：超过后向客户端发送一次警告并忽略新增的文件。
+  硬上限是单个数据包可声明的文件数：达到后告知原因并断开连接；标准 eMule 每个数据包最多
+  只发送 200 个文件，因此不会触发。
   详见 [`docs/server-client-communication.md`](docs/server-client-communication.md#per-client-publish-limits)。
 - 请求前必须登录：除 `OP_LOGINREQUEST` 与 `OP_DISCONNECT` 外的所有 TCP 操作码，在会话尚未登录时一律拒绝，
   因此任何内容都无法在缺少可记账、可清理的身份的情况下写入索引。
@@ -118,8 +119,8 @@ udp:
   rateLimitPerIPPerMinute: 120 # 每个地址（IPv6 按 /64）每分钟的 UDP 搜索和来源请求数；0 = 关闭
 
 files:                       # 每个客户端的发布上限（见 docs/server-client-communication.md）
-  softLimit: 10000           # 超出部分被忽略，并向客户端发送一次警告；0 表示不限制
-  hardLimit: 20000           # 超出后告知客户端原因并断开连接；0 表示不限制
+  softLimit: 10000           # 每个客户端的不同文件数；超出的新文件被忽略，并向客户端发送一次警告；0 表示不限制
+  hardLimit: 20000           # 每个 OP_OFFERFILES 数据包的文件数；达到后告知客户端原因并断开连接；0 表示不限制
 
 natTraversal:
   enabled: true              # 是否启用 NAT 穿透服务
@@ -141,7 +142,9 @@ ipv6:                        # IPv6 双栈；整段省略即为仅 IPv4 行为
 admin:                       # 本机管理状态面板（仅标准库实现的 HTTP 页面）
   enabled: true              # 默认开启；整段省略也视为开启
   bindIP: "127.0.0.1"        # 仅回环地址；"0.0.0.0" / "::" 会在所有网卡上暴露
-  port: 4560                 # HTTP 端口（无鉴权——请保持仅回环访问）
+  port: 4560                 # HTTP 端口
+  username: ""               # 非回环客户端的 Basic 认证；两者须同时设置或同时留空。
+  password: ""               # 留空时，非本机客户端只能看到状态页
 
 storage:
   engine: memory             # 存储引擎：memory | mysql | mongodb

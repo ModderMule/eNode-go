@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -65,6 +66,16 @@ type MySQLEngine struct {
 	cfg     MySQLConfig
 	db      *sql.DB
 	servers []Server
+
+	// offered counts, per clients.id of a connected session, the files it sources
+	// now: what OfferedCount answers without a round-trip. Connect starts it,
+	// addFilesChunk adds the files that were not online for the client before the
+	// chunk, Disconnect drops it.
+	offeredMu sync.Mutex
+	offered   map[uint64]int
+	// sessions keeps a Connect from running into the middle of a Disconnect of the
+	// same user; see hashGate.
+	sessions hashGate
 }
 
 func NewMySQLEngine(cfg MySQLConfig) (*MySQLEngine, error) {
@@ -94,7 +105,7 @@ func NewMySQLEngine(cfg MySQLConfig) (*MySQLEngine, error) {
 	if cfg.Dialect == "" {
 		cfg.Dialect = DialectMariaDB
 	}
-	return &MySQLEngine{cfg: cfg}, nil
+	return &MySQLEngine{cfg: cfg, offered: map[uint64]int{}}, nil
 }
 
 // defaultSchemaFile is the DDL applied on first connect. Relative so a server
@@ -218,6 +229,7 @@ func (m *MySQLEngine) Connect(info ClientInfo) (uint64, error) {
 	if err := m.ensureDB(); err != nil {
 		return 0, err
 	}
+	defer m.sessions.lock(info.Hash)()
 	_, err := m.db.Exec(
 		`INSERT INTO clients(hash, id_ed2k, ipv4, port, crypt_options, ipv6, ipv6_reachable, online) VALUES(?,?,?,?,?,?,?,1)
 		 ON DUPLICATE KEY UPDATE id_ed2k=VALUES(id_ed2k), ipv4=VALUES(ipv4), port=VALUES(port), crypt_options=VALUES(crypt_options), ipv6=VALUES(ipv6), ipv6_reachable=VALUES(ipv6_reachable), online=1`,
@@ -230,6 +242,14 @@ func (m *MySQLEngine) Connect(info ClientInfo) (uint64, error) {
 	if err := m.db.QueryRow(`SELECT id FROM clients WHERE hash = ? LIMIT 1`, info.Hash).Scan(&id); err != nil {
 		return 0, err
 	}
+	// A client row is reused across sessions and keeps its sources, offline. None
+	// is online at this point, so the new session starts from no files.
+	m.offeredMu.Lock()
+	if m.offered == nil {
+		m.offered = map[uint64]int{}
+	}
+	m.offered[id] = 0
+	m.offeredMu.Unlock()
 	return id, nil
 }
 
@@ -237,7 +257,11 @@ func (m *MySQLEngine) Disconnect(info ClientInfo) {
 	if err := m.ensureDB(); err != nil {
 		return
 	}
-	// Both through execRetry: marking a client's sources offline locks the same
+	defer m.sessions.lock(info.Hash)()
+	m.offeredMu.Lock()
+	delete(m.offered, info.StoreID)
+	m.offeredMu.Unlock()
+	// All through execRetry: marking a client's sources offline locks the same
 	// sources rows a concurrent counter refresh reads, and under load InnoDB picks
 	// this statement as the deadlock victim. Without a retry the sources stayed
 	// online — advertised by GetSources for a client that had already gone.
@@ -247,16 +271,39 @@ func (m *MySQLEngine) Disconnect(info ClientInfo) {
 	}); err != nil {
 		logging.Errorf("mysql disconnect client storeID=%d failed: %v", info.StoreID, err)
 	}
-	if err := m.execRetry("disconnect sources", func() error {
-		_, err := m.db.Exec(`UPDATE sources SET online = 0 WHERE id_client = ?`, info.StoreID)
-		return err
-	}); err != nil {
-		logging.Errorf("mysql disconnect sources storeID=%d failed: %v", info.StoreID, err)
+	// disconnectChunk rows per statement. One statement for a client sourcing a
+	// hundred thousand files held that many row locks until it committed, and every
+	// offer of one of those files waited behind it. The client row is offline
+	// already, so no lookup returns a source that is still waiting its turn.
+	large := false
+	for {
+		var affected int64
+		err := m.execRetry("disconnect sources", func() error {
+			res, err := m.db.Exec(`UPDATE sources SET online = 0 WHERE id_client = ? AND online = 1 LIMIT ?`,
+				info.StoreID, disconnectChunk)
+			if err != nil {
+				return err
+			}
+			affected, err = res.RowsAffected()
+			return err
+		})
+		if err != nil {
+			logging.Errorf("mysql disconnect sources storeID=%d failed: %v", info.StoreID, err)
+			break
+		}
+		if affected < disconnectChunk {
+			break
+		}
+		large = true
 	}
 	// A search result names files.source_id/source_port as one source. Left on a
 	// client that is gone, it points at whoever holds that LowID next; clear it on
 	// the files this client offered (the id_client index keeps this to its own).
 	if info.ID == 0 {
+		return
+	}
+	if large {
+		m.clearResultSourceInChunks(info)
 		return
 	}
 	if err := m.execRetry("disconnect result source", func() error {
@@ -267,6 +314,63 @@ func (m *MySQLEngine) Disconnect(info ClientInfo) {
 	}); err != nil {
 		logging.Errorf("mysql disconnect result source storeID=%d failed: %v", info.StoreID, err)
 	}
+}
+
+// OfferedCount answers from the count Connect, addFilesChunk and Disconnect keep.
+func (m *MySQLEngine) OfferedCount(info ClientInfo) int {
+	m.offeredMu.Lock()
+	defer m.offeredMu.Unlock()
+	return m.offered[info.StoreID]
+}
+
+// HasOffered is one indexed query per offerBatchSize files. A query that fails
+// reports its files as not offered, so they are held to the soft limit like new
+// ones rather than let past it.
+func (m *MySQLEngine) HasOffered(info ClientInfo, files []File) []bool {
+	out := make([]bool, len(files))
+	if err := m.ensureDB(); err != nil {
+		return out
+	}
+	for start := 0; start < len(files); start += offerBatchSize {
+		chunk := files[start:min(start+offerBatchSize, len(files))]
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, info.StoreID)
+		for _, f := range chunk {
+			args = append(args, f.Hash)
+		}
+		online := make(map[offerKey]struct{}, len(chunk))
+		err := m.execRetry("offered lookup", func() error {
+			rows, err := m.db.Query(
+				`SELECT f.hash, f.size
+				 FROM sources s
+				 INNER JOIN files f ON f.id = s.id_file
+				 WHERE s.id_client = ? AND s.online = 1 AND f.hash IN (`+sqlPlaceholders(len(chunk))+`)`,
+				args...)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var (
+					hash []byte
+					size uint64
+				)
+				if err := rows.Scan(&hash, &size); err != nil {
+					return err
+				}
+				online[offerKey{hash: string(hash), size: size}] = struct{}{}
+			}
+			return rows.Err()
+		})
+		if err != nil {
+			logging.Errorf("mysql offered lookup storeID=%d of %d file(s) failed: %v", info.StoreID, len(chunk), err)
+			continue
+		}
+		for i, f := range chunk {
+			_, out[start+i] = online[offerKey{hash: string(f.Hash), size: f.Size}]
+		}
+	}
+	return out
 }
 
 func (m *MySQLEngine) FilesCount() int {
@@ -622,6 +726,12 @@ func (m *MySQLEngine) ServersCount() int {
 
 func (m *MySQLEngine) AddServer(server Server) {
 	m.servers, _ = appendUniqueServer(m.servers, server)
+}
+
+func (m *MySQLEngine) RemoveServer(server Server) bool {
+	var removed bool
+	m.servers, removed = removeServer(m.servers, server)
+	return removed
 }
 
 func (m *MySQLEngine) ServersAll() []Server {
@@ -1031,23 +1141,39 @@ func (m *MySQLEngine) addFilesChunk(files []File, clientInfo ClientInfo) error {
 	// IN is served by KEY hash on every MySQL and MariaDB version this engine
 	// supports, which the row-constructor form is not. The same hash at another size
 	// comes back too and simply matches no key below.
+	//
+	// The join says which of the files this client already sources online. It rides
+	// on the read the offer makes anyway, through UNIQUE(id_file, id_client), and is
+	// what keeps OfferedCount exact without a query of its own.
 	ids := make(map[offerKey]uint64, len(files))
+	sourced := make(map[offerKey]struct{})
 	if err := m.execRetry("lookup file ids", func() error {
-		rows, err := m.db.Query(`SELECT id, hash, size FROM files WHERE hash IN (`+sqlPlaceholders(len(hashArgs))+`)`, hashArgs...)
+		clear(sourced)
+		rows, err := m.db.Query(
+			`SELECT f.id, f.hash, f.size, s.id_file IS NOT NULL
+			 FROM files f
+			 LEFT JOIN sources s ON s.id_file = f.id AND s.id_client = ? AND s.online = 1
+			 WHERE f.hash IN (`+sqlPlaceholders(len(hashArgs))+`)`,
+			append([]any{clientInfo.StoreID}, hashArgs...)...)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var (
-				id   uint64
-				hash []byte
-				size uint64
+				id     uint64
+				hash   []byte
+				size   uint64
+				online int
 			)
-			if err := rows.Scan(&id, &hash, &size); err != nil {
+			if err := rows.Scan(&id, &hash, &size, &online); err != nil {
 				return err
 			}
-			ids[offerKey{hash: string(hash), size: size}] = id
+			key := offerKey{hash: string(hash), size: size}
+			ids[key] = id
+			if online != 0 {
+				sourced[key] = struct{}{}
+			}
 		}
 		return rows.Err()
 	}); err != nil {
@@ -1065,6 +1191,12 @@ func (m *MySQLEngine) addFilesChunk(files []File, clientInfo ClientInfo) error {
 			return fmt.Errorf("lookup file ids: hash=%x size=%d missing right after its upsert", f.Hash, f.Size)
 		}
 		resolved = append(resolved, fileRow{id: id, file: f})
+	}
+	fresh := 0
+	for _, f := range files {
+		if _, ok := sourced[offerKey{hash: string(f.Hash), size: f.Size}]; !ok {
+			fresh++
+		}
 	}
 	// Ordered by id, so concurrent batches insert into sources' UNIQUE(id_file, id_client)
 	// in the same order as each other.
@@ -1107,8 +1239,72 @@ func (m *MySQLEngine) addFilesChunk(files []File, clientInfo ClientInfo) error {
 	}); err != nil {
 		return err
 	}
+	// Counted once the sources are in. If the refresh below fails and the chunk is
+	// retried file by file, the lookup then finds them online and adds nothing.
+	m.offeredMu.Lock()
+	if _, connected := m.offered[clientInfo.StoreID]; connected {
+		m.offered[clientInfo.StoreID] += fresh
+	}
+	m.offeredMu.Unlock()
 
 	return m.refreshFileCounters(fileIDs, &counterSource{ID: clientInfo.ID, Port: clientInfo.Port})
+}
+
+// clearResultSourceInChunks is Disconnect's last step for a client with many
+// sources: the files it was named on as the result source, disconnectChunk source
+// rows at a time. The single joined UPDATE it stands in for locks every one of the
+// client's file rows until it commits.
+func (m *MySQLEngine) clearResultSourceInChunks(info ClientInfo) {
+	after := uint64(0)
+	for {
+		fileIDs := make([]any, 0, disconnectChunk)
+		err := m.execRetry("disconnect result source page", func() error {
+			fileIDs = fileIDs[:0]
+			// By primary key, which the id_client index carries, so a page is an
+			// index range and not a sort of all the client's rows.
+			rows, err := m.db.Query(
+				`SELECT id, id_file FROM sources WHERE id_client = ? AND id > ? ORDER BY id LIMIT ?`,
+				info.StoreID, after, disconnectChunk)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			last := after
+			for rows.Next() {
+				var id, fileID uint64
+				if err := rows.Scan(&id, &fileID); err != nil {
+					return err
+				}
+				last = id
+				fileIDs = append(fileIDs, fileID)
+			}
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			after = last
+			return nil
+		})
+		if err != nil {
+			logging.Errorf("mysql disconnect result source storeID=%d failed: %v", info.StoreID, err)
+			return
+		}
+		if len(fileIDs) == 0 {
+			return
+		}
+		args := append(fileIDs[:len(fileIDs):len(fileIDs)], info.ID, info.Port)
+		if err := m.execRetry("disconnect result source", func() error {
+			_, err := m.db.Exec(
+				`UPDATE files SET source_id = 0, source_port = 0
+				 WHERE id IN (`+sqlPlaceholders(len(fileIDs))+`) AND source_id = ? AND source_port = ?`,
+				args...)
+			return err
+		}); err != nil {
+			logging.Errorf("mysql disconnect result source storeID=%d failed: %v", info.StoreID, err)
+		}
+		if len(fileIDs) < disconnectChunk {
+			return
+		}
+	}
 }
 
 // logMySQLAddFileError reports one file that could not be stored even on its own.

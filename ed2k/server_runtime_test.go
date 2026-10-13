@@ -235,20 +235,20 @@ func TestNATKeepaliveReplyUsesSameUDPListenerPort(t *testing.T) {
 // bitrate (128/192/256 all fit in a byte). Before normalization each exact uint32
 // assertion failed and every one of these fields was stored as zero.
 func TestFileFromRecordNarrowedIntTags(t *testing.T) {
-	record := FileRecord{
+	tags := map[string]any{
+		"name":            "song.mp3",
+		"sources":         uint64(3),   // wire TAGTYPE_UINT8
+		"completesources": uint64(1),   // wire TAGTYPE_UINT8
+		"length":          uint64(210), // wire TAGTYPE_UINT8
+		"bitrate":         uint64(128), // wire TAGTYPE_UINT8
+	}
+	record := recordWithTags(FileRecord{
 		Hash:     []byte{5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5},
 		Size:     4096,
 		Complete: true,
-		Tags: map[string]any{
-			"name":            "song.mp3",
-			"sources":         uint64(3),   // wire TAGTYPE_UINT8
-			"completesources": uint64(1),   // wire TAGTYPE_UINT8
-			"length":          uint64(210), // wire TAGTYPE_UINT8
-			"bitrate":         uint64(128), // wire TAGTYPE_UINT8
-		},
-	}
+	}, tags)
 	info := storage.ClientInfo{ID: 0x0100007f, Port: 4662}
-	t.Logf("input: tags=%v", record.Tags)
+	t.Logf("input: tags=%v", tags)
 
 	file := fileFromRecord(record, info)
 	t.Logf("output: Sources=%d Completed=%d Runtime=%d Bitrate=%d Type=%q",
@@ -274,13 +274,12 @@ func TestFileFromRecordNarrowedIntTags(t *testing.T) {
 // for values that do not fit a uint32 field, so a hostile or buggy client cannot
 // wrap a count around to a small number.
 func TestFileFromRecordSaturatesOversizedTag(t *testing.T) {
-	record := FileRecord{
+	record := recordWithTags(FileRecord{
 		Hash: []byte{6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6},
-		Tags: map[string]any{
-			"name":    "evil.bin",
-			"sources": uint64(1) << 40,
-		},
-	}
+	}, map[string]any{
+		"name":    "evil.bin",
+		"sources": uint64(1) << 40,
+	})
 	t.Logf("input: sources=%d (exceeds uint32)", uint64(1)<<40)
 
 	file := fileFromRecord(record, storage.ClientInfo{})

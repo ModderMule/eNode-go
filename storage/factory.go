@@ -32,6 +32,16 @@ type Engine interface {
 	// round-trips instead of several per file, which is the difference between an
 	// OP_OFFERFILES costing milliseconds and costing a minute over a WAN.
 	AddFiles([]File, ClientInfo)
+	// OfferedCount is how many distinct files the session sources now: what it has
+	// offered since Connect, each file once however often it was re-offered. It is
+	// what files.softLimit is held against, and is asked on every OP_OFFERFILES, so
+	// it must not cost a round-trip: a DB engine answers from a count it keeps as
+	// AddFiles writes.
+	OfferedCount(ClientInfo) int
+	// HasOffered reports, for each file, whether the session sources it now. Only
+	// an offer that could cross the soft limit asks, to tell a re-offer, which is
+	// always accepted, from a new file, which is not.
+	HasOffered(ClientInfo, []File) []bool
 	GetSources([]byte, uint64) []Source
 	GetSourcesByHash([]byte) []Source
 	// SharedFiles returns the files with one of the hashes that an online client
@@ -53,6 +63,8 @@ type Engine interface {
 	FindBySearch(*SearchExpr) []File
 	ServersCount() int
 	AddServer(Server)
+	// RemoveServer drops one server list entry and reports whether it was there.
+	RemoveServer(Server) bool
 	ServersAll() []Server
 	// CleanupStale removes offline clients and sources untouched for longer than
 	// maxAge, and returns how many of each it deleted. Implementations must

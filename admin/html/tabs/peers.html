@@ -1,0 +1,43 @@
+{{define "tab-peers"}}
+<div class="tab" id="tab-peers" hidden>
+<h2>Gossip peer servers</h2>
+<p class="desc tabmsg" id="msg-peers"></p>
+<div class="scroll"><table><thead><tr><th>Server</th><th>Address</th><th>Country</th><th>Users</th><th>Files</th><th>State</th><th>Last seen</th><th>Told by</th></tr></thead><tbody id="peRows"></tbody></table></div>
+<h2>Static server list</h2>
+<div class="tools">
+<input id="peIP" placeholder="IP address" size="24"><input id="pePort" type="number" min="1" max="65535" placeholder="port" style="width:7em">
+<button id="peAdd">Add server</button>
+</div>
+<table><thead><tr><th>Address</th><th></th></tr></thead><tbody id="peStatic"></tbody></table>
+<p class="desc">These are sent to clients in the server list alongside the verified gossip peers. A change made here lasts until the next restart or config reload: the <code>servers:</code> list of the config file is applied again then.</p>
+</div>
+{{end}}
+
+{{define "js-peers"}}
+(function(){
+  function render(d){
+    var peers = d.gossip.slice().sort(function(a, b){ return b.users - a.users; });
+    fillTable('peRows', peers, function(p){
+      var name = el('span', p.name || (p.state === 'seen' ? 'not asked yet' : 'no answer'));
+      if(p.desc){ name.appendChild(el('div', p.desc, 'off')); }
+      var state = el('span', p.parked ? 'parked' : p.state, 'badge ' + (p.parked ? 'err' : p.state === 'verified' ? 'ok' : 'warn'));
+      state.title = p.failures + ' failed round(s)' + (p.serverSearch ? ' · offers server search' : '');
+      return [name, p.ip + ':' + p.port, p.country || '—', num(p.users), num(p.files), state,
+        p.lastSeen ? fmtAge(p.lastSeen) + ' ago' : 'never', p.referer || '—'];
+    }, d.gossipEnabled ? 'no gossip peers yet' : 'gossip is off');
+    fillTable('peStatic', d.static, function(s){
+      var rm = el('button', 'Remove', 'danger');
+      rm.onclick = function(){
+        if(!confirm('Remove ' + s.ip + ':' + s.port + ' from the server list?')){ return; }
+        act('peers', '/api/servers/' + s.ip + '/' + s.port, 'DELETE', undefined, render);
+      };
+      return [s.ip + ':' + s.port, rm];
+    }, 'no static servers');
+  }
+  document.getElementById('peAdd').onclick = function(){
+    act('peers', '/api/servers', 'POST',
+      {ip: document.getElementById('peIP').value, port: parseInt(document.getElementById('pePort').value, 10) || 0}, render);
+  };
+  tabs.peers = {load: async function(){ render(await api('/api/peers')); }, poll: true};
+})();
+{{end}}

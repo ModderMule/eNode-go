@@ -166,9 +166,7 @@ func TestMemoryIndexReusedID(t *testing.T) {
 
 	// Before the sweep the dead id is still listed; it must not be returned.
 	m.mu.Lock()
-	*m.recs.at(0) = File{}
-	m.dead = append(m.dead, 0)
-	delete(m.files, fileMapKey(fileHash(1), 1))
+	m.removeRecLocked(0)
 	m.mu.Unlock()
 	if got := m.FindBySearch(&SearchExpr{Kind: SearchText, Text: "gone"}); len(got) != 0 {
 		t.Fatalf("a removed file was returned: %+v", got)

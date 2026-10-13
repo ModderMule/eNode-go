@@ -7,6 +7,8 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -32,6 +34,30 @@ type MongoDBEngine struct {
 	client  *mongo.Client
 	db      *mongo.Database
 	servers []Server
+
+	// offered counts, per user hash of a connected session, the files it sources
+	// now: what OfferedCount answers without a round-trip. Connect starts it,
+	// addFilesChunk adds what each chunk newly brought online, Disconnect drops it.
+	offeredMu sync.Mutex
+	offered   map[string]int
+	// offerSeq numbers the chunks addFilesChunk writes; see offerMark.
+	offerSeq atomic.Int64
+	// sessions keeps a Connect from running into the middle of a Disconnect of the
+	// same user; see hashGate.
+	sessions hashGate
+}
+
+// offerMark is how addFilesChunk learns which of the sources it just wrote were not
+// online for the client before, without reading them first.
+//
+// Every source the chunk writes gets `$min: {live: token}`. A source the session
+// already had online carries an earlier, smaller token and keeps it; one that was
+// absent, or offline (Disconnect and Init unset the field), takes this chunk's. The
+// counter refresh aggregates these very sources anyway, so it counts the client's
+// documents whose live is the token on the way: the files new to the session.
+type offerMark struct {
+	client []byte
+	token  int64
 }
 
 func NewMongoDBEngine(cfg MongoConfig) (*MongoDBEngine, error) {
@@ -41,7 +67,10 @@ func NewMongoDBEngine(cfg MongoConfig) (*MongoDBEngine, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
-	return &MongoDBEngine{cfg: cfg}, nil
+	m := &MongoDBEngine{cfg: cfg, offered: map[string]int{}}
+	// From the clock, so a token is larger than any an earlier run left behind.
+	m.offerSeq.Store(time.Now().UnixNano())
+	return m, nil
 }
 
 func (m *MongoDBEngine) ensureDB() error {
@@ -69,7 +98,8 @@ func (m *MongoDBEngine) Init() error {
 	if _, err := db.Collection("clients").UpdateMany(ctx, bson.M{}, bson.M{"$set": bson.M{"online": false}}); err != nil {
 		logging.Errorf("mongodb reset clients online flag failed: %v", err)
 	}
-	if _, err := db.Collection("sources").UpdateMany(ctx, bson.M{}, bson.M{"$set": bson.M{"online": false}}); err != nil {
+	if _, err := db.Collection("sources").UpdateMany(ctx, bson.M{},
+		bson.M{"$set": bson.M{"online": false}, "$unset": bson.M{"live": ""}}); err != nil {
 		logging.Errorf("mongodb reset sources online flag failed: %v", err)
 	}
 
@@ -123,6 +153,7 @@ func (m *MongoDBEngine) Connect(info ClientInfo) (uint64, error) {
 	if err := m.ensureDB(); err != nil {
 		return 0, err
 	}
+	defer m.sessions.lock(info.Hash)()
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
 	defer cancel()
 	doc := bson.M{
@@ -151,6 +182,14 @@ func (m *MongoDBEngine) Connect(info ClientInfo) (uint64, error) {
 	if err := m.db.Collection("clients").FindOne(ctx, bson.M{"hash": info.Hash}).Decode(&got); err != nil {
 		return 0, err
 	}
+	// A client's sources outlive its session, offline. None is online at this
+	// point, so the new session starts from no files.
+	m.offeredMu.Lock()
+	if m.offered == nil {
+		m.offered = map[string]int{}
+	}
+	m.offered[string(info.Hash)] = 0
+	m.offeredMu.Unlock()
 	return uint64(got.IDEd2K), nil
 }
 
@@ -158,6 +197,7 @@ func (m *MongoDBEngine) Disconnect(info ClientInfo) {
 	if err := m.ensureDB(); err != nil {
 		return
 	}
+	defer m.sessions.lock(info.Hash)()
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
 	defer cancel()
 	// Match on the user hash, not the ed2k ID. An ID is reassigned to a different
@@ -168,6 +208,9 @@ func (m *MongoDBEngine) Disconnect(info ClientInfo) {
 		logging.Errorf("mongodb disconnect called without a client hash (ed2k=%d)", info.ID)
 		return
 	}
+	m.offeredMu.Lock()
+	delete(m.offered, string(info.Hash))
+	m.offeredMu.Unlock()
 	// time_login is refreshed here so it means "last state change", matching
 	// MySQL, where the column is declared ON UPDATE CURRENT_TIMESTAMP and so is
 	// bumped by this same update. Without it the two engines would expire rows at
@@ -179,7 +222,7 @@ func (m *MongoDBEngine) Disconnect(info ClientInfo) {
 		logging.Errorf("mongodb disconnect client hash=%x failed: %v", info.Hash, err)
 	}
 	if _, err := m.db.Collection("sources").UpdateMany(ctx, bson.M{"client_hash": info.Hash},
-		bson.M{"$set": bson.M{"online": false, "time_offer": now}}); err != nil {
+		bson.M{"$set": bson.M{"online": false, "time_offer": now}, "$unset": bson.M{"live": ""}}); err != nil {
 		logging.Errorf("mongodb disconnect sources hash=%x failed: %v", info.Hash, err)
 	}
 	// A search result names files.source_id/source_port as one source. Left on a
@@ -197,11 +240,57 @@ func (m *MongoDBEngine) Disconnect(info ClientInfo) {
 	if err != nil || len(values) == 0 {
 		return
 	}
-	if _, err := m.db.Collection("files").UpdateMany(ctx,
-		bson.M{"hash": bson.M{"$in": values}, "source_id": info.ID, "source_port": info.Port},
-		bson.M{"$set": bson.M{"source_id": uint32(0), "source_port": uint16(0)}}); err != nil {
-		logging.Errorf("mongodb disconnect result source hash=%x failed: %v", info.Hash, err)
+	// disconnectChunk hashes per update, each with its own deadline. A client
+	// sourcing a hundred thousand files made this one statement with a megabyte-sized
+	// $in, which had to finish inside what the two updates above left of ctx.
+	in := make([]any, len(values))
+	for i, v := range values {
+		in[i] = v
 	}
+	for _, chunk := range chunkAny(in, disconnectChunk) {
+		chunkCtx, chunkCancel := m.opContext()
+		_, err := m.db.Collection("files").UpdateMany(chunkCtx,
+			bson.M{"hash": bson.M{"$in": chunk}, "source_id": info.ID, "source_port": info.Port},
+			bson.M{"$set": bson.M{"source_id": uint32(0), "source_port": uint16(0)}})
+		chunkCancel()
+		if err != nil {
+			logging.Errorf("mongodb disconnect result source hash=%x failed: %v", info.Hash, err)
+			return
+		}
+	}
+}
+
+// OfferedCount answers from the count Connect, addFilesChunk and Disconnect keep.
+func (m *MongoDBEngine) OfferedCount(info ClientInfo) int {
+	m.offeredMu.Lock()
+	defer m.offeredMu.Unlock()
+	return m.offered[string(info.Hash)]
+}
+
+// HasOffered is one indexed query per offerBatchSize files. A query that fails
+// reports its files as not offered, so they are held to the soft limit like new
+// ones rather than let past it.
+func (m *MongoDBEngine) HasOffered(info ClientInfo, files []File) []bool {
+	out := make([]bool, len(files))
+	if err := m.ensureDB(); err != nil {
+		return out
+	}
+	for start := 0; start < len(files); start += offerBatchSize {
+		chunk := files[start:min(start+offerBatchSize, len(files))]
+		hashes := make([]any, len(chunk))
+		for i, f := range chunk {
+			hashes[i] = f.Hash
+		}
+		online, err := m.onlineSources(info.Hash, hashes)
+		if err != nil {
+			logging.Errorf("mongodb offered lookup client=%x of %d file(s) failed: %v", info.Hash, len(chunk), err)
+			continue
+		}
+		for i, f := range chunk {
+			_, out[start+i] = online[offerKey{hash: string(f.Hash), size: f.Size}]
+		}
+	}
+	return out
 }
 
 func (m *MongoDBEngine) FilesCount() int {
@@ -746,7 +835,7 @@ func (m *MongoDBEngine) CleanupStale(maxAge time.Duration, opts CleanupOptions) 
 	// size the MySQL engine uses for its DELETEs.
 	for start := 0; start < len(affected); start += batch {
 		chunk := affected[start:min(start+batch, len(affected))]
-		if err := m.refreshFileCounters(chunk, nil); err != nil {
+		if _, err := m.refreshFileCounters(chunk, nil, nil); err != nil {
 			logging.Errorf("mongodb cleanup recount files=%d failed: %v", len(chunk), err)
 		}
 	}
@@ -775,6 +864,12 @@ func (m *MongoDBEngine) ServersCount() int {
 
 func (m *MongoDBEngine) AddServer(server Server) {
 	m.servers, _ = appendUniqueServer(m.servers, server)
+}
+
+func (m *MongoDBEngine) RemoveServer(server Server) bool {
+	var removed bool
+	m.servers, removed = removeServer(m.servers, server)
+	return removed
 }
 
 func (m *MongoDBEngine) ServersAll() []Server {
@@ -1045,6 +1140,7 @@ func (m *MongoDBEngine) affectedFileKeys(ctx context.Context, staleSources bson.
 // only when an operation failed as a whole, which is what AddFiles retries.
 func (m *MongoDBEngine) addFilesChunk(files []File, clientInfo ClientInfo) error {
 	now := time.Now()
+	mark := &offerMark{client: clientInfo.Hash, token: m.offerSeq.Add(1)}
 
 	fileModels := make([]mongo.WriteModel, len(files))
 	for i, file := range files {
@@ -1093,7 +1189,7 @@ func (m *MongoDBEngine) addFilesChunk(files []File, clientInfo ClientInfo) error
 		}
 		sourceModels = append(sourceModels, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"file_hash": file.Hash, "file_size": file.Size, "client_hash": clientInfo.Hash}).
-			SetUpdate(bson.M{"$set": src}).
+			SetUpdate(bson.M{"$set": src, "$min": bson.M{"live": mark.token}}).
 			SetUpsert(true))
 		stored = append(stored, file)
 	}
@@ -1113,10 +1209,45 @@ func (m *MongoDBEngine) addFilesChunk(files []File, clientInfo ClientInfo) error
 			keys = append(keys, fileKey{hash: file.Hash, size: file.Size})
 		}
 	}
-	if err := m.refreshFileCounters(keys, &counterSource{ID: clientInfo.ID, Port: clientInfo.Port}); err != nil {
+	fresh, err := m.refreshFileCounters(keys, &counterSource{ID: clientInfo.ID, Port: clientInfo.Port}, mark)
+	// Added even when the write half of the refresh failed: the sources are online,
+	// and a retry of the chunk finds them marked by this call and adds nothing.
+	m.offeredMu.Lock()
+	if _, connected := m.offered[string(clientInfo.Hash)]; connected {
+		m.offered[string(clientInfo.Hash)] += fresh
+	}
+	m.offeredMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("refresh counters: %w", err)
 	}
 	return nil
+}
+
+// onlineSources returns which files, among those with one of hashes, the client
+// sources online now.
+func (m *MongoDBEngine) onlineSources(clientHash []byte, hashes []any) (map[offerKey]struct{}, error) {
+	ctx, cancel := m.opContext()
+	defer cancel()
+	cur, err := m.db.Collection("sources").Find(ctx,
+		bson.M{"file_hash": bson.M{"$in": hashes}, "client_hash": clientHash, "online": true},
+		options.Find().SetProjection(bson.M{"_id": 0, "file_hash": 1, "file_size": 1}).SetBatchSize(int32(len(hashes)+1)))
+	if err != nil {
+		return nil, err
+	}
+	var docs []struct {
+		FileHash []byte `bson:"file_hash"`
+		FileSize uint64 `bson:"file_size"`
+	}
+	err = cur.All(ctx, &docs)
+	_ = cur.Close(ctx)
+	if err != nil {
+		return nil, err
+	}
+	online := make(map[offerKey]struct{}, len(docs))
+	for _, d := range docs {
+		online[offerKey{hash: string(d.FileHash), size: d.FileSize}] = struct{}{}
+	}
+	return online, nil
 }
 
 // refreshFileCounters recomputes files.sources / files.completed for a set of files in
@@ -1127,9 +1258,13 @@ func (m *MongoDBEngine) addFilesChunk(files []File, clientInfo ClientInfo) error
 // sweep has no offering client, and writing zeros would wipe the last known source
 // address. A file with no source left is written as zero, not skipped — that is
 // exactly the case where a stale count would otherwise persist forever.
-func (m *MongoDBEngine) refreshFileCounters(keys []fileKey, src *counterSource) error {
+//
+// With a mark, it also returns how many of the files in keys that client newly
+// sources; see offerMark. The count is valid whenever the aggregate ran, even if
+// the write after it failed.
+func (m *MongoDBEngine) refreshFileCounters(keys []fileKey, src *counterSource, mark *offerMark) (fresh int, err error) {
 	if len(keys) == 0 {
-		return nil
+		return 0, nil
 	}
 	hashes := make([]any, len(keys))
 	for i, key := range keys {
@@ -1147,16 +1282,24 @@ func (m *MongoDBEngine) refreshFileCounters(keys []fileKey, src *counterSource) 
 	// it is empty — measured on every offer, one file included. Callers bound
 	// len(keys), and a group is well under 100 bytes, so this stays far inside the
 	// 16 MB reply limit.
+	group := bson.M{
+		"_id":       bson.M{"file_hash": "$file_hash", "file_size": "$file_size"},
+		"sources":   bson.M{"$sum": 1},
+		"completed": bson.M{"$sum": bson.M{"$cond": []any{"$complete", 1, 0}}},
+	}
+	if mark != nil {
+		group["fresh"] = bson.M{"$sum": bson.M{"$cond": []any{
+			bson.M{"$and": []any{
+				bson.M{"$eq": []any{"$client_hash", mark.client}},
+				bson.M{"$eq": []any{"$live", mark.token}},
+			}}, 1, 0}}}
+	}
 	cur, err := m.db.Collection("sources").Aggregate(ctx, mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{"file_hash": bson.M{"$in": hashes}}}},
-		{{Key: "$group", Value: bson.M{
-			"_id":       bson.M{"file_hash": "$file_hash", "file_size": "$file_size"},
-			"sources":   bson.M{"$sum": 1},
-			"completed": bson.M{"$sum": bson.M{"$cond": []any{"$complete", 1, 0}}},
-		}}},
+		{{Key: "$group", Value: group}},
 	}, options.Aggregate().SetBatchSize(int32(len(keys)+1)))
 	if err != nil {
-		return fmt.Errorf("aggregate counters: %w", err)
+		return 0, fmt.Errorf("aggregate counters: %w", err)
 	}
 	var groups []struct {
 		ID struct {
@@ -1165,21 +1308,23 @@ func (m *MongoDBEngine) refreshFileCounters(keys []fileKey, src *counterSource) 
 		} `bson:"_id"`
 		Sources   int32 `bson:"sources"`
 		Completed int32 `bson:"completed"`
+		Fresh     int32 `bson:"fresh"`
 	}
 	err = cur.All(ctx, &groups)
 	_ = cur.Close(ctx)
 	if err != nil {
-		return fmt.Errorf("decode counters: %w", err)
+		return 0, fmt.Errorf("decode counters: %w", err)
 	}
-	type counters struct{ sources, completed int32 }
+	type counters struct{ sources, completed, fresh int32 }
 	byKey := make(map[offerKey]counters, len(groups))
 	for _, g := range groups {
-		byKey[offerKey{hash: string(g.ID.FileHash), size: g.ID.FileSize}] = counters{g.Sources, g.Completed}
+		byKey[offerKey{hash: string(g.ID.FileHash), size: g.ID.FileSize}] = counters{g.Sources, g.Completed, g.Fresh}
 	}
 
 	models := make([]mongo.WriteModel, len(keys))
 	for i, key := range keys {
 		c := byKey[offerKey{hash: string(key.hash), size: key.size}]
+		fresh += int(c.fresh)
 		set := bson.M{"sources": c.sources, "completed": c.completed}
 		if src != nil {
 			set["source_id"] = src.ID
@@ -1192,9 +1337,9 @@ func (m *MongoDBEngine) refreshFileCounters(keys []fileKey, src *counterSource) 
 	writeCtx, writeCancel := m.opContext()
 	defer writeCancel()
 	if _, err := m.db.Collection("files").BulkWrite(writeCtx, models, options.BulkWrite().SetOrdered(false)); err != nil {
-		return fmt.Errorf("write counters: %w", err)
+		return fresh, fmt.Errorf("write counters: %w", err)
 	}
-	return nil
+	return fresh, nil
 }
 
 // mongoIndex is one index ensureIndexes maintains.

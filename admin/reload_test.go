@@ -114,7 +114,7 @@ func TestReloadReplacesCredentialsAndStatic(t *testing.T) {
 	if !strings.Contains(page, "renamed server") || !strings.Contains(page, `id="reload"`) {
 		t.Fatal("SetStatic must replace the name and keep the Reload flag")
 	}
-	if code := do(s, "GET", "/accounts", "", nil).Code; code != 200 {
+	if code := do(s, "GET", "/accounts", "", nil).Code; code != 302 {
 		t.Fatalf("SetStatic must keep the Accounts flag: /accounts -> %d", code)
 	}
 }

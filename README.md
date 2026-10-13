@@ -44,11 +44,13 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
 - Access filters: `ipfilter.dat` ranges and MaxMind GeoIP country blocking, both dropping
   a refused address before any wire parsing. See
   [`docs/access-filters.md`](docs/access-filters.md).
-- Admin status dashboard: a single self-contained HTML page served over HTTP with
-  only the Go standard library (zero third-party deps), showing live client / file /
-  LowID / peer-server counts, listening ports, enabled features, version and uptime.
-  Default on and bound to `127.0.0.1` only; live figures poll a `/stats.json`
-  endpoint. See [`docs/admin-status-dashboard.md`](docs/admin-status-dashboard.md).
+- Admin dashboard: a self-contained tabbed HTML page served over HTTP with only the
+  Go standard library (zero third-party deps). The Status tab shows live client / file /
+  LowID / peer-server counts, listening ports, enabled features, version and uptime;
+  further tabs list clients, files, peer servers, filters, bans, automated queriers,
+  refusals, health, runtime, accounts and the effective configuration (secrets hidden).
+  Default on and bound to `127.0.0.1` only; everything beyond the Status tab needs
+  loopback or `admin.username` / `admin.password`. See [`docs/admin-status-dashboard.md`](docs/admin-status-dashboard.md).
   A public `GET /healthz` and `GET /status` are served by the Meta API HTTP listener;
   see [`docs/meta-api.md`](docs/meta-api.md#health-and-status).
 - IPv6 dual-stack: accepts IPv6 client logins, records and verifies each client's
@@ -62,9 +64,10 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   what a mysql-backed server looks like after a restart. See
   [`docs/storage-snapshot.md`](docs/storage-snapshot.md).
 - Per-client file publish limits: Lugdunum's `softLimit` / `hardLimit`, now configurable
-  and actually enforced. Past the soft limit a client is warned once and its excess files
-  are ignored; past the hard limit it is told why and disconnected. Counted cumulatively
-  across a session, because eMule never sends more than 200 files in one packet. See
+  and actually enforced. The soft limit is how many distinct files a client may publish
+  at a time: past it a client is warned once and its new files are ignored. The hard
+  limit is how many files one packet may declare: at it the client is told why and
+  disconnected, which a stock eMule, sending 200 files per packet, never is. See
   [`docs/server-client-communication.md`](docs/server-client-communication.md#per-client-publish-limits).
 - Torrent, Usenet, Kad and web results in eD2K search: keywords of every TCP and UDP
   search are forwarded to the torrent-crawler / usenet-crawler / kademlia-crawler /
@@ -159,8 +162,8 @@ udp:
   rateLimitPerIPPerMinute: 120 # UDP searches + source requests per address (IPv6 /64) per minute; 0 = off
 
 files:                       # Per-client publish caps (see docs/server-client-communication.md)
-  softLimit: 10000           # Past this the excess is ignored and the client is warned once; 0 = unlimited
-  hardLimit: 20000           # Past this the client is told why and disconnected; 0 = unlimited
+  softLimit: 10000           # Distinct files per client; new files past it are ignored and the client is warned once; 0 = unlimited
+  hardLimit: 20000           # Files per OP_OFFERFILES packet; at it the client is told why and disconnected; 0 = unlimited
 
 natTraversal:
   enabled: true              # Enable NAT traversal service
@@ -179,10 +182,12 @@ ipv6:                        # IPv6 dual-stack; omit the whole block for IPv4-on
     - "https://v6.ident.me"
     - "https://api64.ipify.org"
 
-admin:                       # Local admin status dashboard (stdlib-only HTTP page)
+admin:                       # Local admin dashboard (stdlib-only HTTP page)
   enabled: true              # Default on; an absent block still enables it
   bindIP: "127.0.0.1"        # Loopback only; "0.0.0.0" / "::" exposes it on all interfaces
-  port: 4560                 # HTTP port (no authentication — keep it loopback-only)
+  port: 4560                 # HTTP port
+  username: ""               # Basic-auth login for non-loopback clients; set both or
+  password: ""               # neither. Without them, off-box clients see the status tab only
 
 storage:
   engine: memory             # Storage engine: memory | mysql | mongodb

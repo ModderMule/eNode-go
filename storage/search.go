@@ -199,15 +199,7 @@ func MatchSearchExpr(expr *SearchExpr, file File) bool {
 	if expr == nil {
 		return false
 	}
-	// The name is lowercased once per file rather than once per text leaf: matching
-	// costs leaves x files, and the per-leaf copy dominated it.
-	matches, prune := matchSearchExpr(expr, file, strings.ToLower(file.Name))
-	// A query made entirely of unsupported tags constrains nothing, so it
-	// matches nothing — the same answer the SQL engines give for that tree.
-	if prune {
-		return false
-	}
-	return matches
+	return (*searchMatcher)(nil).match(expr, file)
 }
 
 // CompareSearchValue applies a numeric leaf's operator: have <op> want. op must be one
@@ -243,35 +235,24 @@ func SearchNeedsScan(expr *SearchExpr, minTok int) bool {
 	return scan
 }
 
-// matchSearchExpr evaluates an expression against one file, returning whether
+// matchNode evaluates an expression against one file, returning whether
 // it matched and whether the node should be pruned (carried no constraint).
-// lowerName is file.Name lowercased, computed once by MatchSearchExpr.
+// lowerName is file.Name lowercased, computed once by match.
 //
 // It mirrors buildSearchNode's rules exactly. Before this existed the memory
 // engine returned plain false for an unsupported leaf, so `supported OR
 // unsupported` matched here but returned nothing from MySQL and MongoDB — the
 // three engines gave different answers for identical input.
-func matchSearchExpr(expr *SearchExpr, file File, lowerName string) (matches, prune bool) {
+func (sm *searchMatcher) matchNode(expr *SearchExpr, file File, lowerName string) (matches, prune bool) {
 	if expr == nil {
 		return false, true
 	}
 	switch expr.Kind {
 	case SearchText:
-		terms := splitTerms(expr.Text)
-		if len(terms) == 0 {
-			return false, false
-		}
-		for _, t := range terms {
-			for _, run := range termRuns(strings.ToLower(t)) {
-				if !strings.Contains(lowerName, run) {
-					return false, false
-				}
-			}
-		}
-		return true, false
+		return sm.matchText(expr, expr.Text, lowerName), false
 	case SearchString:
 		if expr.TagType == searchTypeText {
-			return matchSearchExpr(&SearchExpr{Kind: SearchText, Text: expr.ValueString}, file, lowerName)
+			return sm.matchText(expr, expr.ValueString, lowerName), false
 		}
 		switch expr.TagType {
 		case searchTypeFileType:
@@ -312,8 +293,8 @@ func matchSearchExpr(expr *SearchExpr, file File, lowerName string) (matches, pr
 		}
 		return CompareSearchValue(op, have, expr.ValueUint), false
 	case SearchAnd, SearchOr, SearchAndNot:
-		leftMatch, leftPrune := matchSearchExpr(expr.Left, file, lowerName)
-		rightMatch, rightPrune := matchSearchExpr(expr.Right, file, lowerName)
+		leftMatch, leftPrune := sm.matchNode(expr.Left, file, lowerName)
+		rightMatch, rightPrune := sm.matchNode(expr.Right, file, lowerName)
 
 		if expr.Kind == SearchAndNot {
 			if rightPrune {
@@ -676,4 +657,60 @@ func searchAnchor(expr *SearchExpr, minTok int) (anchored, scan, prune bool) {
 	default:
 		return false, false, true
 	}
+}
+
+// searchMatcher matches one expression against many files. It gives the answers
+// MatchSearchExpr gives, but splits each text leaf into its runs once instead of
+// once per file, which was most of what matching a file cost. A nil matcher works
+// and remembers nothing.
+type searchMatcher struct {
+	// runs holds, per text leaf, the runs a name must contain; nil for a leaf with
+	// no term in it, which matches nothing.
+	runs map[*SearchExpr][]string
+}
+
+func (sm *searchMatcher) match(expr *SearchExpr, file File) bool {
+	// The name is lowercased once per file rather than once per text leaf: matching
+	// costs leaves x files, and the per-leaf copy dominated it.
+	matches, prune := sm.matchNode(expr, file, strings.ToLower(file.Name))
+	// A query made entirely of unsupported tags constrains nothing, so it
+	// matches nothing — the same answer the SQL engines give for that tree.
+	if prune {
+		return false
+	}
+	return matches
+}
+
+// textRuns returns the runs leaf's text asks for, and false when it holds no term.
+func (sm *searchMatcher) textRuns(leaf *SearchExpr, text string) ([]string, bool) {
+	if sm != nil {
+		if runs, ok := sm.runs[leaf]; ok {
+			return runs, runs != nil
+		}
+	}
+	var runs []string
+	for _, t := range splitTerms(text) {
+		runs = append(runs, termRuns(strings.ToLower(t))...)
+	}
+	if sm != nil {
+		if sm.runs == nil {
+			sm.runs = map[*SearchExpr][]string{}
+		}
+		sm.runs[leaf] = runs
+	}
+	return runs, runs != nil
+}
+
+// matchText reports whether a lowercased name contains every run of a text leaf.
+func (sm *searchMatcher) matchText(leaf *SearchExpr, text, lowerName string) bool {
+	runs, ok := sm.textRuns(leaf, text)
+	if !ok {
+		return false
+	}
+	for _, run := range runs {
+		if !strings.Contains(lowerName, run) {
+			return false
+		}
+	}
+	return true
 }
