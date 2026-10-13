@@ -12,6 +12,12 @@ type Config struct {
 	MongoDB MongoConfig
 }
 
+// startupResetTimeout bounds what a DB engine's Init does after it has connected:
+// marking offline whatever the previous run left online. After an unclean stop
+// that is every session that was open, so it gets minutes, not the seconds a
+// connect does.
+const startupResetTimeout = 10 * time.Minute
+
 type Engine interface {
 	Init() error
 	Close() error

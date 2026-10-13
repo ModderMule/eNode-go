@@ -81,30 +81,37 @@ func (m *MongoDBEngine) ensureDB() error {
 }
 
 func (m *MongoDBEngine) Init() error {
-	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
-	defer cancel()
 	client, err := mongo.Connect(options.Client().ApplyURI(m.cfg.URI))
 	if err != nil {
 		return err
 	}
-	if err := client.Ping(ctx, nil); err != nil {
+	// The connect gets the configured deadline to itself: an unreachable database
+	// should fail the start quickly. The resets below are bounded by
+	// startupResetTimeout instead, because they scale with the collections.
+	pingCtx, pingCancel := m.opContext()
+	err = client.Ping(pingCtx, nil)
+	pingCancel()
+	if err != nil {
 		_ = client.Disconnect(context.Background())
-		return err
+		return fmt.Errorf("mongodb connect failed: %w", err)
 	}
 	db := client.Database(m.cfg.Database)
 	m.client = client
 	m.db = db
 
-	if _, err := db.Collection("clients").UpdateMany(ctx, bson.M{}, bson.M{"$set": bson.M{"online": false}}); err != nil {
+	// Only the documents a previous run left online: live is set on a source
+	// together with online and cleared with it, so the filter loses nothing.
+	ctx, cancel := context.WithTimeout(context.Background(), startupResetTimeout)
+	defer cancel()
+	if _, err := db.Collection("clients").UpdateMany(ctx, bson.M{"online": true}, bson.M{"$set": bson.M{"online": false}}); err != nil {
 		logging.Errorf("mongodb reset clients online flag failed: %v", err)
 	}
-	if _, err := db.Collection("sources").UpdateMany(ctx, bson.M{},
+	if _, err := db.Collection("sources").UpdateMany(ctx, bson.M{"online": true},
 		bson.M{"$set": bson.M{"online": false}, "$unset": bson.M{"live": ""}}); err != nil {
 		logging.Errorf("mongodb reset sources online flag failed: %v", err)
 	}
 
-	// Its own deadline: up to six round-trips, which must not eat into what the
-	// online-flag resets above have left of ctx.
+	// Its own deadline: up to six round-trips.
 	indexCtx, indexCancel := m.opContext()
 	created, err := m.ensureIndexes(indexCtx)
 	indexCancel()

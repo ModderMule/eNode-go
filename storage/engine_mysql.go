@@ -113,6 +113,9 @@ func NewMySQLEngine(cfg MySQLConfig) (*MySQLEngine, error) {
 // overridden via config (storage.mysql.schemaFile) for other layouts.
 const defaultSchemaFile = "misc/enode.sql"
 
+// mysqlConnectTimeout bounds the first ping of Init, and nothing else.
+const mysqlConnectTimeout = 10 * time.Second
+
 const (
 	defaultDeadlockDelay = 100 * time.Millisecond
 	// Six, not three: measured under tests/dblatency's load test, concurrent offers
@@ -173,12 +176,18 @@ func (m *MySQLEngine) Init() error {
 	db.SetMaxOpenConns(m.cfg.MaxOpenConns)
 	db.SetMaxIdleConns(m.cfg.MaxIdleConns)
 	db.SetConnMaxLifetime(m.cfg.ConnMaxLifetime)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
+	// The connect gets a short deadline of its own: an unreachable database should
+	// fail the start quickly. What follows is bounded by startupResetTimeout
+	// instead, because it scales with the tables, not with the network.
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), mysqlConnectTimeout)
+	err = db.PingContext(pingCtx)
+	pingCancel()
+	if err != nil {
 		_ = db.Close()
-		return err
+		return fmt.Errorf("mysql connect to %s:%d failed: %w", m.cfg.Host, m.cfg.Port, err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), startupResetTimeout)
+	defer cancel()
 	// Create the schema on first connect. No migration support: this only runs on
 	// a fresh database (the clients table absent), so an existing deployment never
 	// reads the file, and a partially-created schema is left untouched.
@@ -186,13 +195,20 @@ func (m *MySQLEngine) Init() error {
 		_ = db.Close()
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE clients SET online = 0`); err != nil {
+	// Only the rows a previous run left online, found through the online indexes.
+	// Without the WHERE this reads every client and source ever stored, and after
+	// an unclean stop the rows to rewrite are every session that was open.
+	start := time.Now()
+	if _, err := db.ExecContext(ctx, `UPDATE clients SET online = 0 WHERE online = 1`); err != nil {
 		_ = db.Close()
-		return err
+		return fmt.Errorf("mysql reset clients online flag failed: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE sources SET online = 0`); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE sources SET online = 0 WHERE online = 1`); err != nil {
 		_ = db.Close()
-		return err
+		return fmt.Errorf("mysql reset sources online flag failed: %w", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		logging.Infof("mysql: reset online flags of the previous run in %s", d.Round(time.Millisecond))
 	}
 	m.db = db
 	return nil
