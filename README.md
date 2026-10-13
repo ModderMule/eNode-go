@@ -250,7 +250,8 @@ storage:
 ## Install & Update
 
 Download [`update.sh`](https://github.com/ModderMule/eNode-go/releases/latest/download/update.sh)
-into an empty directory and run `bash update.sh` (add `-daemon` to start in the background).
+into an empty directory and run `bash update.sh`. Arguments are passed on to enode, e.g. `bash update.sh -daemon` to start
+in the background or `bash update.sh -config config.yaml` for another config file.
 It installs the latest release for your platform and updates that install on later runs.
 
 ## Build & Test

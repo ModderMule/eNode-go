@@ -13,9 +13,13 @@ set -euo pipefail
 #   curl -fLO https://github.com/ModderMule/eNode-go/releases/latest/download/update.sh
 #   bash update.sh
 #
-# Usage: ./update.sh [-daemon]
+# Usage: ./update.sh [enode arguments...]
 #
-#   -daemon   start enode with -daemon (background) instead of the foreground
+#   Every argument is handed to enode unchanged when it is started, e.g.
+#     ./update.sh -daemon                      start in the background
+#     ./update.sh -config config.yaml -daemon  use another config file
+#   Relative paths resolve against the install directory. The environment is
+#   inherited too, so GOMEMLIMIT=3GiB ./update.sh ... applies to the new enode.
 #
 # Environment:
 #   ENODE_REPO       GitHub owner/repo to update from (default ModderMule/eNode-go)
@@ -36,15 +40,12 @@ usage() {
 }
 
 main() {
-  local START_ARGS=()
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -daemon|--daemon) START_ARGS=(-daemon) ;;
-      -h|--help) usage; exit 0 ;;
-      *) echo "error: unknown argument '$1'" >&2; usage >&2; exit 1 ;;
-    esac
-    shift
-  done
+  # Only -h/--help as the first argument is the script's own; everything else
+  # belongs to enode, including the value of a flag such as -config.
+  case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+  esac
+  local START_ARGS=("$@")
 
   # --- install dir: wherever this script sits -----------------------------
   local DIR

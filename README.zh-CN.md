@@ -207,7 +207,8 @@ storage:
 ## 安装与更新
 
 将 [`update.sh`](https://github.com/ModderMule/eNode-go/releases/latest/download/update.sh)
-下载到一个空目录并运行 `bash update.sh`（加 `-daemon` 则在后台启动）。
+下载到一个空目录并运行 `bash update.sh`。参数会原样传给 enode，例如 `bash update.sh -daemon`
+在后台启动，或 `bash update.sh -config config.yaml` 使用其他配置文件。
 它会为当前平台安装最新版本，之后再次运行即可更新。
 
 ## 构建与测试
