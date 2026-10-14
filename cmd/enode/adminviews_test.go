@@ -127,7 +127,7 @@ func TestAdminViewsServerList(t *testing.T) {
 
 func TestAdminViewsBansAndBlocks(t *testing.T) {
 	v, _ := newTestViews(t, "blockedword")
-	if err := v.AddBan("ip:203.0.113.9", 30); err != nil {
+	if err := v.AddBan("ip:203.0.113.9", 30, "shares fakes"); err != nil {
 		t.Fatal(err)
 	}
 	bans, _ := v.Bans()
@@ -135,7 +135,7 @@ func TestAdminViewsBansAndBlocks(t *testing.T) {
 	errRemove := v.RemoveBan("ip:203.0.113.9")
 	t.Logf("input: ban 203.0.113.9 for 30 minutes, lift .10 then .9")
 	t.Logf("output: bans=%+v missing=%v remove=%v", bans, errMissing, errRemove)
-	if len(bans) != 1 || bans[0].Key != "ip:203.0.113.9" || bans[0].RemainingSeconds < 1700 {
+	if len(bans) != 1 || bans[0].Key != "ip:203.0.113.9" || bans[0].Reason != "shares fakes" || bans[0].RemainingSeconds < 1700 {
 		t.Fatalf("bans = %+v", bans)
 	}
 	if !errors.Is(errMissing, admin.ErrNotFound) || errRemove != nil {

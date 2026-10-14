@@ -509,6 +509,8 @@ func tagName(code uint8) string {
 		return "sources"
 	case TagMuleVersion:
 		return "muleversion"
+	case TagModVersion:
+		return "modversion"
 	case TagFlags:
 		return "flags"
 	case TagRating:

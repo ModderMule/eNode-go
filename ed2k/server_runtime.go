@@ -650,6 +650,11 @@ type tcpClient struct {
 	// admin client list only. Written once under infoMu.
 	nick     string
 	software string
+	// mod is the CT_MOD_VERSION from the answer to a dial-back probe, so only a
+	// client that answered one (a HighID, or a reachable IPv6) has it. Admin
+	// display only, never persisted. Written under infoMu by the probes, the IPv6
+	// one on its own goroutine.
+	mod string
 	// connectedAt is when the connection was accepted; set at construction.
 	connectedAt time.Time
 
@@ -1552,7 +1557,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 				// Nothing of this packet is stored: the session is going away and
 				// its sources with it.
 				c.banlistDropped = true
-				c.server.Content.Ban(info.Hash, c.peerIP)
+				c.server.Content.Ban(info.Hash, c.peerIP, fmt.Sprintf("offered %d %s files", distinct, reason))
 				logging.Warnf("offer files %s remote=%s id=%d hash=%x distinct=%d: closing and banning",
 					reason, c.remoteHost, info.ID, info.Hash, distinct)
 				c.sendServerMessage(msgBanlisted)
@@ -2392,7 +2397,17 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network
 	if err := writeWithDeadline(conn, helloBytes, s.tcp().ConnectionTimeout); err != nil {
 		return false, err
 	}
-	return readHelloAnswer(cli, conn, s.tcp().ConnectionTimeout, cli.Hash, leftover)
+	answer, ok, err := readHelloAnswer(cli, conn, s.tcp().ConnectionTimeout, cli.Hash, leftover)
+	// The probe is a client-to-client hello, the one place a client names its mod;
+	// OP_LOGINREQUEST never carries CT_MOD_VERSION.
+	if ok {
+		if mod := helloModVersion(answer.Tags); mod != "" {
+			client.infoMu.Lock()
+			client.mod = mod
+			client.infoMu.Unlock()
+		}
+	}
+	return ok, err
 }
 
 // readHandshake reads the obfuscation handshake answer, however TCP splits it, and
@@ -2419,8 +2434,9 @@ func readHandshake(cli *Client, conn net.Conn, timeout time.Duration) ([]byte, e
 // readHelloAnswer waits for the probed client's OP_HELLOANSWER. It counts only when
 // the answer carries wantHash, the user hash the client logged in with: another
 // client on the same (CGNAT) IP answering that port must not earn this one a HighID.
-// buffer holds bytes already read past the crypt handshake.
-func readHelloAnswer(cli *Client, conn net.Conn, timeout time.Duration, wantHash, buffer []byte) (bool, error) {
+// buffer holds bytes already read past the crypt handshake. The parsed answer is
+// returned with ok, for the tags it carries.
+func readHelloAnswer(cli *Client, conn net.Conn, timeout time.Duration, wantHash, buffer []byte) (HelloAnswer, bool, error) {
 	deadline := time.Now().Add(timeout)
 	buf := make([]byte, 4096)
 
@@ -2429,13 +2445,13 @@ func readHelloAnswer(cli *Client, conn net.Conn, timeout time.Duration, wantHash
 			_ = conn.SetReadDeadline(deadline)
 			n, err := conn.Read(buf)
 			if err != nil {
-				return false, err
+				return HelloAnswer{}, false, err
 			}
 			data := buf[:n]
 			if cli.CryptStatus == CsEncrypting {
 				data, _, err = cli.Decrypt(data)
 				if err != nil {
-					return false, err
+					return HelloAnswer{}, false, err
 				}
 			}
 			buffer = append(buffer, data...)
@@ -2445,7 +2461,7 @@ func readHelloAnswer(cli *Client, conn net.Conn, timeout time.Duration, wantHash
 		// can declare a huge size, then dribble bytes until the deadline while
 		// the loop below never completes a packet and this slice grows unbounded.
 		if len(buffer) > maxHelloAnswerBytes {
-			return false, fmt.Errorf("hello answer exceeded %d bytes", maxHelloAnswerBytes)
+			return HelloAnswer{}, false, fmt.Errorf("hello answer exceeded %d bytes", maxHelloAnswerBytes)
 		}
 
 		for {
@@ -2453,13 +2469,13 @@ func readHelloAnswer(cli *Client, conn net.Conn, timeout time.Duration, wantHash
 				break
 			}
 			if buffer[0] != PrED2K {
-				return false, fmt.Errorf("bad protocol 0x%x", buffer[0])
+				return HelloAnswer{}, false, fmt.Errorf("bad protocol 0x%x", buffer[0])
 			}
 			size := int(binary.LittleEndian.Uint32(buffer[1:5]))
 			// Same ceiling Packet.Init applies on the inbound path; this reader
 			// reimplements the framing and so needs it too.
 			if size > 0 && size-1 > MaxTCPPacketSize {
-				return false, fmt.Errorf("%w: declared=%d max=%d", ErrPacketTooLarge, size-1, MaxTCPPacketSize)
+				return HelloAnswer{}, false, fmt.Errorf("%w: declared=%d max=%d", ErrPacketTooLarge, size-1, MaxTCPPacketSize)
 			}
 			if size <= 0 || len(buffer) < 5+size {
 				break
@@ -2471,9 +2487,9 @@ func readHelloAnswer(cli *Client, conn net.Conn, timeout time.Duration, wantHash
 				// does not make the peer any less reachable.
 				answer, _ := ReadOpHelloAnswer(NewBufferFromBytes(payload[1:]))
 				if !bytes.Equal(answer.Hash, wantHash) {
-					return false, errHelloHashMismatch
+					return HelloAnswer{}, false, errHelloHashMismatch
 				}
-				return true, nil
+				return answer, true, nil
 			}
 			buffer = buffer[5+size:]
 		}

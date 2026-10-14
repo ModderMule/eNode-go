@@ -38,8 +38,9 @@ type Views interface {
 	UpdateFilter(ctx context.Context) ([]FilterUpdateRow, error)
 
 	Bans() ([]BanRow, error)
-	// AddBan bans "hash:<32 hex digits>" or "ip:<address>" for minutes.
-	AddBan(key string, minutes int) error
+	// AddBan bans "hash:<32 hex digits>" or "ip:<address>" for minutes; reason is
+	// what the ban list shows for it.
+	AddBan(key string, minutes int, reason string) error
 	RemoveBan(key string) error
 
 	Bots() []BotRow
@@ -244,7 +245,9 @@ type FilterUpdateRow struct {
 
 // BanRow is one active ban.
 type BanRow struct {
-	Key              string `json:"key"`
+	Key string `json:"key"`
+	// Reason is why the ban was set; empty for one older than the reasons.
+	Reason           string `json:"reason"`
 	Until            string `json:"until"`
 	RemainingSeconds int64  `json:"remainingSeconds"`
 }
@@ -353,6 +356,8 @@ const (
 	defaultFilePage   = 100
 	maxFilePage       = 500
 	maxBanMinutes     = 60 * 24 * 365
+	// defaultBanReason is listed for a dashboard ban given without a reason.
+	defaultBanReason = "manual"
 )
 
 // SetViews enables the tabs beyond the status page. Call before Start.
@@ -552,6 +557,8 @@ func handleBans(v Views, w http.ResponseWriter, _ *http.Request) {
 type banBody struct {
 	Key     string `json:"key"`
 	Minutes int    `json:"minutes"`
+	// Reason is optional; without one the ban is listed as manual.
+	Reason string `json:"reason"`
 }
 
 func handleBanAdd(v Views, w http.ResponseWriter, r *http.Request) {
@@ -563,11 +570,15 @@ func handleBanAdd(v Views, w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, errors.New("minutes must be between 1 and 525600"))
 		return
 	}
-	if err := v.AddBan(strings.TrimSpace(body.Key), body.Minutes); err != nil {
+	reason := strings.TrimSpace(body.Reason)
+	if reason == "" {
+		reason = defaultBanReason
+	}
+	if err := v.AddBan(strings.TrimSpace(body.Key), body.Minutes, reason); err != nil {
 		writeViewError(w, err)
 		return
 	}
-	logging.Infof("admin dashboard: %s banned for %d min by %s", body.Key, body.Minutes, r.RemoteAddr)
+	logging.Infof("admin dashboard: %s banned for %d min by %s: %q", body.Key, body.Minutes, r.RemoteAddr, reason)
 	handleBans(v, w, r)
 }
 

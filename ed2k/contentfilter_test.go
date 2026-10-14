@@ -56,7 +56,7 @@ func (s *stubContent) BanThreshold() int { return s.threshold }
 
 func (s *stubContent) KeywordBanThreshold() int { return s.keywordThreshold }
 
-func (s *stubContent) Ban(userHash []byte, _ net.IP) {
+func (s *stubContent) Ban(userHash []byte, _ net.IP, _ string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.bans = append(s.bans, append([]byte(nil), userHash...))

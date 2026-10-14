@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -14,6 +15,10 @@ import (
 
 // maxNickBytes caps the login nick kept per session; a client may send far more.
 const maxNickBytes = 64
+
+// maxModBytes caps the CT_MOD_VERSION kept per session. Real mod strings
+// ("MorphXT v12.7") are far shorter.
+const maxModBytes = 32
 
 // ClientView is one logged-in session as the admin client list shows it.
 type ClientView struct {
@@ -116,7 +121,7 @@ func (s *ServerRuntime) ClientSoftware(hash []byte) string {
 	}
 	c.infoMu.RLock()
 	defer c.infoMu.RUnlock()
-	return c.software
+	return softwareWithMod(c.software, c.mod)
 }
 
 // GossipEnabled reports whether a gossip peer table is attached.
@@ -178,7 +183,7 @@ func (s *ServerRuntime) Bots() []BotDetection {
 func (c *tcpClient) view() ClientView {
 	info := c.snapshotInfo()
 	c.infoMu.RLock()
-	nick, software, v6Capable := c.nick, c.software, c.ipv6Capable
+	nick, software, v6Capable := c.nick, softwareWithMod(c.software, c.mod), c.ipv6Capable
 	c.infoMu.RUnlock()
 
 	view := ClientView{
@@ -252,4 +257,43 @@ func loginSoftware(tags []NamedTag) string {
 		}
 	}
 	return "eDonkey"
+}
+
+// helloModVersion is the CT_MOD_VERSION of a hello answer, or "" when it has none.
+// eMuleQt reads a string tag as is and an integer one as its number
+// (src/core/client/UpDownClient.cpp:991-995). The peer controls the bytes, so the
+// value is cleaned for display: valid UTF-8, no control characters or the brackets
+// it is shown in, trimmed, and cut to maxModBytes on a rune boundary.
+func helloModVersion(tags map[string]any) string {
+	var mod string
+	switch v := tags["modversion"].(type) {
+	case string:
+		mod = v
+	case uint64:
+		mod = fmt.Sprint(v)
+	default:
+		return ""
+	}
+	mod = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == '[' || r == ']' {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(mod, ""))
+	mod = strings.TrimSpace(mod)
+	for len(mod) > maxModBytes {
+		_, size := utf8.DecodeLastRuneInString(mod)
+		mod = mod[:len(mod)-size]
+	}
+	return strings.TrimSpace(mod)
+}
+
+// softwareWithMod shows a client's software with its mod the way eMuleQt does,
+// "eMule 0.50a [MorphXT v12.7]" (UpDownClient::dbgGetFullClientSoftVer), and the
+// software alone when there is no mod.
+func softwareWithMod(software, mod string) string {
+	if mod == "" {
+		return software
+	}
+	return software + " [" + mod + "]"
 }

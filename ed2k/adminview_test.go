@@ -160,3 +160,43 @@ func TestBlockStatsCountRateLimitAndBots(t *testing.T) {
 		t.Fatalf("bot detection behind the limiter: stats=%+v bots=%+v", stats, bots)
 	}
 }
+
+func TestHelloModVersion(t *testing.T) {
+	cases := []struct {
+		name string
+		tags map[string]any
+		want string
+	}{
+		{"string", map[string]any{"modversion": "MorphXT v12.7"}, "MorphXT v12.7"},
+		{"integer", map[string]any{"modversion": uint64(42)}, "42"},
+		{"absent", map[string]any{"name": "someone"}, ""},
+		{"brackets and controls", map[string]any{"modversion": " [Evil]\x00\n mod "}, "Evil mod"},
+		{"invalid utf-8", map[string]any{"modversion": "Mod\xff\xfeX"}, "ModX"},
+		{"only junk", map[string]any{"modversion": "[]\t"}, ""},
+		{"too long", map[string]any{"modversion": strings.Repeat("é", 40)}, strings.Repeat("é", maxModBytes/2)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := helloModVersion(tc.tags)
+			t.Logf("input: %q", tc.tags)
+			t.Logf("output: %q", got)
+			if got != tc.want {
+				t.Fatalf("helloModVersion = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSoftwareWithMod(t *testing.T) {
+	cases := []struct{ software, mod, want string }{
+		{"eMule 0.50a", "MorphXT v12.7", "eMule 0.50a [MorphXT v12.7]"},
+		{"eMule 0.50a", "", "eMule 0.50a"},
+	}
+	for _, tc := range cases {
+		got := softwareWithMod(tc.software, tc.mod)
+		t.Logf("input: software=%q mod=%q output: %q", tc.software, tc.mod, got)
+		if got != tc.want {
+			t.Fatalf("softwareWithMod(%q, %q) = %q, want %q", tc.software, tc.mod, got, tc.want)
+		}
+	}
+}

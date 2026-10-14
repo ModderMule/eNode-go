@@ -380,8 +380,9 @@ func (f *Filter) KeywordBanThreshold() int {
 	return int(f.keywordBanThreshold.Load())
 }
 
-// Ban refuses a publisher at login, by user hash and by address, for BanMinutes.
-func (f *Filter) Ban(userHash []byte, ip net.IP) {
+// Ban refuses a publisher at login, by user hash and by address, for BanMinutes. reason
+// is what the admin surface shows for it.
+func (f *Filter) Ban(userHash []byte, ip net.IP, reason string) {
 	if f == nil {
 		return
 	}
@@ -389,27 +390,27 @@ func (f *Filter) Ban(userHash []byte, ip net.IP) {
 	if minutes <= 0 {
 		return
 	}
-	f.bans.add(userHash, ip, time.Duration(minutes)*time.Minute)
+	f.bans.add(userHash, ip, time.Duration(minutes)*time.Minute, reason)
 	f.banCount.Store(int64(f.bans.sweep()))
 }
 
 // BanFor refuses a publisher at login for d, whatever BanMinutes says. It is the
 // operator's own ban, set from the admin surface; one of userHash and ip may be nil.
-func (f *Filter) BanFor(userHash []byte, ip net.IP, d time.Duration) {
+func (f *Filter) BanFor(userHash []byte, ip net.IP, d time.Duration, reason string) {
 	if f == nil || d <= 0 {
 		return
 	}
-	f.bans.add(userHash, ip, d)
+	f.bans.add(userHash, ip, d, reason)
 	f.banCount.Store(int64(f.bans.sweep()))
 }
 
 // BanKey bans what a BanEntry.Key names for d.
-func (f *Filter) BanKey(key string, d time.Duration) error {
+func (f *Filter) BanKey(key string, d time.Duration, reason string) error {
 	userHash, ip, err := parseBanKey(key)
 	if err != nil {
 		return err
 	}
-	f.BanFor(userHash, ip, d)
+	f.BanFor(userHash, ip, d, reason)
 	return nil
 }
 

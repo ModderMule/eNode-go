@@ -194,7 +194,7 @@ Meta API accounts.
 | Files | the shared file index: browse, or search file names; click a file for its sources and the client software and version of each; the link icon in front of a row copies its `ed2k://|file|…|/` link | `GET /api/files?q=&cursor=&limit=`, `GET /api/files/{hash}/sources` |
 | Peers | the gossip peer table (name, address, users, files, state, last seen, who told us) and the static server list | `GET /api/peers` |
 | Filter | what the IP filter, the country filter and the content filter have loaded and refused; their data files | `GET /api/filter` |
-| Bans | the user hashes and addresses refused at login, with their expiry | `GET /api/bans` |
+| Bans | the user hashes and addresses refused at login, with the reason and their expiry | `GET /api/bans` |
 | Bots | addresses whose UDP queries look automated | `GET /api/bots` |
 | Spam | offered files that scored as spam or fake, and the sessions whose share looks like spam; see [spam-detection.md](spam-detection.md) | `GET /api/spam` |
 | Blocks | how often each kind of refusal happened since the start | `GET /api/blocks` |
@@ -207,8 +207,13 @@ Notes on what the tabs read:
 
 - **Clients.** `q` matches a substring of the address, nick, IPv6 address or user hash,
   or an IPv4 CIDR (`82.48.0.0/16`). `limit` is at most 500. Nick and software are what
-  the client sent at login (`CT_NAME`, `CT_EMULE_VERSION`); country needs
-  `filter.geoip` with a loaded database.
+  the client sent at login (`CT_NAME`, `CT_EMULE_VERSION`). A client that answered
+  the server's dial-back probe (a HighID, or a reachable IPv6) also shows its mod in
+  brackets, `eMule 0.50a [MorphXT v12.7]`, taken from `CT_MOD_VERSION` in the probe's
+  `OP_HELLOANSWER`; logins never carry it, so a LowID shows none. The family filter
+  and the software meters group by the word before the first space and ignore the
+  mod. None of this is stored in the database. Country needs `filter.geoip` with a
+  loaded database.
 - **Files.** Files the content filter withholds are not listed. A search returns its
   whole capped answer at once; browsing pages through the files that have a source
   online, with an opaque cursor.
@@ -227,7 +232,7 @@ is logged with the operator's address.
 | Action | Endpoint | Effect |
 |---|---|---|
 | Disconnect a client | `POST /api/clients/{hash}/disconnect` | closes that session. The client can log in again at once; ban it to prevent that. |
-| Ban | `POST /api/bans` with `{"key": "ip:203.0.113.9", "minutes": 1440}` | refuses that address or user hash (`hash:<32 hex digits>`) at login for the given time. An IPv6 address is banned as its /64. A client that is already connected stays until it is disconnected. |
+| Ban | `POST /api/bans` with `{"key": "ip:203.0.113.9", "minutes": 1440, "reason": "shares fakes"}` | refuses that address or user hash (`hash:<32 hex digits>`) at login for the given time. `reason` is optional, at most 200 characters, and listed as `manual` when left out. An IPv6 address is banned as its /64. A client that is already connected stays until it is disconnected. |
 | Lift a ban | `DELETE /api/bans/{key}` | |
 | Put a listed file on a local hash list | `POST /api/spam/files/{hash}/{list}` | `list` is `filter`, `banlist` or `whitelist`; see [spam-detection.md](spam-detection.md#acting-on-the-list) |
 | Add a server | `POST /api/servers` with `{"ip": "203.0.113.5", "port": 4661}` | adds an entry to the static server list sent to clients |
@@ -239,7 +244,10 @@ is logged with the operator's address.
 
 - Bans are the content filter's publisher bans (see [access-filters.md](access-filters.md)):
   written to `filter.banFile` and read back at startup, and only available with the
-  content filter on.
+  content filter on. Each ban is listed with its reason: `offered <n> ban list files` or
+  `offered <n> keyword files` for a publisher the filter banned, `spam publisher` for one
+  banned from the Spam tab, and what the operator entered otherwise. The ban file holds
+  one `<key> <expiry> [reason]` per line; a ban from a file without reasons has none.
 - A server added or removed here lasts until the next restart or config reload, which
   applies the `servers:` list of the config file again.
 - **Reload filter files** is offered only when a filter that reads a file is enabled

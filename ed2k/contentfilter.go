@@ -29,8 +29,9 @@ type ContentFilter interface {
 	// KeywordBanThreshold is how many distinct keyword-refused files get a session
 	// dropped and banned: the one that reaches it. Zero means never.
 	KeywordBanThreshold() int
-	// Ban refuses a publisher at login for a while, Banned reports whether one is.
-	Ban(userHash []byte, ip net.IP)
+	// Ban refuses a publisher at login for a while and records why, Banned reports
+	// whether one is.
+	Ban(userHash []byte, ip net.IP, reason string)
 	Banned(userHash []byte, ip net.IP) bool
 }
 

@@ -12,11 +12,15 @@
 <select id="clID"><option value="">High + Low ID</option><option value="high">HighID</option><option value="low">LowID</option></select>
 <select id="clSort"><option value="connected">connected time</option><option value="files">files</option><option value="ip">IP</option><option value="nick">nick</option><option value="country">country</option><option value="software">software</option></select>
 <select id="clDir"><option value="desc">descending</option><option value="asc">ascending</option></select>
-<button id="clPrev">‹ prev</button><button id="clNext">next ›</button>
-<span class="desc" id="clCount" style="margin:0"></span>
+<button class="clPrev">‹ prev</button><button class="clNext">next ›</button>
+<span class="desc clCount" style="margin:0"></span>
 </div>
 <p class="desc tabmsg" id="msg-clients"></p>
 <div class="scroll"><table><thead><tr><th>IP</th><th>Country</th><th>Software</th><th>Nick</th><th>Files</th><th>ID</th><th>IPv6</th><th>Connected</th><th></th></tr></thead><tbody id="clRows"></tbody></table></div>
+<div class="tools" style="margin-top:10px">
+<button class="clPrev">‹ prev</button><button class="clNext">next ›</button>
+<span class="desc clCount" style="margin:0"></span>
+</div>
 </div>
 {{end}}
 
@@ -24,6 +28,8 @@
 (function(){
   var offset = 0, pageSize = 100, timer = 0;
   function val(id){ return document.getElementById(id).value; }
+  // The paging controls sit above and below the table, so they are addressed by class.
+  function each(cls, fn){ document.querySelectorAll('#tab-clients .' + cls).forEach(fn); }
   // fillSelect keeps the current choice while the options are replaced.
   function fillSelect(id, first, rows){
     var sel = document.getElementById(id), cur = sel.value;
@@ -56,16 +62,17 @@
       return [ip, c.country || '—', c.software, c.nick, num(c.files), id,
         c.ipv6 || (c.ipv6Capable ? 'capable' : '—'), fmtUptime(c.connectedSeconds), kick];
     }, 'no clients match');
-    setText('clCount', page.matched ? (page.offset + 1) + '–' + (page.offset + page.rows.length) + ' of ' + num(page.matched)
-      + (page.matched !== page.total ? ' (filtered from ' + num(page.total) + ')' : '') : '');
-    document.getElementById('clPrev').disabled = offset === 0;
-    document.getElementById('clNext').disabled = page.offset + page.rows.length >= page.matched;
+    var count = page.matched ? (page.offset + 1) + '–' + (page.offset + page.rows.length) + ' of ' + num(page.matched)
+      + (page.matched !== page.total ? ' (filtered from ' + num(page.total) + ')' : '') : '';
+    each('clCount', function(e){ e.textContent = count; });
+    each('clPrev', function(e){ e.disabled = offset === 0; });
+    each('clNext', function(e){ e.disabled = page.offset + page.rows.length >= page.matched; });
   }
   function again(){ offset = 0; runTab('clients'); }
   ['clCountry', 'clSoft', 'clID', 'clSort', 'clDir'].forEach(function(id){ document.getElementById(id).onchange = again; });
   document.getElementById('clQ').oninput = function(){ clearTimeout(timer); timer = setTimeout(again, 300); };
-  document.getElementById('clPrev').onclick = function(){ offset = Math.max(0, offset - pageSize); runTab('clients'); };
-  document.getElementById('clNext').onclick = function(){ offset += pageSize; runTab('clients'); };
+  each('clPrev', function(e){ e.onclick = function(){ offset = Math.max(0, offset - pageSize); runTab('clients'); }; });
+  each('clNext', function(e){ e.onclick = function(){ offset += pageSize; runTab('clients'); }; });
   tabs.clients = {load: load, poll: true};
 })();
 {{end}}

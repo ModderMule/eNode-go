@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -109,7 +110,7 @@ func TestSetSanctions(t *testing.T) {
 	}
 
 	f.SetSanctions(7, 9, 0)
-	f.Ban(user, ip)
+	f.Ban(user, ip, "offered 3 ban list files")
 	bannedOff := f.Banned(user, ip)
 	t.Logf("input: SetSanctions(7, 9, 0), Ban output: banThreshold=%d keywordBanThreshold=%d banned=%t",
 		f.BanThreshold(), f.KeywordBanThreshold(), bannedOff)
@@ -118,7 +119,7 @@ func TestSetSanctions(t *testing.T) {
 	}
 
 	f.SetSanctions(7, 9, 30)
-	f.Ban(user, ip)
+	f.Ban(user, ip, "offered 3 ban list files")
 	bans := f.Bans()
 	t.Logf("input: SetSanctions(7, 9, 30), Ban output: banned=%t bans=%d", f.Banned(user, ip), len(bans))
 	if !f.Banned(user, ip) || len(bans) == 0 {
@@ -138,7 +139,7 @@ func TestNilFilterRefusesNothing(t *testing.T) {
 		f.Banned(testHash(9), net.IPv4(1, 2, 3, 4)) || f.BanThreshold() != 0 {
 		t.Fatal("a nil filter must refuse nothing")
 	}
-	f.Ban(testHash(9), net.IPv4(1, 2, 3, 4))
+	f.Ban(testHash(9), net.IPv4(1, 2, 3, 4), "")
 	if err := f.Reload(); err != nil || f.Stats() != (Stats{}) {
 		t.Fatal("a nil filter must reload and report as empty")
 	}
@@ -306,7 +307,7 @@ func TestBanExpiresAndCoversHashAndAddress(t *testing.T) {
 
 	user, ip := testHash(0x77), net.IPv4(203, 0, 113, 7)
 	other, otherIP := testHash(0x78), net.IPv4(203, 0, 113, 8)
-	f.Ban(user, ip)
+	f.Ban(user, ip, "offered 3 ban list files")
 
 	t.Logf("input: ban user=%x ip=%s for 10m output: sameHash=%t sameIP=%t unrelated=%t bans=%d",
 		user[:2], ip, f.Banned(user, otherIP), f.Banned(other, ip), f.Banned(other, otherIP), f.Stats().Bans)
@@ -332,7 +333,7 @@ func TestBanExpiresAndCoversHashAndAddress(t *testing.T) {
 
 func TestBanCoversAnIPv6Slash64(t *testing.T) {
 	f := newTestFilter(t)
-	f.Ban(nil, net.ParseIP("2001:db8:1:2::1"))
+	f.Ban(nil, net.ParseIP("2001:db8:1:2::1"), "")
 	same := f.Banned(nil, net.ParseIP("2001:db8:1:2:ffff::9"))
 	next := f.Banned(nil, net.ParseIP("2001:db8:1:3::1"))
 	t.Logf("input: ban 2001:db8:1:2::1 output: same/64=%t next/64=%t", same, next)
@@ -355,11 +356,11 @@ func TestBansAreListedAndLifted(t *testing.T) {
 	f.bans.now = func() time.Time { return now }
 
 	user := testHash(0x55)
-	f.BanFor(user, nil, time.Hour)
-	if err := f.BanKey("ip:203.0.113.9", 30*time.Minute); err != nil {
+	f.BanFor(user, nil, time.Hour, "")
+	if err := f.BanKey("ip:203.0.113.9", 30*time.Minute, "  shares\tfakes\n"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.BanKey("ip:2001:db8:1:2::77", 10*time.Minute); err != nil {
+	if err := f.BanKey("ip:2001:db8:1:2::77", 10*time.Minute, strings.Repeat("é", maxBanReason+50)); err != nil {
 		t.Fatal(err)
 	}
 	bans := f.Bans()
@@ -373,6 +374,13 @@ func TestBansAreListedAndLifted(t *testing.T) {
 		if bans[i].Key != key {
 			t.Errorf("ban %d = %q, want %q (soonest to expire first)", i, bans[i].Key, key)
 		}
+	}
+	// A reason is kept as one line and capped; none stays empty.
+	if got := []rune(bans[0].Reason); len(got) != maxBanReason {
+		t.Errorf("reason of ban 0 is %d runes, want it capped at %d", len(got), maxBanReason)
+	}
+	if bans[1].Reason != "shares fakes" || bans[2].Reason != "" {
+		t.Errorf("reasons = %q, %q, want \"shares fakes\" and none", bans[1].Reason, bans[2].Reason)
 	}
 	if !f.Banned(nil, net.ParseIP("2001:db8:1:2:ffff::1")) || !f.Banned(user, nil) {
 		t.Fatal("a listed ban does not refuse its login")
@@ -405,7 +413,7 @@ func TestBansAreListedAndLifted(t *testing.T) {
 func TestBanKeyRejectsMalformedKeys(t *testing.T) {
 	f := newTestFilter(t)
 	for _, key := range []string{"", "203.0.113.9", "ip:", "ip:not-an-address", "hash:abcd", "hash:zz112233445566778899aabbccddeeff", "user:x"} {
-		err := f.BanKey(key, time.Minute)
+		err := f.BanKey(key, time.Minute, "")
 		t.Logf("input: %q output: %v", key, err)
 		if !errors.Is(err, ErrBanKey) {
 			t.Errorf("BanKey(%q) = %v, want ErrBanKey", key, err)
@@ -446,9 +454,9 @@ func TestBansSurviveARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first.Ban(user, ip)
-	first.BanFor(nil, v6, time.Hour)
-	first.BanFor(testHash(0x11), nil, time.Nanosecond) // run out by the time it is read back
+	first.Ban(user, ip, "offered 5 keyword files")
+	first.BanFor(nil, v6, time.Hour, "")
+	first.BanFor(testHash(0x11), nil, time.Nanosecond, "") // run out by the time it is read back
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -468,6 +476,15 @@ func TestBansSurviveARestart(t *testing.T) {
 	if second.Banned(testHash(0x11), nil) || second.Stats().Bans != 3 {
 		t.Errorf("Bans = %d, want 3: an expired ban must not be read back", second.Stats().Bans)
 	}
+	reasons := map[string]string{}
+	for _, b := range second.Bans() {
+		reasons[b.Key] = b.Reason
+	}
+	t.Logf("output after restart: reasons=%q", reasons)
+	if reasons["ip:203.0.113.7"] != "offered 5 keyword files" || reasons["hash:"+hex.EncodeToString(user)] != "offered 5 keyword files" ||
+		reasons["ip:2001:db8:1:2::/64"] != "" {
+		t.Errorf("reasons after a restart = %q", reasons)
+	}
 
 	if removed, err := second.Unban("hash:" + hex.EncodeToString(user)); err != nil || !removed {
 		t.Fatalf("Unban = %t, %v", removed, err)
@@ -485,7 +502,7 @@ func TestBansSurviveARestart(t *testing.T) {
 // TestBanFileSkipsWhatItCannotRead: a damaged line costs that ban, not the others.
 func TestBanFileSkipsWhatItCannotRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bans.txt")
-	body := "# comment\nip:203.0.113.7 2999-01-01T00:00:00Z\nnot a ban\nhash:zz 2999-01-01T00:00:00Z\nip:203.0.113.8 soon\n"
+	body := "# comment\nip:203.0.113.7 2999-01-01T00:00:00Z\nip:203.0.113.6 2999-01-01T00:00:00Z shares fakes\nnot a ban\nhash:zz 2999-01-01T00:00:00Z\nip:203.0.113.8 soon\n"
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -495,8 +512,14 @@ func TestBanFileSkipsWhatItCannotRead(t *testing.T) {
 	}
 	t.Logf("input: %q output: bans=%d first=%t second=%t", body, f.Stats().Bans,
 		f.Banned(nil, net.IPv4(203, 0, 113, 7)), f.Banned(nil, net.IPv4(203, 0, 113, 8)))
-	if f.Stats().Bans != 1 || !f.Banned(nil, net.IPv4(203, 0, 113, 7)) {
-		t.Errorf("Bans = %d, want only the one well-formed line", f.Stats().Bans)
+	if f.Stats().Bans != 2 || !f.Banned(nil, net.IPv4(203, 0, 113, 7)) {
+		t.Errorf("Bans = %d, want only the two well-formed lines", f.Stats().Bans)
+	}
+	// The reason is optional: a file written before reasons were kept still loads.
+	bans := f.Bans()
+	t.Logf("output: bans=%+v", bans)
+	if len(bans) != 2 || bans[0].Key != "ip:203.0.113.6" || bans[0].Reason != "shares fakes" || bans[1].Reason != "" {
+		t.Errorf("bans = %+v, want .6 with its reason and .7 without one", bans)
 	}
 }
 

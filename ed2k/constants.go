@@ -223,6 +223,10 @@ const (
 	TagEmuleOptions1   uint8 = 0xfa
 	TagEmuleOptions2   uint8 = 0xfe
 	TagAuxPortsList    uint8 = 0x93
+	// TagModVersion is CT_MOD_VERSION, the mod's name in a client-to-client hello
+	// (srchybrid/BaseClient.cpp:415). A client never sends it to a server at login;
+	// the server only sees it in the OP_HELLOANSWER to its dial-back probe.
+	TagModVersion uint8 = 0x55
 	// IPv6 MOD tags, allocated by eMuleAI (Opcodes.h) and reused here verbatim.
 	// CT_MOD_IP_V6 carries a client's public IPv6 as a 16-byte HASH tag in
 	// OP_LOGINREQUEST; CT_MOD_SVR_IP_V6 carries the server's own IPv6 as a HASH tag

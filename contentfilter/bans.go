@@ -22,6 +22,18 @@ import (
 type BanEntry struct {
 	Key   string
 	Until time.Time
+	// Reason is why the ban was set: the sanction that set it or what the operator
+	// gave. Empty for a ban read from a ban file written before reasons were kept.
+	Reason string
+}
+
+// maxBanReason caps a ban reason, in runes.
+const maxBanReason = 200
+
+// banRecord is what the list keeps per key.
+type banRecord struct {
+	until  time.Time
+	reason string
 }
 
 // ErrBanKey is returned for a ban key that names neither a user hash nor an address.
@@ -33,7 +45,7 @@ var ErrBanKey = errors.New("ban key must be hash:<32 hex digits> or ip:<address>
 // in memory only.
 type banList struct {
 	mu      sync.Mutex
-	entries map[string]time.Time // key -> expiry
+	entries map[string]banRecord
 	now     func() time.Time
 
 	// saveMu orders the writes of the ban file: the snapshot is taken and written under
@@ -43,17 +55,17 @@ type banList struct {
 }
 
 func newBanList(path string) *banList {
-	return &banList{entries: make(map[string]time.Time), now: time.Now, path: path}
+	return &banList{entries: make(map[string]banRecord), now: time.Now, path: path}
 }
 
-func (b *banList) add(userHash []byte, ip net.IP, d time.Duration) {
-	until := b.now().Add(d)
+func (b *banList) add(userHash []byte, ip net.IP, d time.Duration, reason string) {
+	rec := banRecord{until: b.now().Add(d), reason: cleanReason(reason)}
 	b.mu.Lock()
 	if k := hashKey(userHash); k != "" {
-		b.entries[k] = until
+		b.entries[k] = rec
 	}
 	if k := ipKey(ip); k != "" {
-		b.entries[k] = until
+		b.entries[k] = rec
 	}
 	b.mu.Unlock()
 	b.save()
@@ -68,7 +80,7 @@ func (b *banList) banned(userHash []byte, ip net.IP) bool {
 			continue
 		}
 		// An expired entry is treated as absent here and removed by sweep.
-		if until, ok := b.entries[k]; ok && now.Before(until) {
+		if rec, ok := b.entries[k]; ok && now.Before(rec.until) {
 			return true
 		}
 	}
@@ -81,9 +93,9 @@ func (b *banList) list() []BanEntry {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := make([]BanEntry, 0, len(b.entries))
-	for k, until := range b.entries {
-		if now.Before(until) {
-			out = append(out, BanEntry{Key: displayKey(k), Until: until})
+	for k, rec := range b.entries {
+		if now.Before(rec.until) {
+			out = append(out, BanEntry{Key: displayKey(k), Until: rec.until, Reason: rec.reason})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -112,8 +124,8 @@ func (b *banList) sweep() int {
 	now := b.now()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for k, until := range b.entries {
-		if !now.Before(until) {
+	for k, rec := range b.entries {
+		if !now.Before(rec.until) {
 			delete(b.entries, k)
 		}
 	}
@@ -121,7 +133,8 @@ func (b *banList) sweep() int {
 }
 
 // load reads the ban file, keeping the bans still running. A missing file is an empty
-// list; a line that does not parse is skipped and counted.
+// list; a line that does not parse is skipped and counted. The reason is optional, so a
+// file written before reasons were kept still loads.
 func (b *banList) load() error {
 	if b.path == "" {
 		return nil
@@ -143,8 +156,9 @@ func (b *banList) load() error {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		key, expiry, ok := strings.Cut(line, " ")
-		until, timeErr := time.Parse(time.RFC3339, strings.TrimSpace(expiry))
+		key, rest, ok := strings.Cut(line, " ")
+		expiry, reason, _ := strings.Cut(strings.TrimSpace(rest), " ")
+		until, timeErr := time.Parse(time.RFC3339, expiry)
 		userHash, ip, keyErr := parseBanKey(key)
 		if !ok || timeErr != nil || keyErr != nil {
 			skipped++
@@ -157,7 +171,7 @@ func (b *banList) load() error {
 		if internal == "" {
 			internal = ipKey(ip)
 		}
-		b.entries[internal] = until
+		b.entries[internal] = banRecord{until: until, reason: cleanReason(reason)}
 		kept++
 	}
 	logging.Infof("content filter: ban file %s loaded, %d running ban(s), %d line(s) skipped", b.path, kept, skipped)
@@ -173,9 +187,13 @@ func (b *banList) save() {
 	b.saveMu.Lock()
 	defer b.saveMu.Unlock()
 	var out bytes.Buffer
-	out.WriteString("# eNode bans: <key> <expiry>. Written by the server; edit only while it is stopped.\n")
+	out.WriteString("# eNode bans: <key> <expiry> [reason]. Written by the server; edit only while it is stopped.\n")
 	for _, e := range b.list() {
-		fmt.Fprintf(&out, "%s %s\n", e.Key, e.Until.UTC().Format(time.RFC3339))
+		line := e.Key + " " + e.Until.UTC().Format(time.RFC3339)
+		if e.Reason != "" {
+			line += " " + e.Reason
+		}
+		out.WriteString(line + "\n")
 	}
 	if err := installAtomic(b.path, out.Bytes()); err != nil {
 		logging.Errorf("content filter: ban file not written, bans are kept in memory only: %v", err)
@@ -202,6 +220,16 @@ func ipKey(ip net.IP) string {
 		return "6" + string(v6[:8])
 	}
 	return ""
+}
+
+// cleanReason makes a reason one line of at most maxBanReason runes, which is what the
+// ban file can hold.
+func cleanReason(reason string) string {
+	reason = strings.Join(strings.Fields(reason), " ")
+	if r := []rune(reason); len(r) > maxBanReason {
+		reason = string(r[:maxBanReason])
+	}
+	return reason
 }
 
 // displayKey renders an internal ban key the way BanEntry.Key documents it.

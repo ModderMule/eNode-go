@@ -60,11 +60,11 @@ func (f *fakeViews) UpdateFilter(context.Context) ([]FilterUpdateRow, error) {
 	return []FilterUpdateRow{{Name: "hash ban list", Entries: 3}}, nil
 }
 func (f *fakeViews) Bans() ([]BanRow, error) { return f.bans, nil }
-func (f *fakeViews) AddBan(key string, minutes int) error {
+func (f *fakeViews) AddBan(key string, minutes int, reason string) error {
 	if !strings.HasPrefix(key, "ip:") && !strings.HasPrefix(key, "hash:") {
 		return errors.New("bad ban key")
 	}
-	f.bans = append(f.bans, BanRow{Key: key, RemainingSeconds: int64(minutes) * 60})
+	f.bans = append(f.bans, BanRow{Key: key, Reason: reason, RemainingSeconds: int64(minutes) * 60})
 	return nil
 }
 func (f *fakeViews) RemoveBan(key string) error {

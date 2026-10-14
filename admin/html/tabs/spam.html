@@ -27,7 +27,7 @@
       if(bans && p.address){
         ban = el('button', 'Ban 24 h');
         ban.onclick = function(){
-          act('spam', '/api/bans', 'POST', {key: 'ip:' + p.address, minutes: 1440}, function(){ runTab('spam', true); }, 'banned');
+          act('spam', '/api/bans', 'POST', {key: 'ip:' + p.address, minutes: 1440, reason: 'spam publisher'}, function(){ runTab('spam', true); }, 'banned');
         };
       }
       return [el('code', p.userHash || '—'), el('code', p.address), p.country || '—', num(p.files),

@@ -270,17 +270,17 @@ func (v *adminViews) Bans() ([]admin.BanRow, error) {
 	rows := make([]admin.BanRow, 0, len(bans))
 	for _, b := range bans {
 		rows = append(rows, admin.BanRow{
-			Key: b.Key, Until: admin.FormatTime(b.Until), RemainingSeconds: int64(b.Until.Sub(now).Seconds()),
+			Key: b.Key, Reason: b.Reason, Until: admin.FormatTime(b.Until), RemainingSeconds: int64(b.Until.Sub(now).Seconds()),
 		})
 	}
 	return rows, nil
 }
 
-func (v *adminViews) AddBan(key string, minutes int) error {
+func (v *adminViews) AddBan(key string, minutes int, reason string) error {
 	if v.content == nil {
 		return admin.ErrUnavailable
 	}
-	return v.content.BanKey(key, time.Duration(minutes)*time.Minute)
+	return v.content.BanKey(key, time.Duration(minutes)*time.Minute, reason)
 }
 
 func (v *adminViews) RemoveBan(key string) error {

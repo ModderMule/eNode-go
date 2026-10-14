@@ -35,7 +35,7 @@ func TestReadHelloAnswerRejectsHugeDeclaredSize(t *testing.T) {
 
 	start := time.Now()
 	cli := &Client{CryptStatus: CsNone}
-	ok, err := readHelloAnswer(cli, server, 5*time.Second, make([]byte, 16), nil)
+	_, ok, err := readHelloAnswer(cli, server, 5*time.Second, make([]byte, 16), nil)
 	elapsed := time.Since(start)
 
 	t.Logf("output: ok=%t err=%v elapsed=%s", ok, err, elapsed.Round(time.Millisecond))
@@ -83,7 +83,7 @@ func TestReadHelloAnswerAcceptsSegmentedAnswer(t *testing.T) {
 		len(packet), len(packet)-8)
 
 	cli := &Client{CryptStatus: CsNone}
-	ok, err := readHelloAnswer(cli, server, 5*time.Second, make([]byte, 16), nil) // the answer's hash is all zero
+	_, ok, err := readHelloAnswer(cli, server, 5*time.Second, make([]byte, 16), nil) // the answer's hash is all zero
 	t.Logf("output: ok=%t err=%v", ok, err)
 
 	if err != nil {
@@ -114,9 +114,43 @@ func TestReadHelloAnswerRejectsOtherUserHash(t *testing.T) {
 
 	want := make([]byte, 16)
 	t.Logf("input: answer hash=% x, logged-in hash=% x", payload[1:17], want)
-	ok, err := readHelloAnswer(&Client{CryptStatus: CsNone}, server, 5*time.Second, want, nil)
+	_, ok, err := readHelloAnswer(&Client{CryptStatus: CsNone}, server, 5*time.Second, want, nil)
 	t.Logf("output: ok=%t err=%v", ok, err)
 	if ok || !errors.Is(err, errHelloHashMismatch) {
 		t.Fatalf("want errHelloHashMismatch, got ok=%t err=%v", ok, err)
+	}
+}
+
+// The probe answer is the only place a server sees a client's CT_MOD_VERSION, so
+// readHelloAnswer must hand back the tags of an answer it accepts.
+func TestReadHelloAnswerReturnsModVersion(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+
+	const mod = "MorphXT v12.7"
+	// OP_HELLOANSWER: hash(16) id(4) port(2) tagcount(4), one CT_MOD_VERSION string
+	// tag in the old name-length form, then server ip(4) port(2).
+	payload := []byte{OpHelloAnswer}
+	payload = append(payload, make([]byte, 16+4+2)...)
+	payload = binary.LittleEndian.AppendUint32(payload, 1)
+	payload = append(payload, TypeString, 0x01, 0x00, TagModVersion)
+	payload = binary.LittleEndian.AppendUint16(payload, uint16(len(mod)))
+	payload = append(payload, mod...)
+	payload = append(payload, make([]byte, 4+2)...)
+	packet := append(helloAnswerHeader(uint32(len(payload))), payload...)
+	go func() {
+		defer client.Close()
+		_, _ = client.Write(packet)
+	}()
+
+	t.Logf("input: OP_HELLOANSWER carrying CT_MOD_VERSION %q", mod)
+	answer, ok, err := readHelloAnswer(&Client{CryptStatus: CsNone}, server, 5*time.Second, make([]byte, 16), nil)
+	got := helloModVersion(answer.Tags)
+	t.Logf("output: ok=%t err=%v tags=%v mod=%q", ok, err, answer.Tags, got)
+	if err != nil || !ok {
+		t.Fatalf("answer rejected: ok=%t err=%v", ok, err)
+	}
+	if got != mod {
+		t.Fatalf("mod = %q, want %q", got, mod)
 	}
 }

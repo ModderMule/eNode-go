@@ -5,13 +5,17 @@
 <input id="acQ" placeholder="search username or email" size="28">
 <select id="acState"><option value="">all states</option><option>pending</option><option>active</option><option>expired</option><option>disabled</option></select>
 <button id="acSearch">Search</button>
-<button id="acPrev">‹ prev</button><button id="acNext">next ›</button>
-<span class="desc" id="acPage" style="margin:0"></span>
+<button class="acPrev">‹ prev</button><button class="acNext">next ›</button>
+<span class="desc acPage" style="margin:0"></span>
 </div>
 <p class="desc tabmsg" id="msg-accounts"></p>
 <div class="layout">
 <div class="scroll"><table class="pick"><thead><tr><th>ID</th><th>User</th><th>State</th><th>Access until</th><th>Created</th></tr></thead><tbody id="acRows"></tbody></table></div>
 <div class="card" id="acDetail"><span class="off">Select an account.</span></div>
+</div>
+<div class="tools" style="margin-top:10px">
+<button class="acPrev">‹ prev</button><button class="acNext">next ›</button>
+<span class="desc acPage" style="margin:0"></span>
 </div>
 </div>
 {{end}}
@@ -21,6 +25,8 @@
   var offset = 0, selected = 0, pageSize = 50;
   function day(s){ return s ? s.replace('T', ' ').replace('Z', ' UTC') : '—'; }
   function msg(t, bad){ tabMsg('accounts', t, bad); }
+  // The paging controls sit above and below the table, so they are addressed by class.
+  function each(cls, fn){ document.querySelectorAll('#tab-accounts .' + cls).forEach(fn); }
   function table(head, rows){
     var t = el('table'); var h = t.createTHead().insertRow();
     head.forEach(function(x){ h.appendChild(el('th', x)); });
@@ -41,9 +47,10 @@
       tr.appendChild(el('td', day(a.createdAt)));
       tr.onclick = function(){ selected = a.id; show(a.id); runTab('accounts', true); };
     });
-    setText('acPage', rows.length ? (offset + 1) + '–' + (offset + rows.length) : 'no accounts');
-    document.getElementById('acNext').disabled = rows.length < pageSize;
-    document.getElementById('acPrev').disabled = offset === 0;
+    var count = rows.length ? (offset + 1) + '–' + (offset + rows.length) : 'no accounts';
+    each('acPage', function(e){ e.textContent = count; });
+    each('acNext', function(e){ e.disabled = rows.length < pageSize; });
+    each('acPrev', function(e){ e.disabled = offset === 0; });
   }
   async function show(id){
     try{ render(await api('/api/accounts/' + id)); }catch(e){ msg(e.message, true); }
@@ -99,8 +106,8 @@
   document.getElementById('acSearch').onclick = first;
   document.getElementById('acQ').onkeydown = function(e){ if(e.key === 'Enter'){ first(); } };
   document.getElementById('acState').onchange = first;
-  document.getElementById('acNext').onclick = function(){ offset += pageSize; runTab('accounts'); };
-  document.getElementById('acPrev').onclick = function(){ offset = Math.max(0, offset - pageSize); runTab('accounts'); };
+  each('acNext', function(e){ e.onclick = function(){ offset += pageSize; runTab('accounts'); }; });
+  each('acPrev', function(e){ e.onclick = function(){ offset = Math.max(0, offset - pageSize); runTab('accounts'); }; });
   tabs.accounts = {load: load, poll: false};
 })();
 {{end}}
