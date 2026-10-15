@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"enode/internal/connectsrv"
+	"enode/internal/handoff"
 	"enode/logging"
 
 	"connectrpc.com/connect/v2"
@@ -59,7 +60,7 @@ func NewServer(cfg ServerConfig, svc *Service) (*Server, error) {
 // Start binds the listener, then serves it in the background. A bind failure is
 // returned: the operator asked for the listener.
 func (s *Server) Start() error {
-	ln, err := net.Listen("tcp", s.http.Addr)
+	ln, err := handoff.Listen("tcp", s.http.Addr)
 	if err != nil {
 		return fmt.Errorf("server search listen %s: %w", s.http.Addr, err)
 	}

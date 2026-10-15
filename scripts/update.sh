@@ -21,10 +21,22 @@ set -euo pipefail
 #   Relative paths resolve against the install directory. The environment is
 #   inherited too, so GOMEMLIMIT=3GiB ./update.sh ... applies to the new enode.
 #
+#   When an enode is already running from this directory (its pid file names a
+#   live enode process), it is not restarted: it is sent SIGUSR2 and hands every
+#   connection over to the new binary, so no client is disconnected. The new
+#   process keeps the running one's arguments; the ones given here are not used.
+#   See docs/server-handoff.md. Not on Windows, which cannot pass sockets between
+#   processes: stop enode there first.
+#
 # Environment:
-#   ENODE_REPO       GitHub owner/repo to update from (default ModderMule/eNode-go)
-#   ENODE_VERSION    install this tag (e.g. v0.3.4) instead of the latest release
-#   UPDATE_INSECURE  non-empty disables TLS verification (see below)
+#   ENODE_REPO          GitHub owner/repo to update from (default ModderMule/eNode-go)
+#   ENODE_VERSION       install this tag (e.g. v0.3.4) instead of the latest release
+#   UPDATE_INSECURE     non-empty disables TLS verification (see below)
+#   ENODE_PIDFILE       the running enode's pid file, if the config moved it from
+#                       pidFile's default (data/enode.pid, relative to this directory)
+#   ENODE_NO_HANDOFF    non-empty skips the handover and starts enode as before
+#   ENODE_HANDOFF_WAIT  seconds to wait for a handover to finish (default 900); a
+#                       refused or failed one is reported as soon as enode says so
 #
 # An existing enode.config.yaml is never overwritten: it carries the operator's
 # settings, and enode has no overlay file. The release's copy is written next to
@@ -174,9 +186,59 @@ main() {
   echo "Installed ${TAG}."
   echo
 
+  # --- hand over --------------------------------------------------------------
+  # A running enode is told to start the new binary and pass it every socket and
+  # session; it exits once the new one serves. Only an enode that writes a pid file
+  # can do that, so a missing file means an older version, which SIGUSR2 would
+  # simply kill — it is left alone, and the start below fails to bind until it is
+  # stopped. The process name is checked so a stale file whose pid has been reused
+  # never signals an unrelated process.
+  local PIDFILE="${ENODE_PIDFILE:-$DIR/data/enode.pid}"
+  if [[ -z "$EXE" && -z "${ENODE_NO_HANDOFF:-}" && -f "$PIDFILE" ]]; then
+    local OLD
+    OLD="$(tr -cd '0-9' < "$PIDFILE")"
+    if [[ -n "$OLD" ]] && kill -0 "$OLD" 2>/dev/null && ps -p "$OLD" -o comm= 2>/dev/null | grep -q enode; then
+      handover "$OLD" "$PIDFILE" "${ENODE_HANDOFF_WAIT:-900}"
+      exit
+    fi
+  fi
+
   # --- start ----------------------------------------------------------------
   echo "Starting ./enode${EXE} ${START_ARGS[*]:-}"
   exec "./enode${EXE}" ${START_ARGS[@]+"${START_ARGS[@]}"}
+}
+
+# handover signals the running enode $1 and waits up to $3 seconds for it to exit
+# and for the pid file $2 to name its successor.
+handover() {
+  local old="$1" pidfile="$2" wait="$3" new="" i
+  # enode writes why a handover did not happen to this file (handoff.memory: off,
+  # a successor that failed to start, ...), and keeps serving.
+  local status="${pidfile}.handoff"
+  echo "enode is running as pid ${old}: handing its connections over to the new binary ..."
+  rm -f "$status"
+  kill -USR2 "$old"
+  for ((i = 0; i < wait; i++)); do
+    if [[ -s "$status" ]]; then
+      echo "error: no handover: $(cat "$status")" >&2
+      echo "enode is still running the previous version as pid ${old}; restart it to run the new one." >&2
+      return 1
+    fi
+    if ! kill -0 "$old" 2>/dev/null; then
+      new="$(tr -cd '0-9' < "$pidfile" 2>/dev/null || true)"
+      if [[ -n "$new" && "$new" != "$old" ]] && kill -0 "$new" 2>/dev/null; then
+        echo "Handed over: enode is running as pid ${new}."
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  if kill -0 "$old" 2>/dev/null; then
+    echo "error: pid ${old} is still serving after ${wait}s; the handover failed or is still running — see the log" >&2
+  else
+    echo "error: pid ${old} exited but no new enode is running — see the log, then start enode" >&2
+  fi
+  return 1
 }
 
 need() {

@@ -222,3 +222,29 @@ func (t *TCPCrypt) Process(buffer *Buffer) error {
 	_, err := t.ProcessData(buffer)
 	return err
 }
+
+// exportState copies the state machine out for a handover, keystream positions
+// included.
+func (t *TCPCrypt) exportState() *CryptState {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	st := &CryptState{State: t.state, Pending: append([]byte(nil), t.pending...)}
+	if t.sendKey != nil {
+		k := *t.sendKey
+		st.SendKey = &k
+	}
+	if t.recvKey != nil {
+		k := *t.recvKey
+		st.RecvKey = &k
+	}
+	return st
+}
+
+// importState installs a state exportState produced in the predecessor.
+func (t *TCPCrypt) importState(st *CryptState) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.state = st.State
+	t.pending = st.Pending
+	t.sendKey, t.recvKey = st.SendKey, st.RecvKey
+}

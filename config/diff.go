@@ -42,6 +42,7 @@ var reloadableKeys = []string{
 	"filter.banMinutes",
 	"storage.countCacheSeconds",
 	"statsBoost",
+	"handoff",
 }
 
 // Diff returns the sorted key paths whose values differ between a and b, in the dotted
@@ -96,6 +97,7 @@ func OverlayReloadable(base, next Config) Config {
 	out.Filter.BanMinutes = next.Filter.BanMinutes
 	out.Storage.CountCacheSeconds = next.Storage.CountCacheSeconds
 	out.StatsBoost = next.StatsBoost
+	out.Handoff = next.Handoff
 	return out
 }
 

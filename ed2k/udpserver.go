@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/net/ipv6"
 
+	"enode/internal/handoff"
 	"enode/logging"
 )
 
@@ -26,6 +27,8 @@ type UDPServerConfig struct {
 	// defaults below.
 	Workers   int
 	QueueSize int
+	// Gate holds the read loop while closed; nil reads from the start. See Gate.
+	Gate *Gate
 }
 
 // A datagram can cost far more to serve than to send: OP_GLOBGETSOURCES packs
@@ -69,14 +72,19 @@ type udpDatagram struct {
 
 func RunUDPServer(cfg UDPServerConfig, handler func([]byte, *net.UDPAddr, UDPReplyConn)) (*net.UDPConn, error) {
 	network := udpNetwork(cfg.DualStack)
-	addr, err := net.ResolveUDPAddr(network, net.JoinHostPort(cfg.Address, strconv.Itoa(int(cfg.Port))))
+	hostPort := net.JoinHostPort(cfg.Address, strconv.Itoa(int(cfg.Port)))
+	addr, err := net.ResolveUDPAddr(network, hostPort)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.ListenUDP(network, addr)
+	// Through the handoff registry, like RunTCPServer's listener.
+	conn, err := handoff.ListenUDP(network, hostPort)
 	if err != nil {
 		return nil, err
 	}
+	// The read deadline only: replies are written from the worker pool, and must
+	// not fail while the gate holds the reads.
+	cfg.Gate.attach(conn.SetReadDeadline)
 
 	// A wildcard dual-stack bind on a host with several IPv6 addresses otherwise
 	// replies from whichever source the kernel prefers, which need not be the address
@@ -109,8 +117,12 @@ func RunUDPServer(cfg UDPServerConfig, handler func([]byte, *net.UDPAddr, UDPRep
 		oob := make([]byte, oobSize)
 		lastReport := time.Time{}
 		for {
+			cfg.Gate.wait()
 			n, oobn, _, remote, err := conn.ReadMsgUDP(buf, oob)
 			if err != nil {
+				if cfg.Gate.interrupted(err) {
+					continue
+				}
 				return
 			}
 			var dst net.IP

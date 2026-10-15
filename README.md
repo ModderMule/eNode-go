@@ -254,6 +254,11 @@ into an empty directory and run `bash update.sh`. Arguments are passed on to eno
 in the background or `bash update.sh -config config.yaml` for another config file.
 It installs the latest release for your platform and updates that install on later runs.
 
+When enode is already running from that directory, an update does not disconnect anyone:
+the running server hands every connection and its index to the new binary, which carries
+on serving them (Linux and macOS). `kill -USR2 <pid>` does the same by hand. See
+[docs/server-handoff.md](docs/server-handoff.md).
+
 ## Build & Test
 
 The meta search contract module (`enodemeta`) is a git submodule, so clone with

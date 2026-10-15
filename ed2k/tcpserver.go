@@ -4,7 +4,9 @@ import (
 	"net"
 	"strconv"
 	"sync/atomic"
+	"time"
 
+	"enode/internal/handoff"
 	"enode/logging"
 )
 
@@ -25,6 +27,8 @@ type TCPServerConfig struct {
 	// NatRendezvous advertises FlagNatRendezvous (0x8000): this server offers
 	// server-independent (cross-server / serverless) PR_NAT hole-punch rendezvous.
 	NatRendezvous bool
+	// Gate holds the accept loop while closed; nil accepts from the start. See Gate.
+	Gate *Gate
 }
 
 // BuildTCPFlags builds the SRV_TCPFLG_* capability word sent in OP_IDCHANGE and
@@ -60,15 +64,24 @@ func BuildTCPFlags(cfg TCPServerConfig) uint32 {
 // so treating zero as a limit would refuse every connection on a default config.
 func RunTCPServer(cfg TCPServerConfig, handler func(net.Conn)) (net.Listener, error) {
 	addr := net.JoinHostPort(cfg.Address, strconv.Itoa(int(cfg.Port)))
-	ln, err := net.Listen(tcpNetwork(cfg.DualStack), addr)
+	// Through the handoff registry, so a successor process is handed this socket
+	// and a process that is one gets its predecessor's back.
+	ln, err := handoff.Listen(tcpNetwork(cfg.DualStack), addr)
 	if err != nil {
 		return nil, err
+	}
+	if tl, ok := ln.(interface{ SetDeadline(time.Time) error }); ok {
+		cfg.Gate.attach(tl.SetDeadline)
 	}
 	var active atomic.Int64
 	go func() {
 		for {
+			cfg.Gate.wait()
 			conn, err := ln.Accept()
 			if err != nil {
+				if cfg.Gate.interrupted(err) {
+					continue
+				}
 				return
 			}
 			if cfg.MaxConnections > 0 && active.Add(1) > int64(cfg.MaxConnections) {

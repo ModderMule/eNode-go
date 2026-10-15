@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"enode/internal/handoff"
 	"enode/internal/ratelimit"
 	"enode/logging"
 )
@@ -355,7 +356,7 @@ func New(cfg Config, static StaticInfo, snapshot func() LiveStats) *Server {
 // caller before it logs a URL — then serves in the background.
 func (s *Server) Start() error {
 	addr := net.JoinHostPort(s.cfg.BindIP, strconv.Itoa(int(s.cfg.Port)))
-	ln, err := net.Listen("tcp", addr)
+	ln, err := handoff.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}

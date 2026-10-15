@@ -46,6 +46,9 @@ type MySQLConfig struct {
 	// running from a subpackage should resolve it with tests.FixRelativeTestingPath.
 	// Empty means the default below.
 	SchemaFile string
+	// KeepOnline skips Init's reset of the previous run's online flags; see
+	// Config.KeepOnline.
+	KeepOnline bool
 	// Dialect selects the full-text search strategy. DialectMariaDB (the default
 	// when empty) uses a plain word-based FULLTEXT index and word-prefix matching,
 	// which both MariaDB 10.0.5+ and MySQL 5.6.4+ support. DialectMySQL uses the
@@ -198,6 +201,10 @@ func (m *MySQLEngine) Init() error {
 	// Only the rows a previous run left online, found through the online indexes.
 	// Without the WHERE this reads every client and source ever stored, and after
 	// an unclean stop the rows to rewrite are every session that was open.
+	if m.cfg.KeepOnline {
+		m.db = db
+		return nil
+	}
 	start := time.Now()
 	if _, err := db.ExecContext(ctx, `UPDATE clients SET online = 0 WHERE online = 1`); err != nil {
 		_ = db.Close()

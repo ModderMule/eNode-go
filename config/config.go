@@ -41,6 +41,12 @@ type Config struct {
 	NoAssert bool   `yaml:"noAssert"`
 	LogLevel string `yaml:"logLevel"`
 	LogFile  string `yaml:"logFile"`
+	// PIDFile is where the server writes its process id once it serves, and where
+	// update.sh finds the process to hand over to a new binary. Resolved like the
+	// other data paths. See docs/server-handoff.md.
+	PIDFile string `yaml:"pidFile"`
+	// Handoff tunes the handover to a new process on SIGUSR2.
+	Handoff HandoffConfig `yaml:"handoff"`
 
 	// Servers seeds OP_SERVERLIST — the other servers this node advertises to
 	// clients (never itself; a server's own identity travels in OP_SERVERIDENT).
@@ -720,6 +726,26 @@ type SnapshotConfig struct {
 	Compress bool `yaml:"compress"`
 }
 
+// The values of handoff.memory: how the memory engine's index reaches the process a
+// handover starts.
+const (
+	// HandoffMemoryStream sends the index over the handover socket. The fastest, but
+	// both processes hold the whole index while it is copied.
+	HandoffMemoryStream = "stream"
+	// HandoffMemoryFile writes the index to a file beside storage.snapshot.file and
+	// frees it before the new process reads it back, so the two never hold it at
+	// once. Slower, and needs the disk space.
+	HandoffMemoryFile = "file"
+	// HandoffMemoryOff refuses the handover while the memory engine is in use.
+	HandoffMemoryOff = "off"
+)
+
+// HandoffConfig tunes the handover to a new process. See docs/server-handoff.md.
+type HandoffConfig struct {
+	// Memory is one of the HandoffMemory values; the database engines ignore it.
+	Memory string `yaml:"memory"`
+}
+
 type CleanupConfig struct {
 	Enabled         bool `yaml:"enabled"`
 	StaleAfterHours int  `yaml:"staleAfterHours"`
@@ -853,6 +879,18 @@ func setDefaults(cfg *Config) error {
 	}
 	if cfg.LogFile == "" {
 		cfg.LogFile = "logs/enode.log"
+	}
+	if cfg.PIDFile == "" {
+		cfg.PIDFile = filepath.Join(DataDir, "enode.pid")
+	}
+	if cfg.Handoff.Memory == "" {
+		cfg.Handoff.Memory = HandoffMemoryStream
+	}
+	switch cfg.Handoff.Memory {
+	case HandoffMemoryStream, HandoffMemoryFile, HandoffMemoryOff:
+	default:
+		return fmt.Errorf("handoff.memory %q is invalid: use %q, %q or %q",
+			cfg.Handoff.Memory, HandoffMemoryStream, HandoffMemoryFile, HandoffMemoryOff)
 	}
 	if len(cfg.TestURLs) == 0 {
 		cfg.TestURLs = []string{
@@ -1080,6 +1118,13 @@ func ResolveDataPath(path string) string {
 
 // ServerMetPath is the resolved location of the gossip peer file.
 func (c Config) ServerMetPath() string { return ResolveDataPath(c.Gossip.ServerMetFile) }
+
+// PIDFilePath is the resolved location of the process id file.
+func (c Config) PIDFilePath() string { return ResolveDataPath(c.PIDFile) }
+
+// HandoffFilePath is where handoff.memory "file" writes the memory engine's index:
+// beside the snapshot file, whose disk the operator has already sized for it.
+func (c Config) HandoffFilePath() string { return c.StorageSnapshotPath() + ".handoff" }
 
 // StorageSnapshotPath is the resolved location of the memory-engine snapshot.
 func (c Config) StorageSnapshotPath() string { return ResolveDataPath(c.Storage.Snapshot.File) }

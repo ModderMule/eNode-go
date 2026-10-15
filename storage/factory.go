@@ -16,6 +16,11 @@ type Config struct {
 	// mysql or mongodb engine's searches. The memory engine has its own index and
 	// ignores it.
 	Manticore ManticoreConfig
+	// KeepOnline leaves the online flags of the previous run alone in Init. Set for
+	// a process taking over from a predecessor by handover (internal/handoff): the
+	// predecessor's sessions are still connected, and move to this process with
+	// their rows as they are. Not a config key.
+	KeepOnline bool
 }
 
 // startupResetTimeout bounds what a DB engine's Init does after it has connected:
@@ -127,8 +132,10 @@ func NewEngine(cfg Config) (Engine, error) {
 		}
 		return NewMemoryEngine(), nil
 	case "mysql":
+		cfg.MySQL.KeepOnline = cfg.KeepOnline
 		engine, err = NewMySQLEngine(cfg.MySQL)
 	case "mongodb":
+		cfg.MongoDB.KeepOnline = cfg.KeepOnline
 		engine, err = NewMongoDBEngine(cfg.MongoDB)
 	default:
 		return nil, fmt.Errorf("unknown storage engine: %s", cfg.Engine)

@@ -12,12 +12,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"enode/admin"
 	"enode/config"
 	"enode/ed2k"
+	"enode/internal/handoff"
 	"enode/logging"
 	"enode/meta"
 	"enode/netfilter"
@@ -39,6 +41,12 @@ func main() {
 	flag.BoolVar(&reindexManticore, "reindex-manticore", false,
 		"drop and recreate the storage.manticore table at startup and rebuild it from the database")
 	flag.Parse()
+
+	// Before anything binds: a process started by a handover adopts its
+	// predecessor's sockets as it binds them.
+	if err := handoff.Init(); err != nil {
+		log.Fatalf("%v", err)
+	}
 
 	if *updateFilters {
 		if err := runUpdateFilters(context.Background(), *configPath, os.Stdout); err != nil {
@@ -78,6 +86,14 @@ func main() {
 // already registered — including engine.Close(). A signal handler alone would
 // not have fixed those paths.
 func run(ctx context.Context, configPath string) error {
+	// cancel also ends the server once it has handed over to a successor; handedOff
+	// tells the defers below that it did. inherited is the successor's side: this
+	// process was started by a handover and takes over before it serves.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var handedOff atomic.Bool
+	inherited := handoff.Inherited()
+
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("config load failed: %w", err)
@@ -134,6 +150,7 @@ func run(ctx context.Context, configPath string) error {
 
 	storageCfg := cfg.StorageEngineConfig()
 	storageCfg.Manticore.Recreate = reindexManticore
+	storageCfg.KeepOnline = inherited
 	engine, err := storage.NewEngine(storageCfg)
 	if err != nil {
 		return fmt.Errorf("storage engine create failed: %w", err)
@@ -152,7 +169,9 @@ func run(ctx context.Context, configPath string) error {
 	// LIFO unwinding flushes the final snapshot while the engine is still alive.
 	if cfg.Storage.Snapshot.Enabled {
 		snapshotPath := cfg.StorageSnapshotPath()
-		if loader, ok := engine.(*storage.MemoryEngine); ok {
+		// A successor gets the live index from its predecessor instead, sources and
+		// all, which the file does not have.
+		if loader, ok := engine.(*storage.MemoryEngine); ok && !inherited {
 			stats, err := loader.LoadSnapshot(snapshotPath)
 			switch {
 			case err != nil:
@@ -177,7 +196,13 @@ func run(ctx context.Context, configPath string) error {
 			time.Duration(cfg.Storage.Snapshot.IntervalMinutes)*time.Minute,
 			cfg.Storage.Snapshot.Compress,
 		)
-		defer stopSnapshot()
+		// After a handover the successor writes the snapshots; a final one from here
+		// would replace its newer file with this process's last state.
+		defer func() {
+			if !handedOff.Load() {
+				stopSnapshot()
+			}
+		}()
 	}
 
 	seedServers(engine, cfg.Servers)
@@ -209,6 +234,10 @@ func run(ctx context.Context, configPath string) error {
 
 	dualStack := cfg.IPv6.EnabledOrDefault()
 	tcpCfg, udpCfg := serverListenConfigs(cfg)
+	// A successor binds everything closed and opens it once its predecessor has let
+	// go; a handover closes tcpGate on the way out. See docs/server-handoff.md.
+	tcpGate, udpGate := ed2k.NewGate(!inherited), ed2k.NewGate(!inherited)
+	tcpCfg.Gate, udpCfg.Gate = tcpGate, udpGate
 
 	// Torrent/Usenet/Kad/web rows from the catalogue daemons. Built before the runtime so the
 	// FlagMetaSearch bit reaches both advertised flag words; attached and started
@@ -558,6 +587,7 @@ func run(ctx context.Context, configPath string) error {
 			// UDP/TCP listeners; otherwise the NAT socket stays IPv4-only while the
 			// rest of the server serves both families.
 			DualStack: dualStack,
+			Gate:      udpGate,
 		}, udpMainHandler)
 		if err != nil {
 			return fmt.Errorf("nat traversal udp server failed: %w", err)
@@ -641,7 +671,45 @@ func run(ctx context.Context, configPath string) error {
 		views.setConfig(reload.effective)
 	}
 
+	deps := handoffDeps{
+		runtime:    runtime,
+		engine:     engine,
+		tcpGate:    tcpGate,
+		udpGate:    udpGate,
+		cancel:     cancel,
+		handedOff:  &handedOff,
+		pidFile:    cfg.PIDFilePath(),
+		configPath: configPath,
+		boot:       bootFileCfg,
+	}
+	if inherited {
+		if err := takeOver(deps); err != nil {
+			return err
+		}
+		// systemd follows the service to this process; see docs/server-handoff.md.
+		sdNotify(fmt.Sprintf("MAINPID=%d\nREADY=1", os.Getpid()))
+	} else {
+		sdNotify("READY=1")
+	}
+	// SIGUSR2 is handled before the pid file names this process: whoever finds the
+	// pid may signal it at once, and unhandled, the signal terminates the process.
+	watchHandoff(ctx, deps)
+	if err := writePIDFile(deps.pidFile); err != nil {
+		logging.Warnf("pid file %s not written: %v", deps.pidFile, err)
+	}
+	// A refusal left by an earlier process is not this one's.
+	_ = os.Remove(handoffStatusPath(deps.pidFile))
+	defer func() {
+		if !handedOff.Load() {
+			removePIDFile(deps.pidFile)
+		}
+	}()
+
 	<-ctx.Done()
+	if handedOff.Load() {
+		logging.Infof("handed over to the new process, stopping")
+		return nil
+	}
 	logging.Infof("shutdown signal received, stopping")
 	return nil
 }

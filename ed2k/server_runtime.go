@@ -169,6 +169,13 @@ type ServerRuntime struct {
 	bots *botDetector
 	// blocks counts what the runtime itself refused, for the admin surface.
 	blocks blockCounters
+	// liveMu guards live, every TCP session with a running read loop, logged in or
+	// not: what a handover has to park. sessionsByHash holds only logged-in ones.
+	liveMu sync.Mutex
+	live   map[*tcpClient]struct{}
+	// parking is the handover round in progress, or nil. While it is set every
+	// session parks at its next read; see ParkSessions.
+	parking atomic.Pointer[parkRound]
 }
 
 // ipv6Enabled reports whether IPv6 is on at all (dual-stack accept, CT_MOD_IP_V6
@@ -277,6 +284,8 @@ func (s *ServerRuntime) TCPHandler(enableCrypt bool) func(net.Conn) {
 			defer s.releaseConnSlot(key)
 		}
 		client := newTCPClient(s, conn, enableCrypt)
+		s.trackSession(client)
+		defer s.untrackSession(client)
 		client.run()
 	}
 }
@@ -717,6 +726,10 @@ type tcpClient struct {
 	// released is set under storeMu, before Disconnect, and checked by addFiles.
 	storeMu  sync.Mutex
 	released bool
+	// handedOff is set when the session has moved to a successor process: releasing
+	// it then closes this process's copy of the socket and nothing else, since the
+	// LowID, the hash index and the storage row all live on over there.
+	handedOff atomic.Bool
 
 	closeReason string
 }
@@ -854,6 +867,15 @@ func (c *tcpClient) run() {
 	}
 	buf := make([]byte, 4096)
 	for {
+		// Checked before every read, so a session that was busy in a handler when a
+		// handover began parks as soon as it is done. ParkSessions also keeps
+		// interrupting the read itself, below.
+		if round := c.server.parking.Load(); round != nil {
+			if !c.park(round) {
+				return
+			}
+			continue
+		}
 		var deadline time.Time
 		if c.server.tcp().DisconnectTimeout > 0 {
 			deadline = time.Now().Add(c.server.tcp().DisconnectTimeout)
@@ -867,6 +889,12 @@ func (c *tcpClient) run() {
 		}
 		n, err := c.conn.Read(buf)
 		if err != nil {
+			if round := c.server.parking.Load(); round != nil && isTimeout(err) {
+				if !c.park(round) {
+					return
+				}
+				continue
+			}
 			if errors.Is(err, io.EOF) {
 				c.setCloseReason("peer-closed")
 			} else if ne, ok := err.(net.Error); ok && ne.Timeout() && preLogin {
@@ -1277,7 +1305,9 @@ func (c *tcpClient) handShake() {
 // keepalive, until the pool ran dry. A race with the read loop's own SetReadDeadline
 // only moves the deadline by the time between the two calls.
 func (c *tcpClient) touchDeadline() {
-	if c.server.tcp().DisconnectTimeout <= 0 {
+	// A parked session's deadline belongs to ParkSessions; pushing it out would
+	// leave the read loop blocked instead of parked.
+	if c.server.tcp().DisconnectTimeout <= 0 || c.server.parking.Load() != nil {
 		return
 	}
 	_ = c.conn.SetReadDeadline(time.Now().Add(c.server.tcp().DisconnectTimeout))
@@ -1422,7 +1452,9 @@ func (c *tcpClient) startPeriodicServerStatus() {
 		for {
 			select {
 			case <-ticker.C:
-				if c.isLogged() {
+				// Not while a handover is parking the session: a write now would move
+				// the RC4 keystream past the state being handed over.
+				if c.isLogged() && c.server.parking.Load() == nil {
 					c.sendServerStatus()
 				}
 			case <-stop:
@@ -3134,6 +3166,14 @@ func (c *tcpClient) replaceSameIPSession(hash []byte) {
 // reach it; see releaseOnce.
 func (c *tcpClient) releaseSession() {
 	c.releaseOnce.Do(func() {
+		if c.handedOff.Load() {
+			// The successor serves the session on its own copy of the socket; closing
+			// this one sends the client nothing.
+			_ = c.conn.Close()
+			info := c.snapshotInfo()
+			logging.Debugf("tcp session handed off remote=%s id=%d storeID=%d", c.remoteHost, info.ID, info.StoreID)
+			return
+		}
 		c.infoMu.RLock()
 		hadLowID, wasLogged := c.hasLowID, c.logged
 		c.infoMu.RUnlock()

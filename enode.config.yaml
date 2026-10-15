@@ -38,6 +38,21 @@ servers: []
 noAssert: false
 logLevel: "debug"
 logFile: "logs/enode.log"
+# The running server's process id, written once it serves. update.sh reads it to
+# hand the running server over to the new binary (SIGUSR2) instead of restarting
+# it, so no client is disconnected. See docs/server-handoff.md.
+pidFile: "data/enode.pid"
+handoff:
+  # How the memory engine's index reaches the new process on a handover
+  # (the database engines ignore this):
+  #   stream  over the handover socket; fastest, but both processes hold the
+  #           whole index while it is copied, so RAM peaks at about twice the index
+  #   file    written to storage.snapshot.file + ".handoff" and freed before the
+  #           new process reads it back; RAM stays at about one index, the pause
+  #           is longer and the disk must hold the file
+  #   off     no handover: SIGUSR2 is refused and update.sh leaves the old server
+  #           running; restart it yourself
+  memory: "stream"
 
 supportCrypt: true
 requestCrypt: true

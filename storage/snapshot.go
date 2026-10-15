@@ -272,6 +272,12 @@ func (m *MemoryEngine) WriteSnapshot(path string, compress bool) (SnapshotStats,
 		_ = tmp.Close()
 		return SnapshotStats{}, err
 	}
+	// Every file went between the key sweep and the batches: the engine was emptied,
+	// as a handover through a file does. Same rule as an empty engine above.
+	if stats.Files == 0 {
+		_ = tmp.Close()
+		return SnapshotStats{}, nil
+	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return SnapshotStats{}, fmt.Errorf("flush snapshot: %w", err)

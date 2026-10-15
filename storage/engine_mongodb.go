@@ -27,6 +27,9 @@ type MongoConfig struct {
 	URI      string
 	Database string
 	Timeout  time.Duration
+	// KeepOnline skips Init's reset of the previous run's online flags; see
+	// Config.KeepOnline.
+	KeepOnline bool
 }
 
 type MongoDBEngine struct {
@@ -103,12 +106,14 @@ func (m *MongoDBEngine) Init() error {
 	// together with online and cleared with it, so the filter loses nothing.
 	ctx, cancel := context.WithTimeout(context.Background(), startupResetTimeout)
 	defer cancel()
-	if _, err := db.Collection("clients").UpdateMany(ctx, bson.M{"online": true}, bson.M{"$set": bson.M{"online": false}}); err != nil {
-		logging.Errorf("mongodb reset clients online flag failed: %v", err)
-	}
-	if _, err := db.Collection("sources").UpdateMany(ctx, bson.M{"online": true},
-		bson.M{"$set": bson.M{"online": false}, "$unset": bson.M{"live": ""}}); err != nil {
-		logging.Errorf("mongodb reset sources online flag failed: %v", err)
+	if !m.cfg.KeepOnline {
+		if _, err := db.Collection("clients").UpdateMany(ctx, bson.M{"online": true}, bson.M{"$set": bson.M{"online": false}}); err != nil {
+			logging.Errorf("mongodb reset clients online flag failed: %v", err)
+		}
+		if _, err := db.Collection("sources").UpdateMany(ctx, bson.M{"online": true},
+			bson.M{"$set": bson.M{"online": false}, "$unset": bson.M{"live": ""}}); err != nil {
+			logging.Errorf("mongodb reset sources online flag failed: %v", err)
+		}
 	}
 
 	// Its own deadline: one listIndexes per collection, plus a create or drop only

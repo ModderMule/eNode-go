@@ -134,6 +134,24 @@ func (l *LowIDClients) Get(id uint32) (any, bool) {
 	return v, ok
 }
 
+// Restore registers client under a LowID it already holds: a session handed over
+// from a predecessor process keeps the ID its client was told. It reports false
+// when the ID is taken. The configured range is not enforced, since the ID was
+// valid when it was issued.
+func (l *LowIDClients) Restore(id uint32, client any) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if id == 0 || id > lowIDCeiling {
+		return false
+	}
+	if _, ok := l.clients[id]; ok {
+		return false
+	}
+	l.clients[id] = client
+	l.count++
+	return true
+}
+
 func (l *LowIDClients) Remove(id uint32) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

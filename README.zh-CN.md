@@ -211,6 +211,8 @@ storage:
 在后台启动，或 `bash update.sh -config config.yaml` 使用其他配置文件。
 它会为当前平台安装最新版本，之后再次运行即可更新。
 
+如果 enode 已在该目录中运行，更新不会断开任何客户端：正在运行的服务器会把所有连接和索引移交给新的程序，由新进程继续服务（Linux 和 macOS）。手动执行 `kill -USR2 <pid>` 效果相同。详见 [docs/server-handoff.md](docs/server-handoff.md)。
+
 ## 构建与测试
 
 元搜索契约模块（`enodemeta`）是一个 git 子模块，请使用 `git clone --recurse-submodules` 克隆，或在已有的检出目录中执行 `git submodule update --init`。需要 Go 1.25 或更高版本。

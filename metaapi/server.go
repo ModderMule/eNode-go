@@ -15,6 +15,7 @@ import (
 
 	"enode/accounts"
 	"enode/internal/connectsrv"
+	"enode/internal/handoff"
 	"enode/internal/ratelimit"
 	"enode/logging"
 
@@ -117,7 +118,7 @@ func (s *Server) Start() error {
 		if srv == nil {
 			continue
 		}
-		ln, err := net.Listen("tcp", srv.Addr)
+		ln, err := handoff.Listen("tcp", srv.Addr)
 		if err != nil {
 			s.Close()
 			return fmt.Errorf("meta api listen %s: %w", srv.Addr, err)
