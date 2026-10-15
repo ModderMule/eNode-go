@@ -688,6 +688,9 @@ type StorageConfig struct {
 	Snapshot SnapshotConfig `yaml:"snapshot"`
 	MySQL    MySQLConfig    `yaml:"mysql"`
 	MongoDB  MongoDBConfig  `yaml:"mongodb"`
+	// Manticore puts a Manticore Search index in front of the mysql or mongodb
+	// engine's searches. Off by default; see docs/manticore-search.local.md.
+	Manticore ManticoreConfig `yaml:"manticore"`
 }
 
 // DefaultCountCacheSeconds is storage.countCacheSeconds when unset.
@@ -764,6 +767,44 @@ type MongoDBConfig struct {
 	Port     int    `yaml:"port"`
 	Database string `yaml:"database"`
 	URI      string `yaml:"uri"`
+}
+
+// ManticoreConfig is storage.manticore. Read at startup.
+type ManticoreConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// DSN is a go-sql-driver DSN for Manticore's MySQL-protocol port, e.g.
+	// "tcp(127.0.0.1:9306)/".
+	DSN   string `yaml:"dsn"`
+	Table string `yaml:"table"`
+	// TableOptions follow the column list of the CREATE TABLE. Changing them needs
+	// a start with -reindex-manticore.
+	TableOptions string `yaml:"tableOptions"`
+	TimeoutMs    int    `yaml:"timeoutMs"`
+	BatchSize    int    `yaml:"batchSize"`
+	QueueSize    int    `yaml:"queueSize"`
+	// ReconcileIntervalMinutes is a *int so that an explicit 0, which turns the
+	// periodic pass off, is told apart from an absent key, which is the default.
+	ReconcileIntervalMinutes *int `yaml:"reconcileIntervalMinutes"`
+	// FallbackToEngine is a *bool because its default is on.
+	FallbackToEngine *bool `yaml:"fallbackToEngine"`
+}
+
+// DefaultManticoreReconcileMinutes is storage.manticore.reconcileIntervalMinutes
+// when unset.
+const DefaultManticoreReconcileMinutes = 360
+
+// ReconcileIntervalMinutesOrDefault is the periodic reconcile interval; 0 is off.
+func (c ManticoreConfig) ReconcileIntervalMinutesOrDefault() int {
+	if c.ReconcileIntervalMinutes == nil {
+		return DefaultManticoreReconcileMinutes
+	}
+	return max(*c.ReconcileIntervalMinutes, 0)
+}
+
+// FallbackToEngineOrDefault reports whether a failed Manticore search runs on the
+// database, defaulting to true.
+func (c ManticoreConfig) FallbackToEngineOrDefault() bool {
+	return boolOrDefault(c.FallbackToEngine, true)
 }
 
 func Load(path string) (Config, error) {
@@ -1011,6 +1052,7 @@ func setDefaults(cfg *Config) error {
 	if cfg.Storage.MongoDB.Database == "" {
 		cfg.Storage.MongoDB.Database = "enode"
 	}
+	setManticoreDefaults(&cfg.Storage.Manticore)
 	// Default the fixtures path even when seeding is off, so the shipped config can
 	// document the key without an operator having to invent a path. Working-directory
 	// relative, like storage.mysql.schemaFile above.
@@ -1101,10 +1143,23 @@ func (c Config) StorageEngineConfig() storage.Config {
 		Database: c.Storage.MongoDB.Database,
 		Timeout:  10 * time.Second,
 	}
+	mc := c.Storage.Manticore
+	manticoreCfg := storage.ManticoreConfig{
+		Enabled:           mc.Enabled,
+		DSN:               mc.DSN,
+		Table:             mc.Table,
+		TableOptions:      mc.TableOptions,
+		Timeout:           time.Duration(mc.TimeoutMs) * time.Millisecond,
+		BatchSize:         mc.BatchSize,
+		QueueSize:         mc.QueueSize,
+		ReconcileInterval: time.Duration(mc.ReconcileIntervalMinutesOrDefault()) * time.Minute,
+		FallbackToEngine:  mc.FallbackToEngineOrDefault(),
+	}
 	return storage.Config{
-		Engine:  c.Storage.Engine,
-		MySQL:   mysqlCfg,
-		MongoDB: mongoCfg,
+		Engine:    c.Storage.Engine,
+		MySQL:     mysqlCfg,
+		MongoDB:   mongoCfg,
+		Manticore: manticoreCfg,
 	}
 }
 
@@ -1332,4 +1387,27 @@ func setContentFilterDefaults(f *FilterConfig) error {
 		return errors.New("filter.update.enabled needs at least one of filter.hashBanlist, filter.hashFilter or filter.hashWhitelist enabled")
 	}
 	return nil
+}
+
+// setManticoreDefaults fills storage.manticore. Done whether or not it is enabled,
+// so the values a dashboard shows are the ones a later enable would use.
+func setManticoreDefaults(m *ManticoreConfig) {
+	if m.DSN == "" {
+		m.DSN = storage.DefaultManticoreDSN
+	}
+	if m.Table == "" {
+		m.Table = storage.DefaultManticoreTable
+	}
+	if m.TableOptions == "" {
+		m.TableOptions = storage.DefaultManticoreTableOptions
+	}
+	if m.TimeoutMs <= 0 {
+		m.TimeoutMs = int(storage.DefaultManticoreTimeout.Milliseconds())
+	}
+	if m.BatchSize <= 0 {
+		m.BatchSize = storage.DefaultManticoreBatchSize
+	}
+	if m.QueueSize <= 0 {
+		m.QueueSize = storage.DefaultManticoreQueueSize
+	}
 }

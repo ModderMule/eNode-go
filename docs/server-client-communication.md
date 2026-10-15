@@ -71,15 +71,15 @@ Nothing in either client tree claims a hash uniquely determines a size. The clie
 their *local* known-file maps by MD4 alone, but a local map is not an index of a hostile
 network — which is the distinction eserver 17.3 drew.
 
-**Where each engine keys it.** MySQL: `UNIQUE KEY hash_size (hash,size)` with a separate
-non-unique `KEY hash` (`misc/enode.sql:72-73`). MongoDB: a unique compound index on
+**Where each engine keys it.** MySQL: `UNIQUE KEY hash_size (hash,size)`, whose leading
+`hash` column also serves the hash-only lookups (`misc/enode.sql`). MongoDB: a unique compound index on
 `{hash, size}`, with sources identified by `(file_hash, file_size, client_hash)`. The
 memory engine: `storage.fileMapKey`, a 24-byte key of the hash followed by the size
 big-endian.
 
 **The memory engine's source lists stay keyed on the hash alone**, because
 `OP_GLOBGETSOURCES (0x9a)` carries bare hashes with no size and has to stay an O(1)
-lookup — the same reason MySQL keeps `KEY hash` alongside the unique pair. Each source
+lookup — the same reason MySQL keeps `hash` first in the unique pair. Each source
 records the size it was offered at, so `GetSources(hash, size)` and the search counters
 see only that size's sources, as MySQL and MongoDB do; the size-less 0x9a lookup gets
 them all. Sources come back newest offer first (a re-offer counts as new), matching the
@@ -184,7 +184,7 @@ that something external could have depended on.
 How many files a single client may publish, and what happens when it tries to publish more.
 Both are configured under `files:` in `enode.config.yaml`, enforced in `handleOfferFiles`, and
 advertised on the wire so a client sees the numbers it is actually held to. For what a
-given cap costs in RAM at scale see [`memory-footprint.md`](memory-footprint.md) §4.
+given cap costs in RAM at scale see [`memory-footprint.local.md`](memory-footprint.local.md) §4.
 
 They are **per-client publish caps, not server capacity figures** — worth stating because
 in `OP_GLOBSERVSTATRES` they sit next to `maxusers` and read like capacity. Both come from
@@ -301,7 +301,7 @@ close, so the user would have no way to learn why they keep being disconnected.
   them; only the ones the new session has offered count against it.
 - **A large sharer keeps its session.** A client sharing 50,000 files at the defaults
   publishes its first 10,000, is warned once, and stays connected with those 10,000
-  indexed. Raise `softLimit` to index more of it; docs/memory-footprint.md §4 says what
+  indexed. Raise `softLimit` to index more of it; docs/memory-footprint.local.md §4 says what
   that costs.
 - **`hardLimit` is advertised but means something else to the server now.** Clients store
   and display it and compare it against nothing, so advertising a per-packet figure in the

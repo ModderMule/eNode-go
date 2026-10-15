@@ -111,12 +111,16 @@ func (m *MongoDBEngine) Init() error {
 		logging.Errorf("mongodb reset sources online flag failed: %v", err)
 	}
 
-	// Its own deadline: up to six round-trips.
+	// Its own deadline: one listIndexes per collection, plus a create or drop only
+	// where the database differs from mongoIndexes.
 	indexCtx, indexCancel := m.opContext()
-	created, err := m.ensureIndexes(indexCtx)
+	created, dropped, err := m.ensureIndexes(indexCtx)
 	indexCancel()
 	if len(created) > 0 {
 		logging.Infof("mongodb: created indexes %s", strings.Join(created, ", "))
+	}
+	if len(dropped) > 0 {
+		logging.Infof("mongodb: dropped obsolete indexes %s", strings.Join(dropped, ", "))
 	}
 	if err != nil {
 		logging.Errorf("mongodb ensure indexes failed: %v", err)
@@ -510,6 +514,108 @@ func (m *MongoDBEngine) BrowseFiles(cursor []byte, limit int) ([]File, []byte, e
 			Sources: doc.Sources, Completed: doc.Completed, Title: src.Title, Artist: src.Artist,
 			Album: src.Album, Runtime: src.Runtime, Bitrate: src.Bitrate, Codec: src.Codec,
 		})
+	}
+	if err := cur.Err(); err != nil {
+		return nil, nil, err
+	}
+	if read < limit {
+		return out, nil, nil
+	}
+	next, err := bson.Marshal(bson.D{{Key: "id", Value: last}})
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, next, nil
+}
+
+// BrowseSources pages over the sources collection by _id, a keyset like
+// BrowseFiles', and joins each source to its client for the current port. The
+// cursor is the last _id read.
+func (m *MongoDBEngine) BrowseSources(cursor []byte, limit int) ([]IndexedSource, []byte, error) {
+	match := bson.M{}
+	if len(cursor) != 0 {
+		var after struct {
+			ID bson.RawValue `bson:"id"`
+		}
+		if err := bson.Unmarshal(cursor, &after); err != nil || after.ID.Type == 0 {
+			return nil, nil, ErrBrowseCursor
+		}
+		match["_id"] = bson.M{"$gt": after.ID}
+	}
+	if err := m.ensureDB(); err != nil {
+		return nil, nil, err
+	}
+	limit = browseLimit(limit)
+	ctx, cancel := m.opContext()
+	defer cancel()
+	// The limit comes before the join, so a page reads limit sources and one client
+	// each, through the unique clients.hash index.
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: match}},
+		{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
+		{{Key: "$limit", Value: int64(limit)}},
+		{{Key: "$lookup", Value: bson.M{
+			"from":         "clients",
+			"localField":   "client_hash",
+			"foreignField": "hash",
+			"as":           "client",
+		}}},
+	}
+	cur, err := m.db.Collection("sources").Aggregate(ctx, pipeline,
+		options.Aggregate().SetBatchSize(int32(limit+1)))
+	if err != nil {
+		logging.Errorf("mongodb browse sources failed: %v", err)
+		return nil, nil, err
+	}
+	defer cur.Close(ctx)
+	out := make([]IndexedSource, 0, min(limit, 256))
+	var last bson.RawValue
+	read := 0
+	for cur.Next(ctx) {
+		var doc struct {
+			ID         bson.RawValue `bson:"_id"`
+			FileHash   []byte        `bson:"file_hash"`
+			FileSize   uint64        `bson:"file_size"`
+			ClientHash []byte        `bson:"client_hash"`
+			ClientED2K uint32        `bson:"client_ed2k"`
+			Name       string        `bson:"name"`
+			Type       string        `bson:"type"`
+			Title      string        `bson:"title"`
+			Artist     string        `bson:"artist"`
+			Album      string        `bson:"album"`
+			Runtime    uint32        `bson:"length"`
+			Bitrate    uint32        `bson:"bitrate"`
+			Codec      string        `bson:"codec"`
+			Online     bool          `bson:"online"`
+			Complete   bool          `bson:"complete"`
+			TimeOffer  time.Time     `bson:"time_offer"`
+			Client     []struct {
+				Port uint16 `bson:"port"`
+			} `bson:"client"`
+		}
+		if err := cur.Decode(&doc); err != nil {
+			logging.Errorf("mongodb browse sources decode failed: %v", err)
+			return nil, nil, err
+		}
+		last, read = doc.ID, read+1
+		s := IndexedSource{
+			File: File{
+				Hash: doc.FileHash, Size: doc.FileSize, Name: doc.Name, Type: doc.Type,
+				Title: doc.Title, Artist: doc.Artist, Album: doc.Album,
+				Runtime: doc.Runtime, Bitrate: doc.Bitrate, Codec: doc.Codec,
+			},
+			ClientHash: doc.ClientHash,
+			ClientID:   doc.ClientED2K,
+			Online:     doc.Online,
+			TimeOffer:  doc.TimeOffer,
+		}
+		if doc.Complete {
+			s.File.Completed = 1
+		}
+		if len(doc.Client) > 0 {
+			s.ClientPort = doc.Client[0].Port
+		}
+		out = append(out, s)
 	}
 	if err := cur.Err(); err != nil {
 		return nil, nil, err
@@ -1382,9 +1488,8 @@ var mongoIndexes = []mongoIndex{
 	// GetSources: {file_hash, file_size, online: true} newest offer first, answered
 	// by an index scan that stops after MaxWireSources keys. Without it a popular
 	// file's every source was read and sorted in memory on each request. It replaces
-	// file_hash_1_file_size_1, which is its prefix; ensureIndexes never drops
-	// anything, so a database created before keeps that one until an operator
-	// removes it.
+	// file_hash_1_file_size_1, which is its prefix and is in obsoleteMongoIndexes,
+	// so a database created before has it dropped on the next start.
 	{collection: "sources", name: "file_hash_1_file_size_1_online_1_time_offer_-1", keys: bson.D{{Key: "file_hash", Value: 1}, {Key: "file_size", Value: 1}, {Key: "online", Value: 1}, {Key: "time_offer", Value: -1}}},
 	{collection: "sources", name: "name_text", keys: bson.D{{Key: "name", Value: "text"}}},
 	// Backs the regex fallback in mongoNameRegexFilter, which runs whenever a
@@ -1405,24 +1510,38 @@ var mongoIndexes = []mongoIndex{
 	{collection: "files", name: "completed_1", keys: bson.D{{Key: "completed", Value: 1}}},
 }
 
-// ensureIndexes creates whichever of mongoIndexes are missing and returns their names.
+// obsoleteMongoIndexes are indexes an earlier version created that ensureIndexes
+// drops when it finds them; only collection and name are used. Each one only cost
+// write time once a later index made it redundant.
+var obsoleteMongoIndexes = []mongoIndex{
+	// A prefix of file_hash_1_file_size_1_online_1_time_offer_-1 (and of the unique
+	// file_hash_1_file_size_1_client_hash_1), which replaced it.
+	{collection: "sources", name: "file_hash_1_file_size_1"},
+}
+
+// ensureIndexes creates whichever of mongoIndexes are missing, drops whichever of
+// obsoleteMongoIndexes are still present, and returns the names of both.
 //
 // Init used to send every createIndexes on every start. MongoDB treats an identical
 // existing index as a no-op, so nothing was rebuilt, but each call was a round-trip
 // and `_, _ =` hid any conflict, which then repeated silently on every boot. Now each
-// collection's index list is read once and only the absent ones are written: nothing
+// collection's index list is read once and only the differences are written: nothing
 // in steady state, exactly the new ones after an upgrade adds one, and an index an
 // operator dropped comes back on the next start.
 //
 // Matched by name, not by keys: listIndexes reports a text index's keys as
 // {_fts: "text", _ftsx: 1}, never as the {name: "text"} it was created from.
-func (m *MongoDBEngine) ensureIndexes(ctx context.Context) ([]string, error) {
-	return m.ensureIndexList(ctx, mongoIndexes)
+func (m *MongoDBEngine) ensureIndexes(ctx context.Context) (created, dropped []string, err error) {
+	return m.ensureIndexList(ctx, mongoIndexes, obsoleteMongoIndexes)
 }
 
 // ensureIndexList is ensureIndexes for any list, so the account collections can keep
 // their own, created only when accounts are enabled.
-func (m *MongoDBEngine) ensureIndexList(ctx context.Context, indexes []mongoIndex) ([]string, error) {
+//
+// An obsolete index is only dropped from a collection whose creates succeeded in
+// the same pass, so an index that replaced it is in place before it goes. Only
+// collections that indexes names are visited.
+func (m *MongoDBEngine) ensureIndexList(ctx context.Context, indexes, obsolete []mongoIndex) (created, dropped []string, err error) {
 	var order []string
 	byCollection := map[string][]mongoIndex{}
 	for _, idx := range indexes {
@@ -1432,7 +1551,6 @@ func (m *MongoDBEngine) ensureIndexList(ctx context.Context, indexes []mongoInde
 		byCollection[idx.collection] = append(byCollection[idx.collection], idx)
 	}
 
-	var created []string
 	var errs []error
 	for _, collection := range order {
 		view := m.db.Collection(collection).Indexes()
@@ -1465,18 +1583,30 @@ func (m *MongoDBEngine) ensureIndexList(ctx context.Context, indexes []mongoInde
 			missing = append(missing, mongo.IndexModel{Keys: idx.keys, Options: opts})
 			names = append(names, idx.name)
 		}
-		if len(missing) == 0 {
-			continue
+		if len(missing) > 0 {
+			if _, err := view.CreateMany(ctx, missing); err != nil {
+				errs = append(errs, fmt.Errorf("create %s indexes %s: %w", collection, strings.Join(names, ","), err))
+				continue
+			}
+			for _, name := range names {
+				created = append(created, collection+"."+name)
+			}
 		}
-		if _, err := view.CreateMany(ctx, missing); err != nil {
-			errs = append(errs, fmt.Errorf("create %s indexes %s: %w", collection, strings.Join(names, ","), err))
-			continue
-		}
-		for _, name := range names {
-			created = append(created, collection+"."+name)
+		for _, idx := range obsolete {
+			if idx.collection != collection {
+				continue
+			}
+			if _, ok := existing[idx.name]; !ok {
+				continue
+			}
+			if err := view.DropOne(ctx, idx.name); err != nil {
+				errs = append(errs, fmt.Errorf("drop %s index %s: %w", collection, idx.name, err))
+				continue
+			}
+			dropped = append(dropped, collection+"."+idx.name)
 		}
 	}
-	return created, errors.Join(errs...)
+	return created, dropped, errors.Join(errs...)
 }
 
 // opContext bounds one database operation by the configured timeout. Per operation,

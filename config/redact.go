@@ -34,6 +34,7 @@ var secretKeys = []string{
 	"storage.mysql.pass",
 	"storage.mongodb.host",
 	"storage.mongodb.uri",
+	"storage.manticore.dsn",
 }
 
 // publicKeys read like secrets and are not: a word list, a public key, a length.

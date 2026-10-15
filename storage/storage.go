@@ -158,7 +158,7 @@ type Server struct {
 }
 
 // MemoryEngine keeps the whole index in RAM, and is built to hold millions of files
-// in as few bytes each as it can; see docs/memory-footprint.md for what a file costs.
+// in as few bytes each as it can; see docs/memory-footprint.local.md for what a file costs.
 //
 // A file is one memRec in a slab, found by id. files maps a hash to the first record
 // with that hash; a second size of the same hash, which the protocol treats as

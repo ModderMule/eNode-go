@@ -112,7 +112,7 @@ SnapshotBatch{ ... }
 
 ## How the write avoids stalling the server
 
-The index can be very large — `docs/memory-footprint.md` measures ~560 B of live
+The index can be very large — `docs/memory-footprint.local.md` measures ~560 B of live
 heap per file, so a 27M-file index is around 15 GiB. Holding the engine's lock
 across a write that size would block every login and every `OP_OFFERFILES` for as
 long as it took.
@@ -157,7 +157,7 @@ not a ledger.
 ## Sizing
 
 Disk is roughly proportional to the RAM figures in
-[`docs/memory-footprint.md`](memory-footprint.md), and well below them — the gob
+[`docs/memory-footprint.local.md`](memory-footprint.local.md), and well below them — the gob
 carries the payload without Go's map overhead, allocator rounding, or the duplicated
 hash keys that account for about a third of the in-RAM cost.
 

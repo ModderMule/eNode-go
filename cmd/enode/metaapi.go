@@ -60,7 +60,7 @@ func buildMetaAPI(ctx context.Context, cfg config.Config, engine, servedFiles st
 	var accts *accounts.Service
 	var web *accounts.Web
 	if c.Accounts.Enabled {
-		store, ok := engine.(storage.AccountStore)
+		store, ok := storage.UnwrapEngine(engine).(storage.AccountStore)
 		if !ok {
 			return nil, fmt.Errorf("metaApi.accounts: storage engine %q cannot store accounts", cfg.Storage.Engine)
 		}

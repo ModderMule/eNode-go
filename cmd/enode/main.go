@@ -27,10 +27,17 @@ import (
 
 const backgroundEnvKey = "ENODE_BACKGROUND"
 
+// reindexManticore is the -reindex-manticore flag: storage.manticore's table is
+// recreated at startup, which a changed tableOptions or a drifted table needs. The
+// server runs meanwhile, its searches on the database until the rebuild is done.
+var reindexManticore bool
+
 func main() {
 	configPath := flag.String("config", "enode.config.yaml", "path to YAML config")
 	daemon := flag.Bool("daemon", false, "run in background")
 	updateFilters := flag.Bool("update-filters", false, "download the content filter hash lists once and exit")
+	flag.BoolVar(&reindexManticore, "reindex-manticore", false,
+		"drop and recreate the storage.manticore table at startup and rebuild it from the database")
 	flag.Parse()
 
 	if *updateFilters {
@@ -125,7 +132,9 @@ func run(ctx context.Context, configPath string) error {
 		}
 	}
 
-	engine, err := storage.NewEngine(cfg.StorageEngineConfig())
+	storageCfg := cfg.StorageEngineConfig()
+	storageCfg.Manticore.Recreate = reindexManticore
+	engine, err := storage.NewEngine(storageCfg)
 	if err != nil {
 		return fmt.Errorf("storage engine create failed: %w", err)
 	}

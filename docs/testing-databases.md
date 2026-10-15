@@ -18,6 +18,7 @@ clean database.
 | phpMyAdmin    | `18080`   | http://localhost:18080                               |
 | MongoDB       | `37017`   | no auth; db `enode` created on first write           |
 | mongo-express | `18081`   | http://localhost:18081 (login `admin` / `admin`)     |
+| Manticore     | `19306`   | SQL protocol, no auth; `19308` is its HTTP API (optional, `scripts/docker-manticore.sh`) |
 
 ## Usage
 
@@ -33,6 +34,15 @@ clean database.
 ./scripts/docker-testdb.sh stop
 ./scripts/docker-mariadb.sh stop
 ./scripts/docker-mongodb.sh stop
+```
+
+Manticore Search, the optional full-text index for the mysql and mongodb engines
+(`storage.manticore`, see [manticore-search.local.md](manticore-search.local.md)), has a script
+of its own and is not part of `docker-testdb.sh`:
+
+```bash
+./scripts/docker-manticore.sh        # start
+./scripts/docker-manticore.sh stop   # stop
 ```
 
 ## Pointing the server at a database

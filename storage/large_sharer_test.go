@@ -42,7 +42,7 @@ func connectSharer(t *testing.T, m Engine, who byte) ClientInfo {
 }
 
 // The record and the source are sized on purpose; a field added without thought
-// costs every file on the server. See docs/memory-footprint.md.
+// costs every file on the server. See docs/memory-footprint.local.md.
 func TestMemoryRecordSizes(t *testing.T) {
 	rec, src := unsafe.Sizeof(memRec{}), unsafe.Sizeof(memSource{})
 	t.Logf("input: memRec{}, memSource{} output: %d and %d bytes (File %d, Source %d)",

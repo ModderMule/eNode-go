@@ -69,7 +69,7 @@ const (
 
 	// snapshotBatchSize is how many files are copied out of the maps per lock
 	// acquisition. The write must not hold the engine's lock across the whole file
-	// — at the scale in docs/memory-footprint.md that is tens of seconds during
+	// — at the scale in docs/memory-footprint.local.md that is tens of seconds during
 	// which no client can offer a file — so the keys are captured once and the
 	// entries are copied in batches, releasing the lock between each.
 	snapshotBatchSize = 10000

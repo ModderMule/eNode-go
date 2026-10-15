@@ -147,7 +147,7 @@ one-packet offer of 100000 files: 34.682ms; search during it: n=32595 p99=6.5us 
 
 Results from 2026-10-13, the range over three to six runs each. "Chunked" is the lock
 being released every 1,000 files of a disconnect and every 500 of an offer; "compact"
-adds the record layout of [`memory-footprint.md`](memory-footprint.md) §2.2.
+adds the record layout of [`memory-footprint.local.md`](memory-footprint.local.md) §2.2.
 
 | 100,000 files from one session | Before | Chunked | Chunked + compact |
 |---|---|---|---|

@@ -4,12 +4,18 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"enode/logging"
 )
 
 type Config struct {
 	Engine  string
 	MySQL   MySQLConfig
 	MongoDB MongoConfig
+	// Manticore, when enabled, puts a Manticore full-text index in front of the
+	// mysql or mongodb engine's searches. The memory engine has its own index and
+	// ignores it.
+	Manticore ManticoreConfig
 }
 
 // startupResetTimeout bounds what a DB engine's Init does after it has connected:
@@ -112,14 +118,26 @@ type CleanupResult struct {
 const DefaultCleanupBatchSize = 1000
 
 func NewEngine(cfg Config) (Engine, error) {
+	var engine Engine
+	var err error
 	switch cfg.Engine {
 	case "", "memory":
+		if cfg.Manticore.Enabled {
+			logging.Warnf("storage.manticore is enabled but the memory engine searches its own index; ignoring it")
+		}
 		return NewMemoryEngine(), nil
 	case "mysql":
-		return NewMySQLEngine(cfg.MySQL)
+		engine, err = NewMySQLEngine(cfg.MySQL)
 	case "mongodb":
-		return NewMongoDBEngine(cfg.MongoDB)
+		engine, err = NewMongoDBEngine(cfg.MongoDB)
 	default:
 		return nil, fmt.Errorf("unknown storage engine: %s", cfg.Engine)
 	}
+	if err != nil {
+		return nil, err
+	}
+	if !cfg.Manticore.Enabled {
+		return engine, nil
+	}
+	return NewManticoreEngine(engine, cfg.Manticore)
 }

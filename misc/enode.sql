@@ -69,8 +69,9 @@ CREATE TABLE IF NOT EXISTS `files` (
   `sources` int(11) NOT NULL DEFAULT '0',
   `completed` int(11) NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
+  -- `hash` leads, so this also serves the hash-only lookups (the offer's id
+  -- lookup, OP_GLOBGETSOURCES, shared-now); a separate KEY hash only cost writes.
   UNIQUE KEY `hash_size` (`hash`,`size`),
-  KEY `hash` (`hash`),
   KEY `size` (`size`),
   KEY `time_creation` (`time_creation`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -99,13 +100,14 @@ CREATE TABLE IF NOT EXISTS `sources` (
   `online` tinyint(1) NOT NULL DEFAULT '0',
   `complete` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
+  -- `id_file` leads, so this also serves every per-file lookup, the counter
+  -- refresh and the sources_ibfk_1 foreign key; no separate KEY id_file.
   UNIQUE KEY `id_file+id_client` (`id_file`,`id_client`),
-  KEY `id_file` (`id_file`),
   KEY `id_client` (`id_client`),
   KEY `time_offer` (`time_offer`),
-  KEY `online` (`online`),
-  -- The separate (online) and (time_offer) keys above cannot serve the sweep's
-  -- compound predicate together; only one of them would be used.
+  -- Composite rather than a bare (online): `online` leads, so the startup reset's
+  -- `WHERE online = 1` still gets its range scan, and the sweep's
+  -- `online = 0 AND time_offer < ?` is covered too.
   KEY `online_time_offer` (`online`,`time_offer`),
   KEY `complete` (`complete`),
   KEY `ext` (`ext`),

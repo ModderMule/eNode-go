@@ -542,9 +542,10 @@ func (m *MySQLEngine) SharedFiles(hashes [][]byte) []File {
 	for i, hash := range hashes {
 		args[i] = hash
 	}
-	// On hash alone, which KEY hash serves (see the lookup in addFilesChunk). The
-	// join is what makes it "shared now": files.sources counts the sources of
-	// clients that have gone too, until the cleanup sweep takes them. Every f.*
+	// On hash alone, which the leading column of hash_size serves (see the lookup
+	// in addFilesChunk). The join is what makes it "shared now": files.sources
+	// counts the sources of clients that have gone too, until the cleanup sweep
+	// takes them. Every f.*
 	// column is in the GROUP BY so that neither dialect has to be told they depend
 	// on f.id, and MIN picks one name where the dialects have no common "any".
 	rows, err := m.db.Query(
@@ -623,6 +624,67 @@ func (m *MySQLEngine) BrowseFiles(cursor []byte, limit int) ([]File, []byte, err
 		last, read = id, read+1
 		f.Type = typ
 		out = append(out, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	if read < limit {
+		return out, nil, nil
+	}
+	return out, binary.BigEndian.AppendUint64(nil, last), nil
+}
+
+// BrowseSources pages over sources by primary key, a keyset like BrowseFiles'.
+// The cursor is the last sources.id read.
+func (m *MySQLEngine) BrowseSources(cursor []byte, limit int) ([]IndexedSource, []byte, error) {
+	after := uint64(0)
+	if len(cursor) != 0 {
+		if len(cursor) != 8 {
+			return nil, nil, ErrBrowseCursor
+		}
+		after = binary.BigEndian.Uint64(cursor)
+	}
+	if err := m.ensureDB(); err != nil {
+		return nil, nil, err
+	}
+	limit = browseLimit(limit)
+	rows, err := m.db.Query(
+		`SELECT s.id, f.hash, f.size, s.name, s.type, s.title, s.artist, s.album, s.length, s.bitrate,
+		        s.codec, s.complete, s.online, s.time_offer, c.hash, c.id_ed2k, c.port
+		 FROM sources s
+		 INNER JOIN files f ON f.id = s.id_file
+		 INNER JOIN clients c ON c.id = s.id_client
+		 WHERE s.id > ?
+		 ORDER BY s.id
+		 LIMIT `+strconv.Itoa(limit),
+		after,
+	)
+	if err != nil {
+		logging.Errorf("mysql browse sources after id %d failed: %v", after, err)
+		return nil, nil, err
+	}
+	defer rows.Close()
+	out := make([]IndexedSource, 0, min(limit, 256))
+	last, read := after, 0
+	for rows.Next() {
+		var (
+			s        IndexedSource
+			id       uint64
+			complete int
+			online   int
+		)
+		if err := rows.Scan(&id, &s.File.Hash, &s.File.Size, &s.File.Name, &s.File.Type, &s.File.Title,
+			&s.File.Artist, &s.File.Album, &s.File.Runtime, &s.File.Bitrate, &s.File.Codec,
+			&complete, &online, &s.TimeOffer, &s.ClientHash, &s.ClientID, &s.ClientPort); err != nil {
+			logging.Errorf("mysql browse sources scan failed: %v", err)
+			return nil, nil, err
+		}
+		last, read = id, read+1
+		if complete != 0 {
+			s.File.Completed = 1
+		}
+		s.Online = online != 0
+		out = append(out, s)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
@@ -938,49 +1000,84 @@ func (m *MySQLEngine) zeroSourceFileIDs(cutoff time.Time, batch int) ([]any, err
 }
 
 // refreshFileCounters recomputes the denormalized sources/completed counters for a
-// set of files in one statement.
+// set of files in two statements: a plain aggregate over their sources, then one
+// UPDATE of the files rows by primary key.
 //
-// The aggregate is scoped with `WHERE id_file IN (…)`. It used to run
-// `SELECT ... FROM sources GROUP BY id_file` across the whole table on every
-// offered file, holding locks over rows belonging to unrelated files while
-// taking an exclusive lock on the parent files row — which is what made
-// concurrent offers of one popular file deadlock in the first place.
+// The read is deliberately not part of the UPDATE. As `UPDATE files f LEFT JOIN
+// (SELECT … FROM sources …)` it was a locking read under REPEATABLE READ: the
+// refresh X-locked a files row and then S-locked that file's sources, while a
+// concurrent offer's sources INSERT held its new row and waited on the foreign-key
+// S-lock of the same files row — about one deadlock per offer under load
+// (docs/remote-database.local.md §6.1). A plain SELECT is a consistent read and
+// takes no locks, so the refresh now only ever locks files rows, in sorted id
+// order, the same order the offer's sorted INSERT takes its foreign-key locks in.
+//
+// The price is an ordering race, the same one the MongoDB engine accepts: a count
+// read just before another offer's INSERT commits can be written after that
+// offer's own refresh, and the file then shows a few sources off until its next
+// offer or sweep refresh. tests/dblatency measures and bounds that drift.
 //
 // src stamps the offering client's address onto every file, which is what an offer
 // wants. A cleanup sweep passes nil and source_id/source_port are left alone: the
 // sweep has no offering client, and writing zeros would wipe the last known source
-// address off every file it touched.
+// address off every file it touched. A file with no source left is written as
+// zero, not skipped — exactly the case where a stale count would otherwise persist.
 //
 // Callers bound len(ids) — offerBatchSize for an offer, the sweep's batch size for
-// cleanup — so the files rows one statement locks stay bounded. The ids are sorted
-// so two statements over overlapping files lock them in the same order.
+// cleanup — so the files rows one statement locks stay bounded.
 func (m *MySQLEngine) refreshFileCounters(ids []uint64, src *counterSource) error {
 	if len(ids) == 0 {
 		return nil
 	}
 	sorted := slices.Clone(ids)
 	slices.Sort(sorted)
+	sorted = slices.Compact(sorted)
 	idArgs := make([]any, len(sorted))
 	for i, id := range sorted {
 		idArgs[i] = id
 	}
-	set := `f.completed = COALESCE(s.completed,0), f.sources = COALESCE(s.sources,0)`
-	args := make([]any, 0, 2*len(idArgs)+2)
-	args = append(args, idArgs...)
+	countQuery := `SELECT id_file, COUNT(*), COALESCE(SUM(complete),0) FROM sources
+		 WHERE id_file IN (` + sqlPlaceholders(len(idArgs)) + `) GROUP BY id_file`
+	cases := strings.Repeat(" WHEN ? THEN ?", len(sorted))
+	set := `sources = CASE id` + cases + ` ELSE 0 END, completed = CASE id` + cases + ` ELSE 0 END`
 	if src != nil {
-		set += `, f.source_id = ?, f.source_port = ?`
-		args = append(args, src.ID, src.Port)
+		set += `, source_id = ?, source_port = ?`
 	}
-	args = append(args, idArgs...)
-	query := `UPDATE files f
-		 LEFT JOIN (
-		   SELECT id_file, SUM(complete) AS completed, COUNT(*) AS sources
-		   FROM sources WHERE id_file IN (` + sqlPlaceholders(len(idArgs)) + `) GROUP BY id_file
-		 ) s ON s.id_file = f.id
-		 SET ` + set + `
-		 WHERE f.id IN (` + sqlPlaceholders(len(idArgs)) + `)`
+	updateQuery := `UPDATE files SET ` + set + ` WHERE id IN (` + sqlPlaceholders(len(idArgs)) + `)`
+
 	return m.execRetry("refresh counters", func() error {
-		_, err := m.db.Exec(query, args...)
+		type counters struct{ sources, completed int64 }
+		byID := make(map[uint64]counters, len(sorted))
+		rows, err := m.db.Query(countQuery, idArgs...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id uint64
+			var c counters
+			if err := rows.Scan(&id, &c.sources, &c.completed); err != nil {
+				rows.Close()
+				return err
+			}
+			byID[id] = c
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		args := make([]any, 0, 5*len(sorted)+2)
+		for _, id := range sorted {
+			args = append(args, id, byID[id].sources)
+		}
+		for _, id := range sorted {
+			args = append(args, id, byID[id].completed)
+		}
+		if src != nil {
+			args = append(args, src.ID, src.Port)
+		}
+		args = append(args, idArgs...)
+		_, err = m.db.Exec(updateQuery, args...)
 		return err
 	})
 }
@@ -1180,8 +1277,8 @@ func (m *MySQLEngine) addFilesChunk(files []File, clientInfo ClientInfo) error {
 	}
 
 	// On hash alone rather than a row-constructor `(hash,size) IN ((?,?),…)`: a plain
-	// IN is served by KEY hash on every MySQL and MariaDB version this engine
-	// supports, which the row-constructor form is not. The same hash at another size
+	// IN is served by the leading column of UNIQUE hash_size on every MySQL and
+	// MariaDB version this engine supports, which the row-constructor form is not. The same hash at another size
 	// comes back too and simply matches no key below.
 	//
 	// The join says which of the files this client already sources online. It rides

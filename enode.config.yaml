@@ -105,7 +105,7 @@ udp:
 # How many files one client may publish to this server. Per-client publish caps, not
 # server capacity figures — the soft limit is the only lever the protocol gives a server
 # over how large its index grows. See docs/server-client-communication.md#per-client-publish-limits, and
-# docs/memory-footprint.md §4 for what a given cap costs in RAM.
+# docs/memory-footprint.local.md §4 for what a given cap costs in RAM.
 #
 # The two limit different things. softLimit is on the session: how many distinct files
 # a client may have published at a time. hardLimit is on one OP_OFFERFILES packet: how
@@ -642,7 +642,7 @@ storage:
   # once more on shutdown; loaded at startup.
   #
   # Off by default — it trades disk and a periodic write for a warm start, and the
-  # file can be large (see docs/memory-footprint.md for the RAM figures it tracks).
+  # file can be large (see docs/memory-footprint.local.md for the RAM figures it tracks).
   # Restoring matches what a mysql server looks like after a restart: files come
   # back searchable, but sources and clients do not come back online, so source
   # lists stay empty until each client re-offers. See docs/storage-snapshot.md.
@@ -670,6 +670,38 @@ storage:
     port: 27017
     database: enode
     uri: ""
+  # Manticore Search as the full-text index of the mysql or mongodb engine. The
+  # database stays the store of record; Manticore mirrors its source rows and answers
+  # searches in its place: substring matching on every engine, CJK by character,
+  # results ranked by relevance and source count. Ignored by the memory engine.
+  #
+  # Off by default. Offers and disconnects are mirrored through a queue that never
+  # holds up a client; anything it loses is repaired by a reconcile pass that
+  # rewrites the index from the database. Until the first pass has filled an empty
+  # table, and whenever Manticore is unreachable, searches run on the database.
+  # Start once with -reindex-manticore after changing tableOptions. See
+  # docs/manticore-search.local.md.
+  manticore:
+    enabled: false
+    # go-sql-driver DSN of Manticore's MySQL-protocol port (9306 by default).
+    dsn: "tcp(127.0.0.1:9306)/"
+    table: enode_sources
+    # Appended to CREATE TABLE. min_infix_len='2' gives substring matching;
+    # ngram_* index CJK/Thai text one character at a time.
+    tableOptions: "min_infix_len='2' charset_table='non_cont' ngram_len='1' ngram_chars='cont'"
+    # Bound on one search (Manticore's max_query_time).
+    timeoutMs: 2000
+    # Documents per REPLACE statement.
+    batchSize: 500
+    # Offers and disconnects that may wait for the writer; a full queue drops and
+    # marks the index for a reconcile pass instead of blocking an offer.
+    queueSize: 20000
+    # Rewrite the whole index from the database this often and delete what the
+    # database no longer has. 0 turns the periodic pass off (the startup pass and
+    # the pass after a lost write still run).
+    reconcileIntervalMinutes: 360
+    # Run a search on the database when Manticore fails it; false returns no results.
+    fallbackToEngine: true
 
 # Debug-only development aid. When seedFixtures is true, the dummy peers and files in
 # fixturesFile are injected into the chosen storage engine at startup (via the same

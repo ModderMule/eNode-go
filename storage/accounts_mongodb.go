@@ -106,7 +106,7 @@ func (m *MongoDBEngine) InitAccounts(ctx context.Context) error {
 	if err := m.ensureDB(); err != nil {
 		return err
 	}
-	created, err := m.ensureIndexList(ctx, accountIndexes)
+	created, _, err := m.ensureIndexList(ctx, accountIndexes, nil)
 	if len(created) > 0 {
 		logging.Infof("mongodb: created account indexes %s", strings.Join(created, ", "))
 	}

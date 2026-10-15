@@ -450,11 +450,11 @@ func TestMongoEnsureIndexesCreatesOnce(t *testing.T) {
 
 	t.Run("fresh database", func(t *testing.T) {
 		engine.db = engine.client.Database("enode_indexes_fresh")
-		first, err := engine.ensureIndexes(ctx)
+		first, _, err := engine.ensureIndexes(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		second, err := engine.ensureIndexes(ctx)
+		second, _, err := engine.ensureIndexes(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -471,7 +471,7 @@ func TestMongoEnsureIndexesCreatesOnce(t *testing.T) {
 		if err := engine.db.Collection("sources").Indexes().DropOne(ctx, "client_hash_1"); err != nil {
 			t.Fatal(err)
 		}
-		third, err := engine.ensureIndexes(ctx)
+		third, _, err := engine.ensureIndexes(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -505,15 +505,34 @@ func TestMongoEnsureIndexesCreatesOnce(t *testing.T) {
 				t.Fatalf("legacy %s.%s: %v", idx.collection, idx.name, err)
 			}
 		}
-		created, err := engine.ensureIndexes(ctx)
+		created, dropped, err := engine.ensureIndexes(ctx)
 		t.Logf("input: %d indexes created the old way, with driver-generated names", len(legacy))
-		t.Logf("output: created=%q err=%v", created, err)
+		t.Logf("output: created=%q dropped=%q err=%v", created, dropped, err)
 		if err != nil {
 			t.Fatal(err)
 		}
 		want := "sources.file_hash_1_file_size_1_online_1_time_offer_-1,sources.client_hash_1"
 		if strings.Join(created, ",") != want {
 			t.Fatalf("created %q, want only the two new indexes %s — an explicit name differs from the generated one", created, want)
+		}
+		if strings.Join(dropped, ",") != "sources.file_hash_1_file_size_1" {
+			t.Fatalf("dropped %q, want exactly the obsolete sources.file_hash_1_file_size_1", dropped)
+		}
+		specs, err := engine.db.Collection("sources").Indexes().ListSpecifications(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, spec := range specs {
+			if spec.Name == "file_hash_1_file_size_1" {
+				t.Fatalf("sources.file_hash_1_file_size_1 still present after ensureIndexes")
+			}
+		}
+
+		created, dropped, err = engine.ensureIndexes(ctx)
+		t.Logf("input: ensureIndexes again on the upgraded database")
+		t.Logf("output: created=%q dropped=%q err=%v", created, dropped, err)
+		if err != nil || len(created) != 0 || len(dropped) != 0 {
+			t.Fatalf("second run created=%q dropped=%q err=%v, want nothing", created, dropped, err)
 		}
 	})
 }

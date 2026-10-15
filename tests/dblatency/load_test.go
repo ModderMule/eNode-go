@@ -83,7 +83,7 @@ type loadTarget struct {
 	// sourcesOf counts the source records stored for one client.
 	sourcesOf func(ctx context.Context, client storage.ClientInfo) (int, error)
 	// counterMismatches lists files whose sources/completed differ from their source records.
-	counterMismatches func(ctx context.Context) (int, []string, error)
+	counterMismatches func(ctx context.Context) (counterCheck, error)
 	// orphanSources lists source records whose file record is gone.
 	orphanSources func(ctx context.Context) (int, []string, error)
 }
@@ -460,13 +460,20 @@ func (l *loadRun) checkInvariants() {
 		t.Logf("  engine errors returned:       0")
 	}
 
-	n, sample, err := l.target.counterMismatches(ctx)
+	// Both engines refresh counters lockless, read then write, so two refreshes of
+	// one file can land out of order and leave it a few sources off until its next
+	// refresh (docs/remote-database.local.md §7.4). How far off grows with how many
+	// offers of that one file overlap, so only the share of drifted files is bounded:
+	// the race touches a few popular files, a real counting bug touches most of them.
+	cc, err := l.target.counterMismatches(ctx)
 	if err != nil {
 		t.Fatalf("counter check: %v", err)
 	}
-	t.Logf("  files with wrong counters:    %d %s", n, strings.Join(sample, "; "))
-	if n > 0 {
-		t.Errorf("%d files have sources/completed that differ from their source records", n)
+	t.Logf("  files with drifted counters:  %d of %d, max drift %d %s",
+		cc.wrong, cc.files, cc.maxDrift, strings.Join(cc.sample, "; "))
+	if cc.wrong*100 > cc.files*maxDriftedFilesPercent {
+		t.Errorf("%d of %d files have drifted counters, more than the %d%% the refresh race explains",
+			cc.wrong, cc.files, maxDriftedFilesPercent)
 	}
 
 	lost, lostSample := 0, []string(nil)
@@ -487,7 +494,7 @@ func (l *loadRun) checkInvariants() {
 		t.Errorf("%d online clients lost offered files", lost)
 	}
 
-	n, sample, err = l.target.orphanSources(ctx)
+	n, sample, err := l.target.orphanSources(ctx)
 	if err != nil {
 		t.Fatalf("orphan check: %v", err)
 	}
@@ -566,7 +573,11 @@ func mysqlLoadTarget(engine *storage.MySQLEngine, proxy *rttProxy, direct *sql.D
 			err := direct.QueryRowContext(ctx, `SELECT COUNT(*) FROM sources WHERE id_client = ?`, client.StoreID).Scan(&n)
 			return n, err
 		},
-		counterMismatches: func(ctx context.Context) (int, []string, error) {
+		counterMismatches: func(ctx context.Context) (counterCheck, error) {
+			var cc counterCheck
+			if err := direct.QueryRowContext(ctx, `SELECT COUNT(*) FROM files`).Scan(&cc.files); err != nil {
+				return cc, err
+			}
 			rows, err := direct.QueryContext(ctx, `
 				SELECT f.hash, f.size, f.sources, f.completed, COALESCE(x.n, 0), COALESCE(x.c, 0)
 				FROM files f
@@ -574,24 +585,18 @@ func mysqlLoadTarget(engine *storage.MySQLEngine, proxy *rttProxy, direct *sql.D
 				       ON x.id_file = f.id
 				WHERE f.sources <> COALESCE(x.n, 0) OR f.completed <> COALESCE(x.c, 0)`)
 			if err != nil {
-				return 0, nil, err
+				return cc, err
 			}
 			defer rows.Close()
-			n, sample := 0, []string(nil)
 			for rows.Next() {
-				var hash []byte
-				var size uint64
-				var sources, completed, actualSources, actualCompleted int64
-				if err := rows.Scan(&hash, &size, &sources, &completed, &actualSources, &actualCompleted); err != nil {
-					return 0, nil, err
+				var key offerKey
+				var stored, actual fileCounters
+				if err := rows.Scan(&key.hash, &key.size, &stored.sources, &stored.completed, &actual.sources, &actual.completed); err != nil {
+					return cc, err
 				}
-				n++
-				if len(sample) < 5 {
-					sample = append(sample, fmt.Sprintf("%x/%d stored %d/%d actual %d/%d",
-						hash, size, sources, completed, actualSources, actualCompleted))
-				}
+				cc.add(key, stored, actual)
 			}
-			return n, sample, rows.Err()
+			return cc, rows.Err()
 		},
 		orphanSources: func(ctx context.Context) (int, []string, error) {
 			var n int
@@ -623,23 +628,19 @@ func mongoLoadTarget(engine *storage.MongoDBEngine, proxy *rttProxy, db *mongo.D
 			n, err := db.Collection("sources").CountDocuments(ctx, bson.M{"client_hash": client.Hash})
 			return int(n), err
 		},
-		counterMismatches: func(ctx context.Context) (int, []string, error) {
+		counterMismatches: func(ctx context.Context) (counterCheck, error) {
+			var cc counterCheck
 			files, sources, err := mongoLoadState(ctx, db)
 			if err != nil {
-				return 0, nil, err
+				return cc, err
 			}
-			n, sample := 0, []string(nil)
+			cc.files = len(files)
 			for key, stored := range files {
-				actual := sources[key]
-				if stored != actual {
-					n++
-					if len(sample) < 5 {
-						sample = append(sample, fmt.Sprintf("%x/%d stored %d/%d actual %d/%d",
-							key.hash, key.size, stored.sources, stored.completed, actual.sources, actual.completed))
-					}
+				if actual := sources[key]; stored != actual {
+					cc.add(key, stored, actual)
 				}
 			}
-			return n, sample, nil
+			return cc, nil
 		},
 		orphanSources: func(ctx context.Context) (int, []string, error) {
 			files, sources, err := mongoLoadState(ctx, db)
@@ -661,6 +662,29 @@ func mongoLoadTarget(engine *storage.MongoDBEngine, proxy *rttProxy, db *mongo.D
 }
 
 type fileCounters struct{ sources, completed int64 }
+
+// maxDriftedFilesPercent bounds the share of files the lockless refresh race may
+// leave with drifted counters; see checkInvariants.
+const maxDriftedFilesPercent = 1
+
+// counterCheck is the result of comparing every file's stored counters with its
+// source records.
+type counterCheck struct {
+	files    int   // files checked
+	wrong    int   // files whose counters differ
+	maxDrift int64 // largest difference in either counter
+	sample   []string
+}
+
+// add records one file whose stored counters differ from the actual ones.
+func (cc *counterCheck) add(key offerKey, stored, actual fileCounters) {
+	cc.wrong++
+	cc.maxDrift = max(cc.maxDrift, abs64(stored.sources-actual.sources), abs64(stored.completed-actual.completed))
+	if len(cc.sample) < 5 {
+		cc.sample = append(cc.sample, fmt.Sprintf("%x/%d stored %d/%d actual %d/%d",
+			key.hash, key.size, stored.sources, stored.completed, actual.sources, actual.completed))
+	}
+}
 
 // mongoLoadState reads every file's stored counters and the counts its source
 // documents actually add up to.
@@ -762,4 +786,11 @@ func fileSize(path string) int64 {
 		return 0
 	}
 	return info.Size()
+}
+
+func abs64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
