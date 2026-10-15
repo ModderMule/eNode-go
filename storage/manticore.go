@@ -41,8 +41,9 @@ type ManticoreConfig struct {
 	// that does not fit is dropped and the next reconcile pass repairs it.
 	QueueSize int
 	// ReconcileInterval is how often the whole index is rewritten from the
-	// database and its orphans removed. Zero turns the periodic pass off; the pass
-	// at startup and the one after a dropped write still run.
+	// database and its orphans removed, counted from the last pass that finished,
+	// across restarts. Zero turns the periodic pass off; the first fill of a table
+	// and the pass after a dropped write still run.
 	ReconcileInterval time.Duration
 	// FallbackToEngine runs a search on the database when Manticore fails it.
 	// Off, such a search returns no results.
@@ -60,7 +61,7 @@ const (
 	DefaultManticoreTimeout           = 2 * time.Second
 	DefaultManticoreBatchSize         = 500
 	DefaultManticoreQueueSize         = 20000
-	DefaultManticoreReconcileInterval = 6 * time.Hour
+	DefaultManticoreReconcileInterval = 24 * time.Hour
 )
 
 const (
@@ -76,6 +77,8 @@ const (
 	manticoreSetupTimeout = 30 * time.Second
 	// manticoreWriteTimeout bounds one write statement.
 	manticoreWriteTimeout = 30 * time.Second
+	// manticoreStateID is the id of the one row of the state table.
+	manticoreStateID = 1
 	// manticoreLogEvery spaces out the warnings a failing Manticore would
 	// otherwise log on every search and every offer.
 	manticoreLogEvery = time.Minute
@@ -108,8 +111,9 @@ type ManticoreEngine struct {
 
 	// up is set once the table is checked; nothing is written before.
 	up atomic.Bool
-	// ready is set once the index holds what the database holds; until then every
-	// search runs on the database.
+	// ready is set once a reconcile pass has finished on the table, in this run or
+	// an earlier one (the state table remembers); until then every search runs on
+	// the database.
 	ready atomic.Bool
 	// dirty is set when a write was lost, and cleared when a pass starts.
 	dirty atomic.Bool
@@ -440,6 +444,9 @@ func (m *ManticoreEngine) setup(ctx context.Context) error {
 			return err
 		}
 	}
+	if _, err := m.db.ExecContext(ctx, manticoreStateStatement(m.cfg.Table)); err != nil {
+		return fmt.Errorf("manticore: creating table %s: %w", manticoreStateTable(m.cfg.Table), err)
+	}
 	// The database engines start with every source offline, and so does the index.
 	if _, err := m.db.ExecContext(ctx, "UPDATE "+m.cfg.Table+" SET online = 0 WHERE online = 1"); err != nil {
 		return fmt.Errorf("manticore: resetting the online flags of %s: %w", m.cfg.Table, err)
@@ -450,17 +457,31 @@ func (m *ManticoreEngine) setup(ctx context.Context) error {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("manticore: reading the last pass of %s: %w", m.cfg.Table, err)
 	}
-	m.pass.Store(uint64(max(pass.Int64, 0)))
+	finished, err := m.readFinishedPass(ctx)
+	if err != nil {
+		return err
+	}
+	m.pass.Store(max(uint64(max(pass.Int64, 0)), finished.Number))
 	var count int64
 	if err := m.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+m.cfg.Table).Scan(&count); err != nil {
 		return fmt.Errorf("manticore: counting %s: %w", m.cfg.Table, err)
 	}
-	// A table with documents in it serves searches at once; the startup pass only
-	// brings it up to date. An empty one would answer every search with nothing,
-	// so it waits for the pass to fill it.
-	m.ready.Store(count > 0)
+	// A table a pass has filled serves searches at once; the startup pass only
+	// brings it up to date. One no pass has finished on — empty, or cut off by a
+	// restart halfway through the first fill — would miss files the database has,
+	// so it waits for the pass.
+	m.ready.Store(finished.Number > 0 && count > 0)
+	m.statusMu.Lock()
+	m.lastPass = finished
+	m.statusMu.Unlock()
 	m.up.Store(true)
-	logging.Infof("manticore: table %s holds %d source(s)", m.cfg.Table, count)
+	if m.ready.Load() {
+		logging.Infof("manticore: table %s holds %d source(s), filled by pass %d at %s",
+			m.cfg.Table, count, finished.Number, finished.Finished.Format(time.RFC3339))
+	} else {
+		logging.Infof("manticore: table %s holds %d source(s) and no pass has finished on it; "+
+			"searches run on the database until the startup pass does", m.cfg.Table, count)
+	}
 	return nil
 }
 
@@ -508,19 +529,29 @@ func (m *ManticoreEngine) writeLoop() {
 	}
 }
 
-// reconcileLoop runs the startup pass, then one per interval and one whenever a
-// write was lost. With retrySetup it first waits for Manticore to come up.
+// reconcileLoop runs a pass when one is due, one per interval after it, and one
+// whenever a write was lost. With retrySetup it first waits for Manticore to come
+// up.
 func (m *ManticoreEngine) reconcileLoop(retrySetup bool) {
 	defer m.wg.Done()
 	if retrySetup && !m.retrySetup() {
 		return
 	}
-	m.reconcile()
-	var interval <-chan time.Time
-	if m.cfg.ReconcileInterval > 0 {
-		ticker := time.NewTicker(m.cfg.ReconcileInterval)
-		defer ticker.Stop()
-		interval = ticker.C
+	first, scheduled := m.firstPassDelay(time.Now())
+	if scheduled && first > 0 {
+		logging.Infof("manticore: the last pass finished less than %s ago; the next one runs in %s",
+			m.cfg.ReconcileInterval, first.Round(time.Second))
+	}
+	if !scheduled {
+		logging.Infof("manticore: the periodic pass is off; a pass runs only after a lost write")
+	}
+	var due <-chan time.Time
+	timer := time.NewTimer(first)
+	defer timer.Stop()
+	if scheduled {
+		due = timer.C
+	} else {
+		timer.Stop()
 	}
 	dirty := time.NewTicker(manticoreDirtyCheck)
 	defer dirty.Stop()
@@ -528,11 +559,13 @@ func (m *ManticoreEngine) reconcileLoop(retrySetup bool) {
 		select {
 		case <-m.stop:
 			return
-		case <-interval:
+		case <-due:
 			m.reconcile()
+			due = m.scheduleNextPass(timer)
 		case <-dirty.C:
 			if m.dirty.Load() {
 				m.reconcile()
+				due = m.scheduleNextPass(timer)
 			}
 		}
 	}
@@ -620,10 +653,17 @@ func (m *ManticoreEngine) reconcile() {
 		return
 	}
 	orphans, _ := res.RowsAffected()
+	finished := ManticorePass{Number: pass, Written: uint64(written), Orphans: orphans,
+		Took: time.Since(start), Finished: time.Now()}
+	// The index is complete either way; a lost record only costs the next start a
+	// pass on the database.
+	if err := m.storeFinishedPass(finished); err != nil {
+		m.setError(err)
+		logging.Warnf("manticore: %v; the next start searches the database until its startup pass finishes", err)
+	}
 	m.ready.Store(true)
 	m.statusMu.Lock()
-	m.lastPass = ManticorePass{Number: pass, Written: uint64(written), Orphans: orphans,
-		Took: time.Since(start), Finished: time.Now()}
+	m.lastPass = finished
 	m.statusMu.Unlock()
 	logging.Infof("manticore: reconcile pass %d wrote %d source(s) and removed %d orphan(s) in %s",
 		pass, written, orphans, time.Since(start).Round(time.Millisecond))
@@ -782,6 +822,65 @@ func (m *ManticoreEngine) lost(n int, err error) {
 	m.dirty.Store(true)
 	m.setError(err)
 	m.warn("manticore: %v; the next reconcile pass repairs the index", err)
+}
+
+// readFinishedPass reads the last pass that finished on the table; its Number is
+// 0 when none has.
+func (m *ManticoreEngine) readFinishedPass(ctx context.Context) (ManticorePass, error) {
+	var number, written, orphans, tookMs, finished int64
+	err := m.db.QueryRowContext(ctx, "SELECT pass, written, orphans, took_ms, finished FROM "+
+		manticoreStateTable(m.cfg.Table)+" WHERE id = ?", manticoreStateID).
+		Scan(&number, &written, &orphans, &tookMs, &finished)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ManticorePass{}, nil
+	}
+	if err != nil {
+		return ManticorePass{}, fmt.Errorf("manticore: reading %s: %w", manticoreStateTable(m.cfg.Table), err)
+	}
+	return ManticorePass{Number: uint64(max(number, 0)), Written: uint64(max(written, 0)), Orphans: orphans,
+		Took: time.Duration(tookMs) * time.Millisecond, Finished: time.Unix(finished, 0)}, nil
+}
+
+// storeFinishedPass records a pass that finished, so the next start knows the
+// table is complete.
+func (m *ManticoreEngine) storeFinishedPass(p ManticorePass) error {
+	ctx, cancel := context.WithTimeout(context.Background(), manticoreWriteTimeout)
+	defer cancel()
+	_, err := m.db.ExecContext(ctx, "REPLACE INTO "+manticoreStateTable(m.cfg.Table)+
+		" (id, pass, written, orphans, took_ms, finished) VALUES (?, ?, ?, ?, ?, ?)",
+		manticoreStateID, p.Number, p.Written, p.Orphans, p.Took.Milliseconds(), p.Finished.Unix())
+	if err != nil {
+		return fmt.Errorf("manticore: recording pass %d as finished: %w", p.Number, err)
+	}
+	return nil
+}
+
+// firstPassDelay is how long after now the first pass of this run is due, and
+// false when none is scheduled. A table no pass has finished on is filled at
+// once. A filled one is next due an interval after its last pass finished, so a
+// restart does not rewrite an index that is still current; with the periodic
+// pass off, it is only rewritten after a lost write.
+func (m *ManticoreEngine) firstPassDelay(now time.Time) (time.Duration, bool) {
+	if !m.ready.Load() {
+		return 0, true
+	}
+	if m.cfg.ReconcileInterval <= 0 {
+		return 0, false
+	}
+	m.statusMu.Lock()
+	finished := m.lastPass.Finished
+	m.statusMu.Unlock()
+	return max(finished.Add(m.cfg.ReconcileInterval).Sub(now), 0), true
+}
+
+// scheduleNextPass sets timer one interval ahead and returns its channel, or nil
+// when the periodic pass is off.
+func (m *ManticoreEngine) scheduleNextPass(timer *time.Timer) <-chan time.Time {
+	if m.cfg.ReconcileInterval <= 0 {
+		return nil
+	}
+	timer.Reset(m.cfg.ReconcileInterval)
+	return timer.C
 }
 
 // setError records err for Status, or clears it with nil. The DSN may carry a

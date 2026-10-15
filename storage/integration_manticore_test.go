@@ -212,8 +212,56 @@ func TestManticoreRejectsDrift(t *testing.T) {
 		tables++
 	}
 	rows.Close()
-	if tables != 1 {
-		t.Fatalf("%d tables, want 1: a probe table was left behind", tables)
+	if tables != 2 {
+		t.Fatalf("%d tables, want the index and its state table: a probe table was left behind", tables)
+	}
+}
+
+// TestManticoreReadyNeedsFinishedPass: a table holding documents is not searched
+// until a pass has finished on it, so a restart halfway through the first fill
+// does not answer searches from a partial index. The record survives a restart
+// and goes with -reindex-manticore.
+func TestManticoreReadyNeedsFinishedPass(t *testing.T) {
+	requireIntegration(t)
+	dsn := startManticore(t)
+	m, err := NewManticoreEngine(NewMemoryEngine(), ManticoreConfig{Enabled: true, DSN: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.db.Close()
+	setup := func(step string) {
+		t.Helper()
+		if err := m.setup(t.Context()); err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		t.Logf("output: %s: ready=%v pass=%d last finished=%+v", step, m.ready.Load(), m.pass.Load(), m.Status().LastPass)
+	}
+
+	setup("empty table")
+	if m.ready.Load() {
+		t.Fatal("an empty table is ready")
+	}
+	doc := sourceDoc(IndexedSource{File: File{Hash: fileHash(1), Size: 1, Name: "partial.avi"},
+		ClientHash: userHash(1), TimeOffer: time.Unix(1000, 0)})
+	if err := m.replace([]manticoreDoc{doc}, 1); err != nil {
+		t.Fatal(err)
+	}
+	setup("documents, no finished pass")
+	if m.ready.Load() || m.pass.Load() != 1 {
+		t.Fatal("a table no pass has finished on is ready")
+	}
+	finished := ManticorePass{Number: 1, Written: 1, Took: 1500 * time.Millisecond, Finished: time.Unix(2000, 0)}
+	if err := m.storeFinishedPass(finished); err != nil {
+		t.Fatal(err)
+	}
+	setup("finished pass recorded")
+	if !m.ready.Load() || m.Status().LastPass != finished {
+		t.Fatalf("got ready=%v last pass %+v, want ready and %+v", m.ready.Load(), m.Status().LastPass, finished)
+	}
+	m.cfg.Recreate = true
+	setup("recreated")
+	if m.ready.Load() || m.Status().LastPass.Number != 0 {
+		t.Fatal("the recreated table kept the record of a pass")
 	}
 }
 

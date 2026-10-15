@@ -3,6 +3,7 @@ package storage
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestNormalizeFileTruncatesToColumnWidths(t *testing.T) {
@@ -188,5 +189,54 @@ func TestPrepareOfferBatchNormalizesDedupesAndSorts(t *testing.T) {
 	}
 	if n := len([]rune(out[0].Name)); n != maxNameLen {
 		t.Errorf("name is %d runes, want it clamped to %d", n, maxNameLen)
+	}
+}
+
+// A client without Unicode support offers names in its ANSI codepage. Stored
+// verbatim, they fail utf8mb4 with error 1366 and take the whole batch down; they
+// must reach the engine as valid UTF-8, decoded as Windows-1252.
+func TestNormalizeFileTranscodesInvalidUTF8AsWindows1252(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"valid utf-8 untouched", "Przełamując fale.avi", "Przełamując fale.avi"},
+		{"1252 accents", "Que Ser\xe1 Ser\xe1.mp3", "Que Será Será.mp3"},
+		{"1250 bytes decode as 1252", "Prze\xb3amuj\xb9c fale.avi", "Prze³amuj¹c fale.avi"},
+		{"bytes undefined in 1252 become U+FFFD", "a\x81b\x9dc", "a\ufffdb\ufffdc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NormalizeFile(File{Name: tc.in, Title: tc.in, Artist: tc.in, Album: tc.in, Codec: tc.in})
+			t.Logf("input: %q", tc.in)
+			t.Logf("output: %q", got.Name)
+			for field, out := range map[string]string{
+				"Name": got.Name, "Title": got.Title, "Artist": got.Artist, "Album": got.Album, "Codec": got.Codec,
+			} {
+				if !utf8.ValidString(out) {
+					t.Fatalf("%s is not valid UTF-8: %q", field, out)
+				}
+				if out != tc.want {
+					t.Fatalf("%s = %q, want %q", field, out, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// Transcoding runs before truncation, so a long ANSI name is cut at a rune
+// boundary of the decoded text instead of being turned into U+FFFD by []rune.
+func TestNormalizeFileTranscodesBeforeTruncating(t *testing.T) {
+	in := strings.Repeat("\xe9", 300)
+	got := NormalizeFile(File{Name: in})
+	t.Logf("input: name of %d bytes", len(in))
+	t.Logf("output: name of %d runes, prefix %q", len([]rune(got.Name)), got.Name[:6])
+
+	if len([]rune(got.Name)) != maxNameLen {
+		t.Fatalf("expected %d runes, got %d", maxNameLen, len([]rune(got.Name)))
+	}
+	if strings.ContainsRune(got.Name, utf8.RuneError) || got.Name != strings.Repeat("é", maxNameLen) {
+		t.Fatalf("expected %d x é, got %q", maxNameLen, got.Name[:12])
 	}
 }

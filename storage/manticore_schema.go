@@ -82,6 +82,18 @@ func manticoreCreateStatement(table, options string) string {
 	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s) %s", table, strings.Join(declarations, ", "), options)
 }
 
+// manticoreStateTable is the table beside the index that records the last
+// reconcile pass that finished. One row, id manticoreStateID.
+func manticoreStateTable(table string) string {
+	return table + "_state"
+}
+
+// manticoreStateStatement is the CREATE TABLE of the state table.
+func manticoreStateStatement(table string) string {
+	return "CREATE TABLE IF NOT EXISTS " + manticoreStateTable(table) +
+		" (pass bigint, written bigint, orphans bigint, took_ms bigint, finished timestamp)"
+}
+
 // compareManticoreTable lists what separates a table from the one this build
 // would create.
 //
@@ -283,10 +295,12 @@ func (m *ManticoreEngine) readRows(ctx context.Context, statement string) ([][]s
 // recreateTable drops the table and creates it from this build's definition. A
 // drop rather than TRUNCATE, which would keep whatever definition and options the
 // table was made with — and a table that no longer matches them is the reason to
-// call this.
+// call this. The state table goes too: no pass has filled the new table.
 func (m *ManticoreEngine) recreateTable(ctx context.Context) error {
-	if _, err := m.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+m.cfg.Table); err != nil {
-		return fmt.Errorf("manticore: dropping %s: %w", m.cfg.Table, err)
+	for _, table := range []string{manticoreStateTable(m.cfg.Table), m.cfg.Table} {
+		if _, err := m.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
+			return fmt.Errorf("manticore: dropping %s: %w", table, err)
+		}
 	}
 	if _, err := m.db.ExecContext(ctx, manticoreCreateStatement(m.cfg.Table, m.cfg.TableOptions)); err != nil {
 		return fmt.Errorf("manticore: creating table %s: %w", m.cfg.Table, err)

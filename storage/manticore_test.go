@@ -184,3 +184,39 @@ func TestManticoreStatusBeforeSetup(t *testing.T) {
 		t.Fatalf("a cleared error is still reported: %q", st.LastError)
 	}
 }
+
+// TestManticoreFirstPassDelay: a restart rewrites a filled index only once its
+// last pass is an interval old, and fills an unfinished one at once.
+func TestManticoreFirstPassDelay(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name      string
+		ready     bool
+		interval  time.Duration
+		finished  time.Time
+		wantDelay time.Duration
+		wantSched bool
+	}{
+		{name: "no finished pass fills at once", interval: 24 * time.Hour, wantSched: true},
+		{name: "no finished pass fills even with the periodic pass off", wantSched: true},
+		{name: "recent pass waits for the rest of the interval", ready: true, interval: 24 * time.Hour,
+			finished: now.Add(-3 * time.Hour), wantDelay: 21 * time.Hour, wantSched: true},
+		{name: "overdue pass runs at once", ready: true, interval: 24 * time.Hour,
+			finished: now.Add(-30 * time.Hour), wantSched: true},
+		{name: "periodic pass off schedules none", ready: true, finished: now.Add(-30 * time.Hour)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestManticore(t, ManticoreConfig{Enabled: true})
+			m.cfg.ReconcileInterval = tc.interval
+			m.ready.Store(tc.ready)
+			m.lastPass = ManticorePass{Number: 1, Finished: tc.finished}
+			delay, sched := m.firstPassDelay(now)
+			t.Logf("input: ready=%v interval=%s finished=%s, output: delay=%s scheduled=%v",
+				tc.ready, tc.interval, tc.finished.Format(time.RFC3339), delay, sched)
+			if delay != tc.wantDelay || sched != tc.wantSched {
+				t.Fatalf("got %s %v, want %s %v", delay, sched, tc.wantDelay, tc.wantSched)
+			}
+		})
+	}
+}

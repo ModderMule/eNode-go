@@ -697,9 +697,10 @@ storage:
     # marks the index for a reconcile pass instead of blocking an offer.
     queueSize: 20000
     # Rewrite the whole index from the database this often and delete what the
-    # database no longer has. 0 turns the periodic pass off (the startup pass and
-    # the pass after a lost write still run).
-    reconcileIntervalMinutes: 360
+    # database no longer has, counted from when the last pass finished (also across
+    # restarts). 0 turns the periodic pass off (the first fill of an empty table
+    # and the pass after a lost write still run).
+    reconcileIntervalMinutes: 1440
     # Run a search on the database when Manticore fails it; false returns no results.
     fallbackToEngine: true
 

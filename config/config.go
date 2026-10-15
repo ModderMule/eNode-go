@@ -791,7 +791,7 @@ type ManticoreConfig struct {
 
 // DefaultManticoreReconcileMinutes is storage.manticore.reconcileIntervalMinutes
 // when unset.
-const DefaultManticoreReconcileMinutes = 360
+const DefaultManticoreReconcileMinutes = 1440
 
 // ReconcileIntervalMinutesOrDefault is the periodic reconcile interval; 0 is off.
 func (c ManticoreConfig) ReconcileIntervalMinutesOrDefault() int {

@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/charmap"
 )
 
 // Column widths from misc/enode.sql. MySQL counts varchar in characters, so the
@@ -58,12 +61,15 @@ func NormalizeSearchFileType(typ string) string {
 // Truncating rather than rejecting matches what the non-strict MySQL 5.5 the
 // original targeted did — but deliberately, and identically across all engines,
 // so MongoDB and MySQL cannot disagree about what they stored for one offer.
+//
+// Strings that are not valid UTF-8 are transcoded first (see toUTF8): a utf8mb4
+// column rejects them with error 1366, which fails the whole batch.
 func NormalizeFile(file File) File {
-	file.Name = truncateRunes(file.Name, maxNameLen)
-	file.Title = truncateRunes(file.Title, maxTitleLen)
-	file.Artist = truncateRunes(file.Artist, maxArtistLen)
-	file.Album = truncateRunes(file.Album, maxAlbumLen)
-	file.Codec = truncateRunes(file.Codec, maxCodecLen)
+	file.Name = truncateRunes(toUTF8(file.Name), maxNameLen)
+	file.Title = truncateRunes(toUTF8(file.Title), maxTitleLen)
+	file.Artist = truncateRunes(toUTF8(file.Artist), maxArtistLen)
+	file.Album = truncateRunes(toUTF8(file.Album), maxAlbumLen)
+	file.Codec = truncateRunes(toUTF8(file.Codec), maxCodecLen)
 	file.Type = normalizeFileType(file.Type, file.Name)
 	return file
 }
@@ -142,6 +148,27 @@ func normalizeFileType(typ, name string) string {
 	// Unrecognised (EmuleCollection, Text, Program, or anything a client invents):
 	// fall back to classifying the filename, which can only yield ENUM members.
 	return GetFileType(name)
+}
+
+// toUTF8 returns s unchanged when it is valid UTF-8 and otherwise decodes it as
+// Windows-1252.
+//
+// eMule only writes OP_OFFERFILES strings as UTF-8 when it supports Unicode itself
+// (srchybrid/SharedFileList.cpp, utf8strRaw vs utf8strNone); a client without it
+// sends the user's ANSI codepage, and the protocol does not say which one. 1252 is
+// the most common, and it never fails: the five bytes it leaves undefined become
+// U+FFFD, and names in another codepage (1250 for Polish, say) come out with the
+// wrong accented letters but are stored and stay searchable by their ASCII words.
+// Lugdunum kept the raw bytes, which a utf8mb4 column cannot.
+func toUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	out, err := charmap.Windows1252.NewDecoder().String(s)
+	if err != nil {
+		return strings.ToValidUTF8(s, "\uFFFD")
+	}
+	return out
 }
 
 func truncateRunes(s string, max int) string {
