@@ -211,6 +211,33 @@ func TestHandoffMySQL(t *testing.T) {
 	s.stop()
 }
 
+// TestHandoffMongoDB is TestHandoffKeepsClientConnected on the mongodb engine,
+// against the database of scripts/docker-mongodb.sh.
+func TestHandoffMongoDB(t *testing.T) {
+	if os.Getenv("ENODE_INTEGRATION") != "1" {
+		t.Skip("set ENODE_INTEGRATION=1 and start scripts/docker-mongodb.sh")
+	}
+	port := os.Getenv("ENODE_TEST_MONGODB_PORT")
+	if port == "" {
+		port = "37017"
+	}
+	if c, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 2*time.Second); err != nil {
+		t.Skipf("no MongoDB on 127.0.0.1:%s (scripts/docker-mongodb.sh): %v", port, err)
+	} else {
+		_ = c.Close()
+	}
+	s := startE2EServer(t, fmt.Sprintf(`storage:
+  engine: mongodb
+  mongodb:
+    host: 127.0.0.1
+    port: %s
+    database: enode
+`, port))
+	s.exerciseHandoffs(2)
+	s.requireLog("handed over to pid", "took over ")
+	s.stop()
+}
+
 // e2eServer is a built enode binary serving one logged-in client that published
 // one file.
 type e2eServer struct {

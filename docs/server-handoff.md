@@ -286,4 +286,6 @@ Two things matter when passing sockets:
   example in `golang:1.26`.
 - `cmd/enode` with `ENODE_INTEGRATION=1`: the same two handovers on the `mysql` engine,
   against the MariaDB of `scripts/docker-mariadb.sh` (port 13306, or
-  `ENODE_TEST_MYSQL_PORT`). Skipped when nothing listens there.
+  `ENODE_TEST_MYSQL_PORT`), and on the `mongodb` engine, against the MongoDB of
+  `scripts/docker-mongodb.sh` (port 37017, or `ENODE_TEST_MONGODB_PORT`). Each is
+  skipped when nothing listens on its port.
