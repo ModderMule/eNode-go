@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -157,5 +158,29 @@ func TestNewEngineWrapsOnlyDatabaseEngines(t *testing.T) {
 	plain, _ := NewEngine(Config{Engine: "mysql", MySQL: MySQLConfig{Host: "h", Port: 1, User: "u", Database: "d"}})
 	if _, ok := plain.(*MySQLEngine); !ok {
 		t.Fatalf("manticore off must leave the engine as it is, got %T", plain)
+	}
+}
+
+// TestManticoreStatusBeforeSetup: an index that never connected reports itself
+// down, without asking Manticore for a count, and keeps the DSN off the page.
+func TestManticoreStatusBeforeSetup(t *testing.T) {
+	dsn := "enode:secret@tcp(127.0.0.1:1)/"
+	m := newTestManticore(t, ManticoreConfig{Enabled: true, DSN: dsn})
+	m.setError(fmt.Errorf("connecting to %s: invalid connection", dsn))
+	m.lost(3, fmt.Errorf("writing 3 source(s): broken pipe"))
+	st := m.Status()
+	t.Logf("output: %+v", st)
+	if st.Up || st.Ready || st.Filling || st.Documents != -1 || st.Dropped != 3 || !st.Dirty {
+		t.Fatalf("status %+v", st)
+	}
+	m.setError(fmt.Errorf("connecting to %s: invalid connection", dsn))
+	st = m.Status()
+	t.Logf("output: last error %q at %s", st.LastError, st.LastErrorAt)
+	if strings.Contains(st.LastError, "secret") || !strings.Contains(st.LastError, "invalid connection") || st.LastErrorAt.IsZero() {
+		t.Fatalf("last error %q", st.LastError)
+	}
+	m.setError(nil)
+	if st = m.Status(); st.LastError != "" || !st.LastErrorAt.IsZero() {
+		t.Fatalf("a cleared error is still reported: %q", st.LastError)
 	}
 }

@@ -310,7 +310,7 @@ function renderMeta(d){
   if(!section){ return; }
   section.hidden = list.length === 0;
   setText('filesAdvertised', d.advertisedFiles !== d.files
-    ? 'advertised ' + num(d.advertisedFiles) + ' incl. torrent/usenet/kad/web' : '');
+    ? 'incl. meta search' : '');
   if(!list.length){ return; }
   setText('metaSummary', 'result cache: ' + num(d.metaCacheEntries) + ' queries');
   var cards = document.getElementById('metaCards');

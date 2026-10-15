@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net"
 	goruntime "runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -397,7 +399,7 @@ func (v *adminViews) Runtime() admin.RuntimeView {
 		Sys:          mem.Sys,
 		NumGC:        mem.NumGC,
 		GCPauseTotal: float64(mem.PauseTotalNs) / 1e6,
-		Storage:      storageFacts(cfg),
+		Storage:      storageFacts(cfg, v.engine),
 	}
 	if mem.LastGC != 0 {
 		view.LastGC = admin.FormatTime(time.Unix(0, int64(mem.LastGC)))
@@ -456,9 +458,10 @@ func (v *adminViews) dataFiles() []admin.DataFileRow {
 	return rows
 }
 
-// storageFacts are the storage settings the Runtime tab lists. Nothing here is a
-// credential: the database addresses stay in the redacted config view.
-func storageFacts(cfg config.Config) []admin.KeyValue {
+// storageFacts are the storage settings the Runtime tab lists, and the state of
+// the Manticore index when there is one. Nothing here is a credential: the
+// database addresses stay in the redacted config view.
+func storageFacts(cfg config.Config, engine storage.Engine) []admin.KeyValue {
 	onOff := func(on bool, detail string) string {
 		if !on {
 			return "off"
@@ -466,7 +469,7 @@ func storageFacts(cfg config.Config) []admin.KeyValue {
 		return detail
 	}
 	st := cfg.Storage
-	return []admin.KeyValue{
+	facts := []admin.KeyValue{
 		{Key: "Engine", Value: st.Engine},
 		{Key: "Count cache", Value: fmt.Sprintf("%d s", st.CountCacheSecondsOrDefault())},
 		{Key: "Cleanup", Value: onOff(st.Cleanup.Enabled, fmt.Sprintf("every %d min, stale after %d h, zero-source files kept: %t",
@@ -476,6 +479,60 @@ func storageFacts(cfg config.Config) []admin.KeyValue {
 		{Key: "Files per client", Value: fmt.Sprintf("soft limit %d, hard limit %d",
 			cfg.Files.SoftLimitOrDefault(), cfg.Files.HardLimitOrDefault())},
 	}
+	return append(facts, manticoreFacts(st.Manticore.Enabled, engine)...)
+}
+
+// manticoreFacts are the Runtime tab's Manticore rows: whether searches run on
+// it, how full the index is and how the last pass went, and what went wrong.
+func manticoreFacts(enabled bool, engine storage.Engine) []admin.KeyValue {
+	if !enabled {
+		return []admin.KeyValue{{Key: "Manticore", Value: "off"}}
+	}
+	m, ok := engine.(*storage.ManticoreEngine)
+	if !ok {
+		return []admin.KeyValue{{Key: "Manticore", Value: "enabled, but inactive: it needs engine mysql or mongodb"}}
+	}
+	st := m.Status()
+	var state string
+	switch {
+	case !st.Up:
+		state = "unreachable, retrying every 30 s; searches run on the database"
+	case st.Ready:
+		state = "ready; searches run on Manticore"
+	default:
+		state = "connected, filling; searches run on the database until the first pass finishes"
+	}
+	facts := []admin.KeyValue{{Key: "Manticore", Value: state}}
+	if st.Up {
+		docs := "unknown"
+		if st.Documents >= 0 {
+			docs = groupDigits(uint64(st.Documents))
+		}
+		facts = append(facts, admin.KeyValue{Key: "Manticore index",
+			Value: fmt.Sprintf("table %s, %s document(s), %s written since start", st.Table, docs, groupDigits(st.Indexed))})
+	}
+	if st.Filling {
+		took := time.Since(st.PassStarted)
+		rate := float64(st.PassWritten) / max(took.Seconds(), 1)
+		facts = append(facts, admin.KeyValue{Key: "Manticore pass running",
+			Value: fmt.Sprintf("pass %d: %s source(s) in %s (%s/s), started %s", st.Pass, groupDigits(st.PassWritten),
+				took.Round(time.Second), groupDigits(uint64(rate)), admin.FormatTime(st.PassStarted))})
+	}
+	if p := st.LastPass; p.Number != 0 {
+		facts = append(facts, admin.KeyValue{Key: "Manticore last pass",
+			Value: fmt.Sprintf("pass %d: wrote %s source(s), removed %s orphan(s) in %s, finished %s", p.Number,
+				groupDigits(p.Written), groupDigits(uint64(max(p.Orphans, 0))), p.Took.Round(time.Second), admin.FormatTime(p.Finished))})
+	}
+	if st.Dropped > 0 || st.Failures > 0 || st.Unsupported > 0 || st.Dirty {
+		facts = append(facts, admin.KeyValue{Key: "Manticore problems",
+			Value: fmt.Sprintf("dropped %s write(s), %s failure(s), %s search(es) on the database as inexpressible, repair pending: %t",
+				groupDigits(st.Dropped), groupDigits(st.Failures), groupDigits(st.Unsupported), st.Dirty)})
+	}
+	if st.LastError != "" {
+		facts = append(facts, admin.KeyValue{Key: "Manticore last error",
+			Value: admin.FormatTime(st.LastErrorAt) + ": " + st.LastError})
+	}
+	return facts
 }
 
 func fileRows(files []storage.File) []admin.FileRow {
@@ -505,4 +562,17 @@ func spamReasons(reasons []spamfilter.ReasonPoints) []string {
 		out = append(out, fmt.Sprintf("%s +%d", r.Reason, r.Points))
 	}
 	return out
+}
+
+// groupDigits writes n with a comma between each group of three digits.
+func groupDigits(n uint64) string {
+	digits := strconv.FormatUint(n, 10)
+	var b strings.Builder
+	for i, d := range digits {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(d)
+	}
+	return b.String()
 }

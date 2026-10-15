@@ -79,6 +79,8 @@ const (
 	// manticoreLogEvery spaces out the warnings a failing Manticore would
 	// otherwise log on every search and every offer.
 	manticoreLogEvery = time.Minute
+	// manticoreStatusTimeout bounds the row count the admin Runtime tab reads.
+	manticoreStatusTimeout = time.Second
 	// manticoreFieldWeights ranks a hit in the file name above one in the tags.
 	manticoreFieldWeights = "field_weights=(name=10, title=2, artist=2, album=2)"
 )
@@ -125,6 +127,54 @@ type ManticoreEngine struct {
 	failures    atomic.Uint64
 	unsupported atomic.Uint64
 	lastWarning atomic.Int64
+
+	// passWritten counts the documents of the pass that is running, from
+	// passStarted (unix nanoseconds; 0 when no pass runs).
+	passWritten atomic.Uint64
+	passStarted atomic.Int64
+	// statusMu guards lastPass and lastError, which only Status reads.
+	statusMu    sync.Mutex
+	lastPass    ManticorePass
+	lastError   string
+	lastErrorAt time.Time
+}
+
+// ManticoreStatus is what the admin Runtime tab shows of the index.
+type ManticoreStatus struct {
+	Table string
+	// Up is set once Manticore answered and the table was checked.
+	Up bool
+	// Ready is set once searches run on Manticore instead of the database.
+	Ready bool
+	// Documents is the table's row count, or -1 when it could not be read.
+	Documents int64
+	// Filling is set while a reconcile pass runs; PassWritten documents of pass
+	// Pass were written since PassStarted.
+	Filling     bool
+	Pass        uint64
+	PassWritten uint64
+	PassStarted time.Time
+	// LastPass is the latest pass that finished; its Number is 0 before the first.
+	LastPass ManticorePass
+	// Dirty is set when a write was lost and the next pass will repair it.
+	Dirty       bool
+	Indexed     uint64
+	Dropped     uint64
+	Failures    uint64
+	Unsupported uint64
+	// LastError is the latest failure, with the DSN taken out, and when it
+	// happened; empty if none.
+	LastError   string
+	LastErrorAt time.Time
+}
+
+// ManticorePass is one finished reconcile pass.
+type ManticorePass struct {
+	Number   uint64
+	Written  uint64
+	Orphans  int64
+	Took     time.Duration
+	Finished time.Time
 }
 
 // manticoreOp is one entry of the write queue: documents to write, or a client
@@ -209,6 +259,7 @@ func (m *ManticoreEngine) Init() error {
 		return err
 	}
 	if err != nil {
+		m.setError(err)
 		logging.Warnf("manticore: %v; searches run on the database until it is reachable", err)
 	}
 	m.wg.Add(2)
@@ -289,12 +340,48 @@ func (m *ManticoreEngine) FindBySearch(expr *SearchExpr) []File {
 		return files
 	}
 	m.failures.Add(1)
+	m.setError(fmt.Errorf("search: %w", err))
 	if m.cfg.FallbackToEngine {
 		m.warn("manticore: search failed, running it on the database: %v", err)
 		return m.Engine.FindBySearch(expr)
 	}
 	m.warn("manticore: search failed: %v", err)
 	return nil
+}
+
+// Status reports the state of the index. The row count is read from Manticore
+// with a short timeout, so a slow index shows as -1 rather than stalling the page.
+func (m *ManticoreEngine) Status() ManticoreStatus {
+	st := ManticoreStatus{
+		Table:       m.cfg.Table,
+		Up:          m.up.Load(),
+		Ready:       m.ready.Load(),
+		Documents:   -1,
+		Pass:        m.pass.Load(),
+		Dirty:       m.dirty.Load(),
+		Indexed:     m.indexed.Load(),
+		Dropped:     m.dropped.Load(),
+		Failures:    m.failures.Load(),
+		Unsupported: m.unsupported.Load(),
+	}
+	if started := m.passStarted.Load(); started != 0 {
+		st.Filling = true
+		st.PassWritten = m.passWritten.Load()
+		st.PassStarted = time.Unix(0, started)
+	}
+	m.statusMu.Lock()
+	st.LastPass = m.lastPass
+	st.LastError, st.LastErrorAt = m.lastError, m.lastErrorAt
+	m.statusMu.Unlock()
+	if st.Up {
+		ctx, cancel := context.WithTimeout(context.Background(), manticoreStatusTimeout)
+		defer cancel()
+		var count int64
+		if err := m.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+m.cfg.Table).Scan(&count); err == nil {
+			st.Documents = count
+		}
+	}
+	return st
 }
 
 // withDefaults fills the fields left zero. ReconcileInterval stays zero if it
@@ -467,12 +554,15 @@ func (m *ManticoreEngine) retrySetup() bool {
 		cancel()
 		switch {
 		case err == nil:
+			m.setError(nil)
 			logging.Infof("manticore: reachable again at %s", m.cfg.DSN)
 			return true
 		case errors.Is(err, ErrManticoreSchemaDrift):
+			m.setError(err)
 			logging.Errorf("%v; searches keep running on the database", err)
 			return false
 		}
+		m.setError(err)
 		logging.Debugf("manticore: still unreachable: %v", err)
 	}
 }
@@ -490,6 +580,9 @@ func (m *ManticoreEngine) reconcile() {
 	pass := m.pass.Add(1)
 	start := time.Now()
 	m.dirty.Store(false)
+	m.passWritten.Store(0)
+	m.passStarted.Store(start.UnixNano())
+	defer m.passStarted.Store(0)
 	var cursor []byte
 	written := 0
 	for {
@@ -512,6 +605,7 @@ func (m *ManticoreEngine) reconcile() {
 			return
 		}
 		written += len(docs)
+		m.passWritten.Add(uint64(len(docs)))
 		if next == nil {
 			break
 		}
@@ -527,6 +621,10 @@ func (m *ManticoreEngine) reconcile() {
 	}
 	orphans, _ := res.RowsAffected()
 	m.ready.Store(true)
+	m.statusMu.Lock()
+	m.lastPass = ManticorePass{Number: pass, Written: uint64(written), Orphans: orphans,
+		Took: time.Since(start), Finished: time.Now()}
+	m.statusMu.Unlock()
 	logging.Infof("manticore: reconcile pass %d wrote %d source(s) and removed %d orphan(s) in %s",
 		pass, written, orphans, time.Since(start).Round(time.Millisecond))
 }
@@ -682,7 +780,20 @@ func (m *ManticoreEngine) lost(n int, err error) {
 	m.dropped.Add(uint64(n))
 	m.failures.Add(1)
 	m.dirty.Store(true)
+	m.setError(err)
 	m.warn("manticore: %v; the next reconcile pass repairs the index", err)
+}
+
+// setError records err for Status, or clears it with nil. The DSN may carry a
+// password, so it never reaches the admin page.
+func (m *ManticoreEngine) setError(err error) {
+	text, at := "", time.Time{}
+	if err != nil {
+		text, at = strings.ReplaceAll(err.Error(), m.cfg.DSN, "manticore"), time.Now()
+	}
+	m.statusMu.Lock()
+	m.lastError, m.lastErrorAt = text, at
+	m.statusMu.Unlock()
 }
 
 // warn logs at most once per manticoreLogEvery: a Manticore that is down would

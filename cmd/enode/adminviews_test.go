@@ -293,3 +293,42 @@ func TestAdminViewsSpamDecide(t *testing.T) {
 		t.Error("a whitelisted file must not be listed again")
 	}
 }
+
+// TestManticoreFacts: the Runtime tab says whether Manticore is off, inactive
+// on an engine it cannot wrap, or waiting to connect.
+func TestManticoreFacts(t *testing.T) {
+	memory := storage.NewMemoryEngine()
+	wrapped, err := storage.NewEngine(storage.Config{Engine: "mysql",
+		MySQL:     storage.MySQLConfig{Host: "h", Port: 1, User: "u", Database: "d"},
+		Manticore: storage.ManticoreConfig{Enabled: true, DSN: "tcp(127.0.0.1:1)/"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name    string
+		enabled bool
+		engine  storage.Engine
+		want    string
+	}{
+		{"off", false, memory, "off"},
+		{"memory engine", true, memory, "enabled, but inactive"},
+		{"not connected yet", true, wrapped, "unreachable"},
+	}
+	for _, tc := range cases {
+		facts := manticoreFacts(tc.enabled, tc.engine)
+		t.Logf("input: %s, output: %v", tc.name, facts)
+		if len(facts) == 0 || facts[0].Key != "Manticore" || !strings.HasPrefix(facts[0].Value, tc.want) {
+			t.Fatalf("%s: facts %v, want a first row starting %q", tc.name, facts, tc.want)
+		}
+	}
+}
+
+func TestGroupDigits(t *testing.T) {
+	for in, want := range map[uint64]string{0: "0", 999: "999", 1000: "1,000", 28951855: "28,951,855"} {
+		got := groupDigits(in)
+		t.Logf("input: %d, output: %s", in, got)
+		if got != want {
+			t.Fatalf("groupDigits(%d) = %q, want %q", in, got, want)
+		}
+	}
+}
