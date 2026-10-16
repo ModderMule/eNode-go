@@ -32,8 +32,10 @@ serves. The successor rewrites it with its own pid. A clean stop removes it.
 pidFile: "data/enode.pid"
 ```
 
-`update.sh` reads the file from `data/enode.pid` in its install directory, or from
-`ENODE_PIDFILE` if the config moved it. Before signalling, it checks that the pid belongs
+`update.sh` takes the file's location from `pidFile` in the config file: the one named
+by `-config` among its arguments, else `enode.config.yaml` in its install directory.
+Without that key it uses `data/enode.pid`, and `ENODE_PIDFILE` overrides all of these.
+Relative paths resolve against the install directory. Before signalling, it checks that the pid belongs
 to a process named `enode`, because SIGUSR2 kills a process that does not handle it,
 including an enode older than this feature. Those older versions write no pid file, so
 they are never signalled. `ENODE_NO_HANDOFF=1` skips the handover, and

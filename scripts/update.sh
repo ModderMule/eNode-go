@@ -32,8 +32,9 @@ set -euo pipefail
 #   ENODE_REPO          GitHub owner/repo to update from (default ModderMule/eNode-go)
 #   ENODE_VERSION       install this tag (e.g. v0.3.4) instead of the latest release
 #   UPDATE_INSECURE     non-empty disables TLS verification (see below)
-#   ENODE_PIDFILE       the running enode's pid file, if the config moved it from
-#                       pidFile's default (data/enode.pid, relative to this directory)
+#   ENODE_PIDFILE       the running enode's pid file. Default: pidFile from the
+#                       config file (-config among the arguments, else
+#                       enode.config.yaml), else data/enode.pid
 #   ENODE_NO_HANDOFF    non-empty skips the handover and starts enode as before
 #   ENODE_HANDOFF_WAIT  seconds to wait for a handover to finish (default 900); a
 #                       refused or failed one is reported as soon as enode says so
@@ -193,7 +194,12 @@ main() {
   # simply kill — it is left alone, and the start below fails to bind until it is
   # stopped. The process name is checked so a stale file whose pid has been reused
   # never signals an unrelated process.
-  local PIDFILE="${ENODE_PIDFILE:-$DIR/data/enode.pid}"
+  local PIDFILE="${ENODE_PIDFILE:-}"
+  if [[ -z "$PIDFILE" ]]; then
+    PIDFILE="$(config_pidfile "$(config_path ${START_ARGS[@]+"${START_ARGS[@]}"})")"
+  fi
+  PIDFILE="${PIDFILE:-data/enode.pid}"
+  [[ "$PIDFILE" == /* ]] || PIDFILE="$DIR/$PIDFILE"
   if [[ -z "$EXE" && -z "${ENODE_NO_HANDOFF:-}" && -f "$PIDFILE" ]]; then
     local OLD
     OLD="$(tr -cd '0-9' < "$PIDFILE")"
@@ -239,6 +245,36 @@ handover() {
     echo "error: pid ${old} exited but no new enode is running — see the log, then start enode" >&2
   fi
   return 1
+}
+
+# config_path prints the config file enode is given in the arguments ($@), the way
+# enode's flag package reads them: -config or --config, the value separate or after
+# "=". Without one it prints enode's default.
+config_path() {
+  local cfg="enode.config.yaml"
+  while (($#)); do
+    case "$1" in
+      -config|--config) (($# > 1)) && { cfg="$2"; shift; } ;;
+      -config=*|--config=*) cfg="${1#*=}" ;;
+    esac
+    shift
+  done
+  printf '%s\n' "$cfg"
+}
+
+# config_pidfile prints the top-level pidFile value of the YAML config $1, or nothing
+# when the file or the key is missing. Only the plain one-line form is understood:
+# quoted or bare, with an optional trailing comment.
+config_pidfile() {
+  [[ -f "$1" ]] || return 0
+  local v
+  v="$(sed -n -E 's/^pidFile:[[:space:]]*//p' "$1" | head -n 1 | tr -d '\r')"
+  case "$v" in
+    \"*) v="${v#\"}"; v="${v%%\"*}" ;;
+    \'*) v="${v#\'}"; v="${v%%\'*}" ;;
+    *) v="${v%%[[:space:]]#*}"; v="${v%"${v##*[![:space:]]}"}" ;;
+  esac
+  printf '%s\n' "$v"
 }
 
 need() {
