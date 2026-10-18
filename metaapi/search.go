@@ -81,7 +81,9 @@ type limits struct {
 var networkKinds = map[string][]metav1.MetaKind{
 	networkTorrent: {metav1.MetaKind_META_KIND_BT_V1, metav1.MetaKind_META_KIND_BT_V2},
 	networkUsenet:  {metav1.MetaKind_META_KIND_NZB},
-	networkWeb:     {metav1.MetaKind_META_KIND_WEB},
+	// A web daemon sends what its pages offer besides links too (amendment 27).
+	networkWeb: {metav1.MetaKind_META_KIND_WEB, metav1.MetaKind_META_KIND_ED2K, metav1.MetaKind_META_KIND_BT_V1,
+		metav1.MetaKind_META_KIND_BT_V2, metav1.MetaKind_META_KIND_CONTAINER},
 	networkKad:     {metav1.MetaKind_META_KIND_ED2K},
 	networkServers: {metav1.MetaKind_META_KIND_ED2K},
 }
@@ -90,7 +92,9 @@ var networkKinds = map[string][]metav1.MetaKind{
 // lists them in: it is the order their releases alternate in, and the earlier of
 // two networks keeps a file both have. The servers come before Kad, so a file a
 // server knows is answered as the server's. Web comes last: it was added after the
-// contract fixed the order of the other four, and a web row shares a file with none.
+// contract fixed the order of the other four. An eD2K file or a torrent a web page
+// offered is answered as the server's, Kad's or torrent-crawler's when one of them
+// has it too.
 var networkOrder = []string{networkTorrent, networkUsenet, networkServers, networkKad, networkWeb}
 
 // Search pages through the torrent, Usenet, server and Kad catalogues. See the
@@ -213,11 +217,21 @@ func (c *catalogSearch) streams(ctx context.Context, req *metav1.SearchRequest, 
 		if len(req.GetKinds()) > 0 {
 			nreq.Kinds = kinds
 		}
+		// Only the web daemon answers with several kinds (amendment 27); the
+		// others are of one kind, which the request's kinds already chose.
+		narrowed := len(req.GetKinds()) > 0 && network == networkWeb
 		out = append(out, &releaseStream{
 			native:    slices.Contains(kinds, metav1.MetaKind_META_KIND_ED2K),
+			torrents:  slices.Contains(kinds, metav1.MetaKind_META_KIND_BT_V1) || slices.Contains(kinds, metav1.MetaKind_META_KIND_BT_V2),
 			maxChunks: c.cfg.Window/meta.ChunkSize + 1,
 			load: func(k int) (meta.Chunk, error) {
-				return c.cfg.Catalog.SearchCatalog(ctx, network, nreq, k)
+				chunk, err := c.cfg.Catalog.SearchCatalog(ctx, network, nreq, k)
+				if err != nil || !narrowed {
+					return chunk, err
+				}
+				// A daemon of several kinds may answer with all of them; only those
+				// asked for are kept.
+				return onlyKinds(chunk, kinds), nil
 			},
 		})
 	}
@@ -252,12 +266,13 @@ func (c *catalogSearch) networks() []string {
 type releaseStream struct {
 	load      func(k int) (meta.Chunk, error)
 	maxChunks int
-	// native marks a stream that can hold eD2K files, which two networks may both
-	// know.
-	native bool
-	chunks []meta.Chunk
-	done   bool
-	err    error
+	// native marks a stream that can hold eD2K files, and torrents one that can
+	// hold torrents: two networks may both know one.
+	native   bool
+	torrents bool
+	chunks   []meta.Chunk
+	done     bool
+	err      error
 }
 
 // at returns the stream's i-th release, loading chunks until it is reached or the
@@ -295,7 +310,8 @@ func (st *releaseStream) at(i int) (meta.Release, bool) {
 // earlier stream. A stream that runs out drops out.
 //
 // An eD2K file is merged once: a release whose hash and size an earlier one had is
-// skipped. The merge always starts at the first release, so what is skipped is the
+// skipped. So is a torrent: a release whose catalog_id, its info hash, an earlier
+// one had. The merge always starts at the first release, so what is skipped is the
 // same on every page.
 func mergePage(streams []*releaseStream, offset, limit int, before releaseLess) (page []meta.Release, more bool) {
 	want := offset + limit
@@ -365,14 +381,22 @@ func mergePage(streams []*releaseStream, offset, limit int, before releaseLess) 
 	return page, more
 }
 
-// fileKey is an eD2K file's identity: its hash and its size.
+// fileKey is an eD2K file's identity, its hash and its size, or a torrent's, its
+// catalog_id.
 type fileKey struct {
 	hash string
 	size uint64
 }
 
-// releaseFile is the eD2K file a release is, and false for any other release.
+// releaseFile is the eD2K file or the torrent a release is, and false for any
+// other release.
 func releaseFile(release meta.Release) (fileKey, bool) {
+	if len(release) > 0 {
+		switch release[0].GetKind() {
+		case metav1.MetaKind_META_KIND_BT_V1, metav1.MetaKind_META_KIND_BT_V2:
+			return fileKey{hash: "bt\x00" + release[0].GetCatalogId()}, true
+		}
+	}
 	if len(release) != 1 {
 		return fileKey{}, false
 	}
@@ -441,13 +465,16 @@ func releaseSize(release meta.Release) uint64 {
 // then an upper bound.
 func total(streams []*releaseStream) (sum uint64, exact bool) {
 	exact = true
-	native := 0
+	native, torrents := 0, 0
 	for _, st := range streams {
 		if st.native {
 			native++
 		}
+		if st.torrents {
+			torrents++
+		}
 	}
-	if native > 1 {
+	if native > 1 || torrents > 1 {
 		exact = false
 	}
 	for _, st := range streams {
@@ -545,6 +572,25 @@ func ed2kHash(entry *metav1.MetaEntry) []byte {
 		return hash
 	}
 	return nil
+}
+
+// onlyKinds is a chunk with the rows of other kinds left out, and a release left
+// with none dropped. The chunk is the catalogue cache's, shared, so it is copied.
+func onlyKinds(chunk meta.Chunk, kinds []metav1.MetaKind) meta.Chunk {
+	out := chunk
+	out.Releases = nil
+	for _, release := range chunk.Releases {
+		var kept meta.Release
+		for _, entry := range release {
+			if slices.Contains(kinds, entry.GetKind()) {
+				kept = append(kept, entry)
+			}
+		}
+		if len(kept) > 0 {
+			out.Releases = append(out.Releases, kept)
+		}
+	}
+	return out
 }
 
 func networkSelected(want metav1.MetaNetwork, network string) bool {

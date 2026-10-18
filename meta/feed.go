@@ -124,6 +124,14 @@ func (f *Feed) Match(expr *storage.SearchExpr, terms []string, limit int) []stor
 	return out
 }
 
+// Holds reports whether the feed holds a release under catalogID.
+func (f *Feed) Holds(catalogID string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	_, ok := f.releases[catalogID]
+	return ok
+}
+
 // Rows reports how many rows the feed holds.
 func (f *Feed) Rows() int {
 	f.mu.RLock()

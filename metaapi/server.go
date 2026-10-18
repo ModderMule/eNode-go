@@ -24,6 +24,7 @@ import (
 	"connectrpc.com/connect/v2/connectproto"
 	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
 	"github.com/ModderMule/enodemeta/gen/enode/meta/v1/metav1connect"
+	"github.com/ModderMule/enodemeta/linkcontainer"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -247,6 +248,12 @@ func (s *Server) handleRawMetaFile(w http.ResponseWriter, r *http.Request) {
 	case metav1.MetaKind_META_KIND_WEB:
 		// RFC 2483's extension for a text/uri-list.
 		ext = ".uris"
+	case metav1.MetaKind_META_KIND_CONTAINER:
+		// The format the daemon named: .dlc, .ccf or .rsdf.
+		ext = ".bin"
+		if format := linkcontainer.FormatOf(mf.GetContentType()); format != "" {
+			ext = "." + format
+		}
 	}
 	w.Header().Set("Content-Type", mf.GetContentType())
 	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ToLower(r.PathValue("hash"))+ext+`"`)

@@ -2,6 +2,7 @@ package meta
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 
 	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
 	"github.com/ModderMule/enodemeta/metahash"
+	"github.com/ModderMule/enodemeta/model"
 )
 
 func TestEntryToFileTorrent(t *testing.T) {
@@ -210,6 +212,41 @@ func TestNameSubFiles(t *testing.T) {
 	for i, name := range want {
 		if rows[i].Name != name {
 			t.Fatalf("row %d named %q, want %q", i, rows[i].Name, name)
+		}
+	}
+}
+
+// TestEntryToFileSizeZero: a link container and a torrent known by its magnet
+// alone may state no size (amendment 27); a torrent with a metafile and an eD2K
+// file still must.
+func TestEntryToFileSizeZero(t *testing.T) {
+	digest := sha256.Sum256([]byte("a stand-in CCF"))
+	container := &metav1.MetaEntry{Kind: metav1.MetaKind_META_KIND_CONTAINER, Name: "Box.ccf", Identity: digest[:],
+		CatalogId: fmt.Sprintf("ctr:%X", digest), FileCount: 1}
+
+	magnet := torrentEntry("Magnet.Alone", 0)
+	magnet.Size, magnet.TotalSize, magnet.Flags = 0, 0, model.FlagMagnetOnly
+
+	sizeless := torrentEntry("No.Size.Torrent", 3)
+	sizeless.Size, sizeless.TotalSize = 0, 0
+
+	ed2k := kadEntry("No.Size.avi", 1, 0)
+	ed2k.Size, ed2k.TotalSize = 0, 0
+
+	for _, tc := range []struct {
+		name  string
+		entry *metav1.MetaEntry
+		kept  bool
+	}{
+		{"a link container", container, true},
+		{"a magnet alone", magnet, true},
+		{"a torrent with a metafile", sizeless, false},
+		{"an eD2K file", ed2k, false},
+	} {
+		file, err := EntryToFile(tc.entry)
+		t.Logf("input: %s of size 0; output: %q size=%d err=%v", tc.name, file.Name, file.Size, err)
+		if (err == nil) != tc.kept {
+			t.Errorf("%s: kept=%v, want %v", tc.name, err == nil, tc.kept)
 		}
 	}
 }

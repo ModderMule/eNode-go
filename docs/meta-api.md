@@ -54,8 +54,10 @@ involved.
     `POST /enode.meta.v1.MetaApi/GetMetaFile` with a proto or JSON body;
   - `GET /caps`, which is `GetCaps` as JSON;
   - `GET /meta/v1/{meta hash hex}?id={catalog_id}`, which returns the raw bytes with
-    `Content-Type: application/x-bittorrent`, `application/x-nzb` or, for the links
-    behind a web row, `text/uri-list`.
+    `Content-Type: application/x-bittorrent`, `application/x-nzb`, for the links
+    behind a web row `text/uri-list`, and for a link container the format the
+    daemon named (`application/x-dlc`, `x-ccf`, `x-rsdf`), saved as `.dlc`, `.ccf`
+    or `.rsdf`.
 
   When accounts are on, this listener also serves the account website under
   `/account`, even with `http.enabled: false`. In that case it serves only the
@@ -81,7 +83,10 @@ server sends is byte-for-byte unchanged.
 `catalog_id`, because the hash fold cannot be reversed. The steps are:
 
 1. The kind is read from the hash: BT v1 and BT v2 go to the torrent network, NZB
-   to the usenet network, WEB to the web network. A network that is not enabled
+   to the usenet network, WEB and CONTAINER to the web network. A torrent a web
+   page offered is the web network's too (contract amendment 27): the network
+   whose feed holds the `catalog_id` is asked first, then torrent, then web, each
+   answering `not_found` passing the request on. A kind no enabled network serves
    answers `not_found`.
 2. A verified copy is served from a byte-bounded LRU cache
    (`metafileCache.maxBytes`, default 256 MiB, `ttlSeconds`). The cache is keyed by
@@ -190,6 +195,14 @@ repeated searches cost no daemon call, and pages stay stable for the TTL. This c
 is separate from the eD2K search cache (`metaSearch.cache`), so deep paging cannot
 evict what eD2K searches rely on. Keywords are compared case-insensitively and in
 any order.
+
+The web network's entries are of several kinds (amendment 27): web link sets, and
+the eD2K files (`META_KIND_ED2K`), torrents (`BT_V1`, `BT_V2`) and link containers
+(`META_KIND_CONTAINER`) its pages offer. A request's `kinds` narrows them too. An
+eD2K file or a torrent the server, Kad or torrent network also has is answered as
+theirs, once: a torrent is merged by its `catalog_id`. With two networks that may
+share a torrent in one search, `total` is an upper bound and `total_exact` false. A
+container entry and a magnet-only entry may have `size` 0.
 
 **Entries** are `MetaEntry` rows with the server-minted `meta_hash`. `meta_hash` and
 `catalog_id` are all `GetMetaFile` needs. A row with the magnet-only flag

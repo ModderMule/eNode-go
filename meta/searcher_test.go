@@ -2,6 +2,8 @@ package meta
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"connectrpc.com/connect/v2"
 	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
 	"github.com/ModderMule/enodemeta/metahash"
+	"github.com/ModderMule/enodemeta/model"
 )
 
 // TestSearchMergesNetworksWithPrefixes: each network's rows carry its own prefix, the
@@ -363,5 +366,84 @@ func TestSearchWebRowWithoutSize(t *testing.T) {
 		for _, row := range got {
 			t.Logf("output: %q size=%d", row.Name, row.Size)
 		}
+	}
+}
+
+// TestSearchWebItems: what a web page offers besides links comes from the web
+// daemon under its own kinds (ingest contract, amendment 27). An eD2K file is a
+// native row with no prefix, which a client that gets native rows alone gets
+// too; a torrent is prefixed as a torrent, and one known by its magnet alone may
+// have no size; a link container keeps the web prefix. A file or a torrent the
+// Kad or torrent daemon sent too is answered as theirs.
+func TestSearchWebItems(t *testing.T) {
+	kadFile := kadEntry("Night.Of.The.Living.Kad.avi", 40, 0)
+	torrentFile := torrentEntry("Night.Of.The.Living.Torrent.mkv", 12)
+
+	pageFile := kadEntry("Night.Of.The.Living.Page.avi", 0, 0)
+	pageFile.Indexer = "example-board"
+
+	magnetOnly := torrentEntry("Night.Of.The.Living.Magnet", 0)
+	magnetOnly.Size, magnetOnly.TotalSize, magnetOnly.Peers = 0, 0, 0
+	magnetOnly.Flags = model.FlagMagnetOnly
+
+	digest := sha256.Sum256([]byte("a stand-in DLC"))
+	container := &metav1.MetaEntry{
+		Kind: metav1.MetaKind_META_KIND_CONTAINER, Name: "Night.Of.The.Living.Box.dlc", Identity: digest[:],
+		CatalogId: fmt.Sprintf("ctr:%X", digest), FileCount: 1, Indexer: "example-board",
+	}
+
+	kad := &fakeDaemon{entries: []*metav1.MetaEntry{kadFile}}
+	torrent := &fakeDaemon{entries: []*metav1.MetaEntry{torrentFile}}
+	web := &fakeDaemon{entries: []*metav1.MetaEntry{
+		webEntry("Night.Of.The.Living.Web.mkv", 2), pageFile, kadEntry("Night.Of.The.Living.Kad.avi", 0, 0),
+		torrentEntry("Night.Of.The.Living.Torrent.mkv", 0), magnetOnly, container,
+	}}
+
+	cfg := testConfig(t, true, false)
+	cfg.Kad.Enabled, cfg.Web.Enabled = true, true
+	cfg, err := config.ApplyMetaSearchDefaults(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := searcherFor(cfg, map[string]*fakeDaemon{NetworkKad: kad, NetworkTorrent: torrent, NetworkWeb: web})
+
+	all := s.Search(context.Background(), text("night"), false, false)
+	t.Logf("input: night, every network; output: %s", fileNames(all))
+
+	want := []string{
+		"[kad] Night.Of.The.Living.Kad.avi",
+		"[torrent] Night.Of.The.Living.Torrent.mkv",
+		"[web] Night.Of.The.Living.Web.mkv",
+		"Night.Of.The.Living.Page.avi",
+		"[torrent] Night.Of.The.Living.Magnet",
+		"[web] Night.Of.The.Living.Box.dlc",
+	}
+	if len(all) != len(want) {
+		t.Fatalf("got %s, want %v", fileNames(all), want)
+	}
+	for i, row := range all {
+		if row.Name != want[i] {
+			t.Errorf("row %d: %q, want %q", i, row.Name, want[i])
+		}
+	}
+	if page := all[3]; !page.Meta.Native() || page.Sources != 0 {
+		t.Errorf("the page's eD2K file: native=%v sources=%d", page.Meta.Native(), page.Sources)
+	}
+	if magnet := all[4]; magnet.Size != 0 || magnet.Meta.Flags&model.FlagMagnetOnly == 0 {
+		t.Errorf("the magnet alone: size=%d flags=%#x", magnet.Size, magnet.Meta.Flags)
+	}
+
+	asked := torrent.searchCount()
+	native := s.Search(context.Background(), text("night"), false, true)
+	t.Logf("input: night, nativeOnly; output: %s", fileNames(native))
+	if len(native) != 2 || native[0].Name != want[0] || native[1].Name != want[3] {
+		t.Fatalf("got %s, want the Kad file and the page's eD2K file", fileNames(native))
+	}
+	if torrent.searchCount() != asked {
+		t.Errorf("the torrent daemon was asked for a client that takes native rows alone")
+	}
+
+	if got := s.HoldingNetwork(container.GetCatalogId()); got != "" {
+		t.Errorf("no feed is on, yet %q holds the container", got)
 	}
 }

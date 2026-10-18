@@ -40,6 +40,14 @@ type MetaFileSource interface {
 	Networks() []string
 }
 
+// CatalogHolder is a MetaFileSource that knows which network's feed holds a
+// catalog_id. *meta.Searcher is one. A kind two networks serve — a torrent
+// found by torrent-crawler, or on a web page by web-crawler (ingest contract,
+// amendment 27) — is fetched from the holder first.
+type CatalogHolder interface {
+	HoldingNetwork(catalogID string) string
+}
+
 // FetchError is a metafile fetch failure with its MsgCode and status.
 type FetchError struct {
 	Code    connect.Code
@@ -129,10 +137,14 @@ func (f *Fetcher) Kinds() []metav1.MetaKind {
 		case networkUsenet:
 			out = append(out, metav1.MetaKind_META_KIND_NZB)
 		case networkWeb:
-			out = append(out, metav1.MetaKind_META_KIND_WEB)
+			// A web daemon serves the torrents and link containers its pages offer
+			// too (amendment 27).
+			out = append(out, metav1.MetaKind_META_KIND_WEB, metav1.MetaKind_META_KIND_BT_V1,
+				metav1.MetaKind_META_KIND_BT_V2, metav1.MetaKind_META_KIND_CONTAINER)
 		}
 	}
-	return out
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // Get returns the metafile behind a row.
@@ -148,16 +160,16 @@ func (f *Fetcher) Get(ctx context.Context, rawHash []byte, catalogID string) (*m
 	if catalogID == "" || len(catalogID) > 256 {
 		return nil, &FetchError{Code: connect.CodeInvalidArgument, MsgCode: CodeInvalidRequest, cause: errors.New("catalog_id missing or too long")}
 	}
-	network := networkFor(parsed.Kind)
 	if f.source == nil {
 		// Meta search is off, so no daemon owns any row.
 		return nil, &FetchError{Code: connect.CodeNotFound, MsgCode: CodeNotFound, cause: errors.New("meta search is disabled")}
 	}
-	if network == "" {
+	if len(networksFor(parsed.Kind)) == 0 {
 		return nil, &FetchError{Code: connect.CodeInvalidArgument, MsgCode: CodeInvalidRequest, cause: fmt.Errorf("kind %s", parsed.Kind)}
 	}
-	if !slices.Contains(f.source.Networks(), network) {
-		return nil, &FetchError{Code: connect.CodeNotFound, MsgCode: CodeNotFound, cause: fmt.Errorf("%s search is not enabled", network)}
+	networks := f.networks(parsed.Kind, catalogID)
+	if len(networks) == 0 {
+		return nil, &FetchError{Code: connect.CodeNotFound, MsgCode: CodeNotFound, cause: fmt.Errorf("no network serving %s is enabled", parsed.Kind)}
 	}
 	// The cache is keyed by hash alone: an entry was verified against the hash, so
 	// it is the right file whatever catalog_id the caller echoed.
@@ -175,7 +187,7 @@ func (f *Fetcher) Get(ctx context.Context, rawHash []byte, catalogID string) (*m
 		// fetch for the others waiting on it. The timeout bounds it instead.
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), f.timeout)
 		defer cancel()
-		return f.fetch(fctx, hash, parsed.Kind, network, catalogID)
+		return f.fetchFrom(fctx, hash, parsed.Kind, networks, catalogID)
 	})
 	select {
 	case <-ctx.Done():
@@ -200,17 +212,59 @@ func ContentType(kind metav1.MetaKind) string {
 		return "application/x-nzb"
 	case metav1.MetaKind_META_KIND_WEB:
 		return weblinks.ContentType
+	case metav1.MetaKind_META_KIND_CONTAINER:
+		// The daemon names the format; without that the bytes are opaque.
+		return "application/octet-stream"
 	default:
 		return "application/x-bittorrent"
 	}
 }
 
-func (f *Fetcher) fetch(ctx context.Context, hash metahash.Hash, kind metahash.Kind, network, catalogID string) (*metav1.MetaFile, error) {
+// networks are the enabled networks that may serve a kind's metafile for
+// catalogID, the one whose feed holds it first.
+func (f *Fetcher) networks(kind metahash.Kind, catalogID string) []string {
+	enabled := f.source.Networks()
+
+	var out []string
+	if holder, ok := f.source.(CatalogHolder); ok {
+		if n := holder.HoldingNetwork(catalogID); n != "" && slices.Contains(networksFor(kind), n) && slices.Contains(enabled, n) {
+			out = append(out, n)
+		}
+	}
+	for _, n := range networksFor(kind) {
+		if slices.Contains(enabled, n) && !slices.Contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// fetchFrom asks each network in turn, moving on while one answers that it does
+// not have the release. Any other answer is the answer.
+func (f *Fetcher) fetchFrom(ctx context.Context, hash metahash.Hash, kind metahash.Kind, networks []string, catalogID string) (*metav1.MetaFile, error) {
+	var err error
+	for i, network := range networks {
+		var mf *metav1.MetaFile
+		mf, err = f.fetch(ctx, hash, kind, network, catalogID, i == len(networks)-1)
+		var fe *FetchError
+		if err == nil || !errors.As(err, &fe) || fe.Code != connect.CodeNotFound {
+			return mf, err
+		}
+	}
+	return nil, err
+}
+
+// fetch asks one network. last says no other network is left to ask, so a "not
+// found" is the answer and is remembered.
+func (f *Fetcher) fetch(ctx context.Context, hash metahash.Hash, kind metahash.Kind, network, catalogID string, last bool) (*metav1.MetaFile, error) {
 	mf, err := f.source.FetchMetaFile(ctx, network, catalogID)
 	if err != nil {
 		fe := classify(err)
 		switch fe.Code {
 		case connect.CodeNotFound:
+			if !last {
+				return nil, fe
+			}
 			f.stats.NotFound.Add(1)
 			f.remember(string(hash[:])+"\x00"+catalogID, fe)
 		case connect.CodeFailedPrecondition:
@@ -291,16 +345,20 @@ func classify(err error) *FetchError {
 	}
 }
 
-func networkFor(kind metahash.Kind) string {
+// networksFor are the networks that may serve a kind's metafiles, in the order
+// they are asked when no feed says which holds the release: a torrent is
+// torrent-crawler's first, and web-crawler's when a page offered it; a link
+// container only a web page offers.
+func networksFor(kind metahash.Kind) []string {
 	switch kind {
 	case metahash.KindBTV1, metahash.KindBTV2:
-		return networkTorrent
+		return []string{networkTorrent, networkWeb}
 	case metahash.KindNZB:
-		return networkUsenet
-	case metahash.KindWeb:
-		return networkWeb
+		return []string{networkUsenet}
+	case metahash.KindWeb, metahash.KindContainer:
+		return []string{networkWeb}
 	default:
-		return ""
+		return nil
 	}
 }
 

@@ -37,10 +37,11 @@ func EntryToFile(pb *metav1.MetaEntry) (storage.File, error) {
 	if size == 0 {
 		size = entry.TotalSize
 	}
-	if size == 0 && entry.Kind != metahash.KindWeb {
+	if size == 0 && !mayHaveNoSize(entry) {
 		// eMule discards a zero-size search result (srchybrid/SearchList.cpp:355). A
 		// web row is the exception (ingest contract, amendment 25): a stream has no
 		// size to state, and a client that knows the amendment shows the row as one.
+		// So are a link container and a magnet that names no size (amendment 27).
 		return storage.File{}, fmt.Errorf("release %s has no size", entry.CatalogID)
 	}
 
@@ -167,6 +168,20 @@ func mint(pb *metav1.MetaEntry) (model.Entry, error) {
 		return model.Entry{}, err
 	}
 	return entry, nil
+}
+
+// mayHaveNoSize reports whether a row of size 0 is passed on: a web row (a
+// stream), a link container, whose bytes say nothing of the files behind it, and
+// a torrent known only by a magnet that states no size.
+func mayHaveNoSize(entry model.Entry) bool {
+	switch entry.Kind {
+	case metahash.KindWeb, metahash.KindContainer:
+		return true
+	case metahash.KindBTV1, metahash.KindBTV2:
+		return entry.Flags&model.FlagMagnetOnly != 0
+	default:
+		return false
+	}
 }
 
 // isWholeSet reports whether a row stands for its whole release rather than one file.

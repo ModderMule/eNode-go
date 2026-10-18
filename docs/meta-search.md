@@ -13,7 +13,8 @@ a prefix, so every client can see which network it came from.
 A third daemon, kademlia-crawler, adds files found on the eMule Kad network. Those
 are real eD2K files and follow different rules: see [Kad results](#kad-results).
 
-A fourth daemon, web-crawler, adds links found on web pages. Its rows are pseudo-hash
+A fourth daemon, web-crawler, adds links found on web pages, and the eD2K files,
+torrents and link containers those pages offer ([Web results](#web-results)). Its rows are pseudo-hash
 rows like a torrent's, with one difference: see [Web results](#web-results).
 
 The design and its reasoning are in `docs/meta-search-torrent-usenet-plan.local.md`.
@@ -401,6 +402,39 @@ act on it. What differs from a torrent row:
 
 eMuleQt does not act on a web row yet. Until it does, enabling the network adds rows a
 user can see and cannot open.
+
+### What a web page offers besides links
+
+Since contract amendment 27 the web daemon also sends the eD2K links, torrents,
+magnets and link containers (`.dlc`, `.ccf`, `.rsdf`) its pages offer, one release
+per hash however many pages offer it. Each goes out as a row of its own kind, not
+as a web row:
+
+| From a page | Row | Name prefix | Who gets it | Size 0 |
+|---|---|---|---|---|
+| eD2K link | Native `META_KIND_ED2K`: the file's MD4, `FT_META_NETWORK` 3, no sources | none | every client, as Kad rows | dropped |
+| `.torrent` | `META_KIND_BT_V1`/`BT_V2`, a whole-set row and file rows, each with a magnet | the torrent network's (`[torrent] `) | capable clients | dropped |
+| magnet alone | One BT row with the magnet-only flag | the torrent network's | capable clients | passed on |
+| DLC, CCF, RSDF | `META_KIND_CONTAINER` | the web network's (`[web] `) | capable clients | passed on |
+
+- **An eD2K file is a Kad row.** It carries the same wire shape (`ed2k.AddFile`
+  writes `FT_META_NETWORK` 3 for every native row), so eMuleQt shows the Kad badge
+  for it; it takes no prefix, so stock eMule shows it as the plain file it is. A
+  client that gets native rows alone (`advertiseToLegacyClients` off and no
+  capability) gets these too: the web daemon is then searched and its other rows
+  left out.
+- **Another network wins.** A web row whose `catalog_id` the Kad or torrent daemon
+  sent in the same answer is dropped, since theirs know their sources. An eD2K
+  file both send is merged once by `mergeMetaResults`, Kad's first.
+- **A row of size 0** is passed on for a link container, whose bytes say nothing
+  of the files behind it, and for a magnet that names no size. A torrent row with
+  a metafile, and an eD2K row, must have a size.
+- **The metafile** of a torrent or a container comes from the web daemon: see
+  [meta-api.md](meta-api.md#fetching-a-metafile).
+
+eMuleQt does not know `META_KIND_CONTAINER` or act on the magnet-only flag yet. Until
+it does, it drops a container row as an unknown kind, and a magnet-only row's
+Download finds no metafile.
 
 ## Files from other servers
 

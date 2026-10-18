@@ -25,10 +25,25 @@ type fakeSource struct {
 	networks []string
 	delay    time.Duration
 	calls    atomic.Int64
+
+	// asked lists the networks asked, in order; webOnly ids are answered by the
+	// web network alone; holder names the feed holding an id.
+	asked   []string
+	webOnly map[string]bool
+	holder  map[string]string
 }
 
 func newFakeSource() *fakeSource {
-	return &fakeSource{files: map[string]*metav1.MetaFile{}, errs: map[string]error{}, networks: []string{networkTorrent}}
+	return &fakeSource{files: map[string]*metav1.MetaFile{}, errs: map[string]error{}, networks: []string{networkTorrent},
+		webOnly: map[string]bool{}, holder: map[string]string{}}
+}
+
+// HoldingNetwork makes the fake a CatalogHolder: holder names the feed that holds
+// an id, none by default.
+func (f *fakeSource) HoldingNetwork(catalogID string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.holder[catalogID]
 }
 
 func (f *fakeSource) Networks() []string { return f.networks }
@@ -44,6 +59,10 @@ func (f *fakeSource) FetchMetaFile(ctx context.Context, network, catalogID strin
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.asked = append(f.asked, network)
+	if f.webOnly[catalogID] && network != networkWeb {
+		return nil, connect.NewError(connect.CodeNotFound, "no such release")
+	}
 	if err := f.errs[catalogID]; err != nil {
 		return nil, err
 	}

@@ -22,6 +22,7 @@ import (
 	"connectrpc.com/connect/v2"
 	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
 	"github.com/ModderMule/enodemeta/gen/enode/meta/v1/metav1connect"
+	"github.com/ModderMule/enodemeta/metahash"
 )
 
 // Network names, as used in config keys and log lines.
@@ -31,7 +32,9 @@ const (
 	// NetworkKad is the kademlia-crawler daemon. Its rows are native: real eD2K files.
 	NetworkKad = "kad"
 	// NetworkWeb is the web-crawler daemon. Its rows are pseudo-hash rows like a
-	// torrent's, and the links behind one are its metafile.
+	// torrent's, and the links behind one are its metafile. Since amendment 27 of
+	// the ingest contract it also sends what its pages offer besides: eD2K files
+	// as native rows, torrents as BitTorrent rows and link containers.
 	NetworkWeb = "web"
 )
 
@@ -51,6 +54,9 @@ type Searcher struct {
 	// catalog caches MetaApi.Search chunks; nil until EnableCatalog.
 	catalog        *Cache[Chunk]
 	catalogTimeout time.Duration
+	// torrentPrefix is the torrent network's name prefix, which a BitTorrent row
+	// carries whichever daemon sent it.
+	torrentPrefix string
 }
 
 // source is one network: its daemon client, its feed and its limits.
@@ -59,7 +65,11 @@ type source struct {
 	// native marks a network whose rows are real eD2K files (Kad) rather than
 	// pseudo-hash rows: every client gets them in an eD2K search, whether or not it
 	// reads meta tags. MetaApi.Search serves them like any other network's.
-	native        bool
+	native bool
+	// mixed marks a network whose rows are of several kinds (web): its native
+	// rows go to every client like Kad's, and the rest only to a client that asked
+	// for meta rows.
+	mixed         bool
 	url           string
 	prefix        string
 	countInStatus bool
@@ -91,7 +101,8 @@ func New(cfg config.MetaSearchConfig) *Searcher {
 // NewWithClients is New with the daemon clients supplied by the caller, which is how
 // tests put an in-process daemon behind a searcher.
 func NewWithClients(cfg config.MetaSearchConfig, clientFor func(network string, c config.MetaNetworkConfig) metav1connect.MetaIngestClient) *Searcher {
-	s := &Searcher{udpSlots: make(chan struct{}, max(cfg.UDPMaxConcurrent, 1)), infoInterval: defaultInfoInterval}
+	s := &Searcher{udpSlots: make(chan struct{}, max(cfg.UDPMaxConcurrent, 1)), infoInterval: defaultInfoInterval,
+		torrentPrefix: cfg.Torrent.NamePrefixOrDefault(config.DefaultTorrentNamePrefix)}
 	if cfg.Cache.Enabled {
 		s.cache = NewCache(cfg.Cache.MaxEntries, cfg.Cache.MaxRowsPerEntry, time.Duration(cfg.Cache.TTLSeconds)*time.Second)
 	}
@@ -114,6 +125,7 @@ func NewWithClients(cfg config.MetaSearchConfig, clientFor func(network string, 
 		src := &source{
 			network:       n.name,
 			native:        n.native,
+			mixed:         n.name == NetworkWeb,
 			url:           n.cfg.URL,
 			prefix:        n.cfg.NamePrefixOrDefault(n.prefix),
 			countInStatus: n.cfg.CountInServerStatus,
@@ -187,6 +199,17 @@ func (s *Searcher) FetchMetaFile(ctx context.Context, network, catalogID string)
 	return nil, ErrNetworkDisabled
 }
 
+// HoldingNetwork is the network whose feed holds catalogID, "" when none does.
+// The metafile fetcher asks it first for a kind two networks serve.
+func (s *Searcher) HoldingNetwork(catalogID string) string {
+	for _, src := range s.sources {
+		if src.feed != nil && src.feed.Holds(catalogID) {
+			return src.network
+		}
+	}
+	return ""
+}
+
 // Search returns the meta rows for one eD2K search, every network queried in
 // parallel. Each network contributes its feed matches first, then — when the feed
 // did not fill its quota — live Search results obtained within that network's
@@ -196,8 +219,14 @@ func (s *Searcher) FetchMetaFile(ctx context.Context, network, catalogID string)
 // udp selects the UDP limits: a shorter deadline, a smaller row cap, and a live call
 // only while a udpMaxConcurrent slot is free.
 //
-// nativeOnly asks the native networks alone (Kad), for a requester that cannot act on
-// a torrent, Usenet or web row: those daemons are then not called at all.
+// nativeOnly asks for native rows alone, for a requester that cannot act on a
+// torrent, Usenet or web row: the Kad network's, and the eD2K files a web page
+// offered. The torrent and Usenet daemons are then not called at all.
+//
+// A web row of a release another network sent too — the same catalog_id, which for a
+// torrent is its info hash — is dropped: torrent-crawler's and Kad's rows know
+// their sources, a web page's do not. An eD2K file both send is left to
+// mergeMetaResults, which keeps the first by hash, and Kad answers first.
 func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, nativeOnly bool) []storage.File {
 	if expr == nil || len(s.sources) == 0 {
 		return nil
@@ -207,7 +236,7 @@ func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, na
 	results := make([][]storage.File, len(s.sources))
 	var wg sync.WaitGroup
 	for i, src := range s.sources {
-		if nativeOnly && !src.native {
+		if nativeOnly && !src.native && !src.mixed {
 			continue
 		}
 		wg.Add(1)
@@ -218,16 +247,57 @@ func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, na
 	}
 	wg.Wait()
 
-	var out []storage.File
+	sent := map[string]struct{}{}
 	for i, rows := range results {
-		prefix := s.sources[i].prefix
-		s.sources[i].counters.rowsServed.Add(uint64(len(rows)))
+		if s.sources[i].mixed {
+			continue
+		}
 		for _, row := range rows {
-			row.Name = prefix + row.Name
-			out = append(out, row)
+			if row.Meta != nil {
+				sent[row.Meta.CatalogID] = struct{}{}
+			}
 		}
 	}
+
+	var out []storage.File
+	for i, rows := range results {
+		src := s.sources[i]
+		served := 0
+		for _, row := range rows {
+			if src.mixed {
+				if nativeOnly && !row.Meta.Native() {
+					continue
+				}
+				if _, dup := sent[row.Meta.CatalogID]; dup {
+					continue
+				}
+			}
+			row.Name = s.prefixFor(src, row) + row.Name
+			out = append(out, row)
+			served++
+		}
+		src.counters.rowsServed.Add(uint64(served))
+	}
 	return out
+}
+
+// prefixFor is the name prefix of one row: its network's, except for a row of a
+// mixed network (web), which takes its kind's. An eD2K file a web page offered
+// gets none, so a client that does not read FT_META_NETWORK sees it as the plain
+// file it is, and one that does shows the Kad badge it shows for every native
+// row. A torrent a web page offered is prefixed as a torrent.
+func (s *Searcher) prefixFor(src *source, row storage.File) string {
+	if !src.mixed || row.Meta == nil {
+		return src.prefix
+	}
+	switch metahash.Kind(row.Meta.Kind) {
+	case metahash.KindED2K:
+		return ""
+	case metahash.KindBTV1, metahash.KindBTV2:
+		return s.torrentPrefix
+	default:
+		return src.prefix
+	}
 }
 
 func (src *source) search(ctx context.Context, expr *storage.SearchExpr, q Query, hasTerms, udp bool, udpSlots chan struct{}) []storage.File {
