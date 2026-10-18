@@ -273,6 +273,12 @@ func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, na
 				}
 			}
 			row.Name = s.prefixFor(src, row) + row.Name
+			if src.network == NetworkWeb && row.Meta.Native() {
+				// a copy: the cache shares Meta
+				m := *row.Meta
+				m.Network = storage.MetaNetworkWeb
+				row.Meta = &m
+			}
 			out = append(out, row)
 			served++
 		}
@@ -281,18 +287,14 @@ func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, na
 	return out
 }
 
-// prefixFor is the name prefix of one row: its network's, except for a row of a
-// mixed network (web), which takes its kind's. An eD2K file a web page offered
-// gets none, so a client that does not read FT_META_NETWORK sees it as the plain
-// file it is, and one that does shows the Kad badge it shows for every native
-// row. A torrent a web page offered is prefixed as a torrent.
+// prefixFor is the name prefix of one row: its network's, except for a torrent
+// of a mixed network (web), which is prefixed as a torrent. An eD2K file a web
+// page offered keeps the web prefix, as every network prefixes its rows.
 func (s *Searcher) prefixFor(src *source, row storage.File) string {
 	if !src.mixed || row.Meta == nil {
 		return src.prefix
 	}
 	switch metahash.Kind(row.Meta.Kind) {
-	case metahash.KindED2K:
-		return ""
 	case metahash.KindBTV1, metahash.KindBTV2:
 		return s.torrentPrefix
 	default:

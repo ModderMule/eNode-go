@@ -335,6 +335,9 @@ func TestAddFileEmitsMetaTags(t *testing.T) {
 	if MetaNetworkKad != tags.MetaNetworkKad {
 		t.Fatal("MetaNetworkKad differs from the contract's")
 	}
+	if MetaNetworkWeb != tags.MetaNetworkWeb || storage.MetaNetworkWeb != tags.MetaNetworkWeb {
+		t.Fatal("MetaNetworkWeb differs from the contract's")
+	}
 	for ours, contract := range ids {
 		if int(ours) != contract {
 			t.Fatalf("tag 0x%02x differs from the contract's 0x%02x", ours, contract)
@@ -607,6 +610,36 @@ func TestKadRowIsAnOrdinaryFileWithOneTag(t *testing.T) {
 	}
 	if kad.tagMap()["name"] != want.Name || kad.tagMap()[tagName(TagSources)] != uint64(want.Sources) {
 		t.Fatalf("Kad row name=%v sources=%v, want %q / %d", kad.tagMap()["name"], kad.tagMap()[tagName(TagSources)], want.Name, want.Sources)
+	}
+}
+
+// TestWebRowCarriesWebNetwork: an eD2K file a web page offered goes out like a Kad
+// row, with FT_META_NETWORK 5 instead of 3 (contract amendment 28).
+func TestWebRowCarriesWebNetwork(t *testing.T) {
+	client, conn := searchPagingClient(t, 1)
+	rows := kadRows(2)
+	rows[1].Name = "[web] paging-web.avi"
+	rows[1].Meta.Network = storage.MetaNetworkWeb
+	client.server.SetMetaSearcher(&fakeMeta{rows: rows}, true)
+
+	client.handleED2K(OpSearchRequest, searchFor(t, "paging-"))
+	records := decodeSearchRecords(t, conn.takeWritten())
+	t.Logf("input: 1 eD2K file, 1 Kad row, 1 web row, search \"paging-\"")
+	for i, r := range records {
+		t.Logf("output: record %d name=%v FT_META_NETWORK=%v", i, r.tagMap()["name"], r.tagMap()[tagName(TagMetaNetwork)])
+	}
+	if len(records) != 3 {
+		t.Fatalf("got %d records, want the eD2K file, the Kad row and the web row", len(records))
+	}
+	if got := records[1].tagMap()[tagName(TagMetaNetwork)]; got != uint64(MetaNetworkKad) {
+		t.Fatalf("Kad row FT_META_NETWORK = %v, want %d", got, MetaNetworkKad)
+	}
+	web := records[2]
+	if got := web.tagMap()[tagName(TagMetaNetwork)]; got != uint64(MetaNetworkWeb) {
+		t.Fatalf("web row FT_META_NETWORK = %v, want %d", got, MetaNetworkWeb)
+	}
+	if hasMetaTags(web) || web.ID != 0 || web.Port != 0 {
+		t.Fatalf("web row is not an ordinary file: id=%d port=%d tags=%v", web.ID, web.Port, web.tagMap())
 	}
 }
 

@@ -140,10 +140,17 @@ type MetaInfo struct {
 	Indexer   string
 	Flags     uint32
 	Magnet    string
+	// Network is FT_META_NETWORK of a native row: the network that found it,
+	// MetaNetworkWeb for a web page's file. 0 is Kad.
+	Network uint8
 }
 
 // MetaKindED2K is MetaInfo.Kind for a native row, META_KIND_ED2K of the contract.
 const MetaKindED2K uint8 = 4
+
+// MetaNetworkWeb is MetaInfo.Network for an eD2K file a web page offered,
+// META_NETWORK_WEB of the contract (amendment 28).
+const MetaNetworkWeb uint8 = 5
 
 // Native reports whether the row is a real eD2K file — its Hash is the file's own
 // MD4, not a pseudo-hash — which a catalogue daemon found on another network. Such a

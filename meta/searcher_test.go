@@ -414,7 +414,7 @@ func TestSearchWebItems(t *testing.T) {
 		"[kad] Night.Of.The.Living.Kad.avi",
 		"[torrent] Night.Of.The.Living.Torrent.mkv",
 		"[web] Night.Of.The.Living.Web.mkv",
-		"Night.Of.The.Living.Page.avi",
+		"[web] Night.Of.The.Living.Page.avi",
 		"[torrent] Night.Of.The.Living.Magnet",
 		"[web] Night.Of.The.Living.Box.dlc",
 	}
@@ -426,8 +426,11 @@ func TestSearchWebItems(t *testing.T) {
 			t.Errorf("row %d: %q, want %q", i, row.Name, want[i])
 		}
 	}
-	if page := all[3]; !page.Meta.Native() || page.Sources != 0 {
-		t.Errorf("the page's eD2K file: native=%v sources=%d", page.Meta.Native(), page.Sources)
+	if page := all[3]; !page.Meta.Native() || page.Sources != 0 || page.Meta.Network != storage.MetaNetworkWeb {
+		t.Errorf("the page's eD2K file: native=%v sources=%d network=%d", page.Meta.Native(), page.Sources, page.Meta.Network)
+	}
+	if kad := all[0]; kad.Meta.Network != 0 {
+		t.Errorf("the Kad file: network=%d, want 0 (Kad)", kad.Meta.Network)
 	}
 	if magnet := all[4]; magnet.Size != 0 || magnet.Meta.Flags&model.FlagMagnetOnly == 0 {
 		t.Errorf("the magnet alone: size=%d flags=%#x", magnet.Size, magnet.Meta.Flags)

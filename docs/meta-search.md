@@ -328,7 +328,7 @@ eD2K file that any client can download.
 | `FT_FILENAME` | `namePrefix` + the file's name. The default prefix is `[kad] `; `""` sends the bare name. |
 | `FT_SOURCES` | The sources Kad reported, capped at 99. |
 | `FT_COMPLETE_SOURCES` | The complete sources Kad reported, at most `FT_SOURCES`. Kad rarely reports this, so it is usually 0. |
-| `FT_META_NETWORK` (`0x6D`) | uint8 `3` (Kad). The row's only meta tag. |
+| `FT_META_NETWORK` (`0x6D`) | uint8 `3` (Kad), or `5` for a web page's eD2K file. The row's only meta tag. |
 
 **How a client recognises the row.** By `FT_META_NETWORK` alone. `FT_META_KIND` and the
 other `0x60`–`0x6C` tags are not sent: a shipped eMuleQt drops a row whose kind tag its
@@ -416,14 +416,14 @@ as a web row:
 
 | From a page | Row | Name prefix | Who gets it | Size 0 |
 |---|---|---|---|---|
-| eD2K link | Native `META_KIND_ED2K`: the file's MD4, `FT_META_NETWORK` 3, no sources | none | every client, as Kad rows | dropped |
+| eD2K link | Native `META_KIND_ED2K`: the file's MD4, `FT_META_NETWORK` 5, no sources | the web network's (`[web] `) | every client, as Kad rows | dropped |
 | `.torrent` | `META_KIND_BT_V1`/`BT_V2`, a whole-set row and file rows, each with a magnet | the torrent network's (`[torrent] `) | capable clients | dropped |
 | magnet alone | One BT row with the magnet-only flag | the torrent network's | capable clients | passed on |
 | DLC, CCF, RSDF | `META_KIND_CONTAINER` | the web network's (`[web] `) | capable clients | passed on |
 
-- **An eD2K file is a Kad row.** It carries the same wire shape (`ed2k.AddFile`
-  writes `FT_META_NETWORK` 3 for every native row), so eMuleQt shows the Kad badge
-  for it; it takes no prefix, so stock eMule shows it as the plain file it is. A
+- **An eD2K file is a Kad row with the web's mark.** It has the same wire shape,
+  but `ed2k.AddFile` writes `FT_META_NETWORK` 5 instead of 3 (contract amendment
+  28), so eMuleQt shows a web badge for it, and it takes the web prefix. A
   client that gets native rows alone (`advertiseToLegacyClients` off and no
   capability) gets these too: the web daemon is then searched and its other rows
   left out.

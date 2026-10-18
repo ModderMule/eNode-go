@@ -314,6 +314,8 @@ const (
 	TagMetaNetwork uint8 = 0x6d
 	// MetaNetworkKad is TagMetaNetwork's value for a file found on the Kad network.
 	MetaNetworkKad uint8 = 3
+	// MetaNetworkWeb is its value for an eD2K file a web page offered.
+	MetaNetworkWeb uint8 = 5
 )
 
 // IPv6Status* are the bits of the TagIPv6Status (0xab) bitfield. Unset bits mean

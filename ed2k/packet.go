@@ -318,7 +318,7 @@ func AddFile(packet *[]PacketItem, file SharedFile) {
 	}
 	switch {
 	case file.Meta.Native():
-		tags = append(tags, Tag{Type: TypeUint8, Code: TagMetaNetwork, Data: MetaNetworkKad})
+		tags = append(tags, Tag{Type: TypeUint8, Code: TagMetaNetwork, Data: metaNetworkOf(file.Meta)})
 	case file.Meta != nil:
 		tags = appendMetaTags(tags, file.Meta)
 	}
@@ -428,4 +428,12 @@ func appendMetaTags(tags []Tag, m *storage.MetaInfo) []Tag {
 		tags = append(tags, Tag{Type: TypeString, Code: TagMetaMagnet, Data: m.Magnet})
 	}
 	return tags
+}
+
+// metaNetworkOf is FT_META_NETWORK of a native row: web for a web page's file, else Kad.
+func metaNetworkOf(m *storage.MetaInfo) uint8 {
+	if m.Network == storage.MetaNetworkWeb {
+		return MetaNetworkWeb
+	}
+	return MetaNetworkKad
 }
