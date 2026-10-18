@@ -66,6 +66,7 @@ func start(t *testing.T, withAccounts, httpAPI bool, perIP int, search ...*Searc
 	file, hash := testTorrent(t, "Served.Release.2026")
 	src := newFakeSource()
 	src.files["cat-7"] = &metav1.MetaFile{Content: file}
+	src.errs["magnet"] = connect.NewError(connect.CodeFailedPrecondition, "magnet-only release")
 	fetcher := newTestFetcher(src)
 
 	_, missing := testTorrent(t, "Not.In.The.Catalogue")
@@ -258,6 +259,13 @@ func TestHTTPEndpoint(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("bad hex: %d", resp.StatusCode)
+	}
+	resp, _ = http.Get(fx.httpURL + "/meta/v1/" + fx.missingHex + "?id=magnet")
+	b, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	t.Logf("input: raw route, magnet-only id output: %d %s", resp.StatusCode, b)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(b), CodeMagnetOnly) {
+		t.Fatalf("magnet-only release on the raw route: %d %s", resp.StatusCode, b)
 	}
 	resp, _ = http.Get(fx.httpURL + "/meta/v1/" + fx.missingHex + "?id=missing")
 	b, _ = io.ReadAll(resp.Body)

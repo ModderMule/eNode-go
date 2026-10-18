@@ -108,7 +108,7 @@ Errors carry an `enode.meta.v1.ErrorInfo` detail with a `msg_code`:
 |---|---|
 | `invalid_argument` | `metafile.invalid_request`: not a meta hash, or no `catalog_id` |
 | `not_found` | `metafile.not_found` |
-| `failed_precondition` | `metafile.magnet_only`: the release has no metafile; use the row's `magnet` |
+| `failed_precondition` | `metafile.magnet_only`: the release has no metafile; use the row's `magnet` (HTTP 400 on the raw route, not worth retrying) |
 | `data_loss` | `metafile.verify_failed` |
 | `unavailable` | `metafile.upstream_unavailable` |
 | `resource_exhausted` | `metafile.too_large` or `ratelimit.exceeded` |

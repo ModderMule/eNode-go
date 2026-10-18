@@ -400,8 +400,12 @@ act on it. What differs from a torrent row:
   This holds for web rows only: a torrent or an NZB that arrives without a size is
   dropped, as before.
 
-eMuleQt does not act on a web row yet. Until it does, enabling the network adds rows a
-user can see and cannot open.
+eMuleQt shows a web row with the web icon, and a row of size 0 as "Stream". Its
+Download fetches the `text/uri-list` from the Meta API, checks it against the row's
+hash, and lists the links (file, name, size, hoster) in a dialog to copy, open in the
+browser or save. Its search form has a **Web (Server)** method, which is
+`MetaApi.Search` with `network` `META_NETWORK_WEB`, and a **Web results** box that
+hides web and container rows in a blended answer.
 
 ### What a web page offers besides links
 
@@ -432,9 +436,12 @@ as a web row:
 - **The metafile** of a torrent or a container comes from the web daemon: see
   [meta-api.md](meta-api.md#fetching-a-metafile).
 
-eMuleQt does not know `META_KIND_CONTAINER` or act on the magnet-only flag yet. Until
-it does, it drops a container row as an unknown kind, and a magnet-only row's
-Download finds no metafile.
+eMuleQt shows a container row with its own icon. Its Download fetches the file,
+checks its SHA-256 against the row's hash, and saves it with the extension the
+content type names (`.dlc`, `.ccf`, `.rsdf`). A magnet-only row keeps the torrent
+icon, and its Download copies the magnet to the clipboard: there is no metafile to
+fetch, and eMuleQt has no torrent engine yet. A **Web (Server)** search turns a
+`META_KIND_ED2K` entry into a plain eD2K file, and drops one without a size.
 
 ## Files from other servers
 

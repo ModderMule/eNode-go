@@ -299,7 +299,9 @@ func writeHTTPError(w http.ResponseWriter, err error) {
 
 func httpStatus(code connect.Code) int {
 	switch code {
-	case connect.CodeInvalidArgument:
+	case connect.CodeInvalidArgument, connect.CodeFailedPrecondition:
+		// failed_precondition is metafile.magnet_only: retrying will not help,
+		// the client uses the row's magnet. Connect maps it to 400 as well.
 		return http.StatusBadRequest
 	case connect.CodeUnauthenticated:
 		return http.StatusUnauthorized
