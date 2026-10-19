@@ -219,3 +219,43 @@ func TestFetcherServesWebItems(t *testing.T) {
 		t.Fatalf("got %v, asked %v; want the web daemon alone", err, src.asked)
 	}
 }
+
+// TestFetcherServesOnionLinks: a release whose links are on a hidden service is
+// served like any other. The fetcher verifies the container and passes it on
+// byte for byte, so the client lists the .onion address.
+func TestFetcherServesOnionLinks(t *testing.T) {
+	const onion = "http://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion/f/ccc1"
+	doc := &weblinks.Document{
+		Title: "Hidden.Release.2026",
+		Links: []weblinks.Link{
+			{URL: onion, File: 0, Name: "hidden.release.mkv", Hoster: "onionhost"},
+			{URL: "https://examplehost.test/f/ccc1", File: 0, Hoster: "examplehost"},
+		},
+	}
+	in, err := doc.MintInput(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := metahash.Mint(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := doc.Bytes()
+	src := newFakeSource()
+	src.networks = []string{networkWeb}
+	src.files["web:onion"] = &metav1.MetaFile{Kind: metav1.MetaKind_META_KIND_WEB, Content: container, ContentType: weblinks.ContentType}
+	t.Logf("input: a %d-byte container with an onion link, row hash %s\n%s", len(container), hash, container)
+
+	mf, err := newTestFetcher(src).Get(context.Background(), hash[:], "web:onion")
+	if err != nil {
+		t.Fatalf("fetching a web row with an onion link: %v", err)
+	}
+	t.Logf("output: kind=%s bytes=%d", mf.GetKind(), len(mf.GetContent()))
+	if string(mf.GetContent()) != string(container) {
+		t.Fatalf("the container changed on the way")
+	}
+	served, err := weblinks.Parse(mf.GetContent())
+	if err != nil || served.Links[0].URL != onion && served.Links[1].URL != onion {
+		t.Fatalf("the served container lost the onion link: %v %+v", err, served)
+	}
+}
