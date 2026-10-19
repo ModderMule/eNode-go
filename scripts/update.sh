@@ -234,6 +234,7 @@ handover() {
       new="$(tr -cd '0-9' < "$pidfile" 2>/dev/null || true)"
       if [[ -n "$new" && "$new" != "$old" ]] && kill -0 "$new" 2>/dev/null; then
         echo "Handed over: enode is running as pid ${new}."
+        echo "It runs detached from this terminal, so Ctrl+C no longer stops it; use: kill ${new}"
         return 0
       fi
     fi

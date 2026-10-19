@@ -28,6 +28,8 @@ drops the connections as before.
 The pid is in `pidFile` (default `data/enode.pid`), which the server writes once it
 serves. The successor rewrites it with its own pid. A clean stop removes it.
 
+The successor runs detached from the terminal, so Ctrl+C no longer stops it: use `kill $(cat data/enode.pid)`.
+
 ```yaml
 pidFile: "data/enode.pid"
 ```
