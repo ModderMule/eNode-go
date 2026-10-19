@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -106,6 +107,44 @@ func TestCatalogFiltersAndSorts(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := releaseNames(chunk.Releases)
+		t.Logf("input:  %s: %v", tc.name, tc.req)
+		t.Logf("output: %v", got)
+		if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestCatalogAnswersAlive: Search.alive keeps a file with at least one source, as
+// Kad answers it, and never lowers a min_seeders above one. A file nobody shares
+// any more is never answered, alive or not.
+func TestCatalogAnswersAlive(t *testing.T) {
+	own := fixedOwnFiles{
+		{Hash: []byte("file-hash-alive1"), Name: "alive.one.iso", Size: 1000, Sources: 1},
+		{Hash: []byte("file-hash-alive3"), Name: "alive.three.iso", Size: 1001, Sources: 3},
+		{Hash: []byte("file-hash-dead00"), Name: "alive.none.iso", Size: 1002, Sources: 0},
+	}
+	s := NewSearcher(SearcherConfig{})
+	cfg := catalogConfig(nil)
+	cfg.Own = own
+	s.EnableCatalog(cfg)
+
+	cases := []struct {
+		name string
+		req  *metav1.SearchRequest
+		want []string
+	}{
+		{"no filter", &metav1.SearchRequest{Query: "alive"}, []string{"alive.one.iso", "alive.three.iso"}},
+		{"alive", &metav1.SearchRequest{Query: "alive", Alive: true}, []string{"alive.one.iso", "alive.three.iso"}},
+		{"alive and three sources", &metav1.SearchRequest{Query: "alive", Alive: true, MinSeeders: 3}, []string{"alive.three.iso"}},
+	}
+	for _, tc := range cases {
+		chunk, err := s.SearchCatalog(context.Background(), tc.req, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := releaseNames(chunk.Releases)
+		slices.Sort(got)
 		t.Logf("input:  %s: %v", tc.name, tc.req)
 		t.Logf("output: %v", got)
 		if fmt.Sprint(got) != fmt.Sprint(tc.want) {
@@ -296,4 +335,11 @@ func sameReleases(a, b []meta.Release) bool {
 		}
 	}
 	return true
+}
+
+// fixedOwnFiles answers every search with the same files, whatever their counts.
+type fixedOwnFiles []storage.File
+
+func (f fixedOwnFiles) FindBySearch(*storage.SearchExpr) []storage.File {
+	return slices.Clone(f)
 }

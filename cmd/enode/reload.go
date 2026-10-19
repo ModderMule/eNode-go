@@ -12,6 +12,7 @@ import (
 	"enode/contentfilter"
 	"enode/ed2k"
 	"enode/logging"
+	"enode/meta"
 	"enode/storage"
 )
 
@@ -55,6 +56,9 @@ type reloader struct {
 	engine   storage.Engine
 	content  *contentfilter.Filter
 	adminSrv *admin.Server
+	// metaSearcher is reconfigured in place by a reload of metaSearch; nil when no
+	// network was enabled at startup.
+	metaSearcher *meta.Searcher
 
 	// udpCfg is the main UDP listener's config, the template for a separate gossip
 	// socket. mainConn and obfConn are the sockets gossip sends from; obfConn is nil
@@ -85,6 +89,13 @@ func (r *reloader) Reload() (admin.ReloadResult, error) {
 	}
 	effective := config.OverlayReloadable(r.boot, next)
 	old := r.applied
+	// Turning every meta network on or off decides whether a searcher, the
+	// FlagMetaSearch bit and the Meta API catalogue exist, all fixed at startup, so it
+	// needs a restart; until then metaSearch stays as it is.
+	metaFixed := next.MetaSearch.AnyEnabled() != r.boot.MetaSearch.AnyEnabled()
+	if metaFixed {
+		effective.MetaSearch = old.MetaSearch
+	}
 
 	var res admin.ReloadResult
 	for _, p := range config.Diff(old, effective) {
@@ -96,6 +107,9 @@ func (r *reloader) Reload() (admin.ReloadResult, error) {
 		if !config.Reloadable(p) {
 			res.RestartRequired = append(res.RestartRequired, p)
 		}
+	}
+	if metaFixed {
+		res.RestartRequired = append(res.RestartRequired, "metaSearch (turning every network on or off)")
 	}
 	// Storage can add a server list entry but not take one back.
 	if len(missingServers(effective.Servers, old.Servers)) > 0 {
@@ -123,6 +137,7 @@ func (r *reloader) Reload() (admin.ReloadResult, error) {
 	if effective.StatsBoost != old.StatsBoost {
 		warnStatsBoost(effective)
 	}
+	r.applyMetaSearch(old, effective)
 	if added := missingServers(old.Servers, effective.Servers); len(added) > 0 {
 		seedServers(r.engine, added)
 	}
@@ -213,6 +228,19 @@ func (r *reloader) applyGossip(old, cfg config.Config) error {
 		}
 	}
 	return nil
+}
+
+// applyMetaSearch hands a changed metaSearch section to the running searcher and the
+// runtime's advertiseToLegacyClients switch.
+func (r *reloader) applyMetaSearch(old, cfg config.Config) {
+	if r.metaSearcher == nil || len(config.Diff(config.Config{MetaSearch: old.MetaSearch}, config.Config{MetaSearch: cfg.MetaSearch})) == 0 {
+		return
+	}
+	r.metaSearcher.Reconfigure(cfg.MetaSearch)
+	r.runtime.SetMetaAdvertiseLegacy(cfg.MetaSearch.AdvertiseToLegacyClientsOrDefault())
+	warnMetaTokens(cfg.MetaSearch)
+	logging.Infof("meta search reconfigured: networks=%v advertiseToLegacyClients=%t cache=%t",
+		r.metaSearcher.Networks(), cfg.MetaSearch.AdvertiseToLegacyClientsOrDefault(), cfg.MetaSearch.Cache.Enabled)
 }
 
 // stopGossipIO halts the gossip loops and closes the separate gossip socket if one was

@@ -16,6 +16,9 @@ import (
 	"time"
 
 	"enode/admin"
+	"enode/config"
+
+	"gopkg.in/yaml.v3"
 )
 
 // reloadTestConfig is the config the reload test starts from and rewrites.
@@ -33,6 +36,8 @@ type reloadTestConfig struct {
 	interval   int
 	// keywords is filter.keywords.
 	keywords string
+	// meta is a raw metaSearch section, appended as is; "" leaves it out.
+	meta string
 }
 
 func (c reloadTestConfig) write(t *testing.T, path string) {
@@ -77,8 +82,8 @@ gossip:
   keywords: %q
 storage:
   engine: memory
-`, c.name, filepath.Join(dir, "enode.log"), c.tcpPort, c.tcpPort+1, c.udpPort, c.udpPort+1,
-		c.adminPort, c.gossip, c.seedPort, gossipExtra.String(), c.keywords)
+%s`, c.name, filepath.Join(dir, "enode.log"), c.tcpPort, c.tcpPort+1, c.udpPort, c.udpPort+1,
+		c.adminPort, c.gossip, c.seedPort, gossipExtra.String(), c.keywords, c.meta)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -461,4 +466,81 @@ func TestReloadFilterKeywords(t *testing.T) {
 	if code != http.StatusUnprocessableEntity || got != 1 {
 		t.Fatalf("an invalid keyword must change nothing: %d keywords=%d", code, got)
 	}
+}
+
+// TestReloadMetaSearch: a metaSearch change is applied by a reload while the server
+// runs, and turning every network off is reported as needing a restart and left
+// alone until then.
+func TestReloadMetaSearch(t *testing.T) {
+	metaSection := func(enabled, onlyAvailable, legacy bool) string {
+		return fmt.Sprintf(`metaSearch:
+  advertiseToLegacyClients: %t
+  torrent:
+    enabled: %t
+    url: "http://127.0.0.1:1"
+    onlyAvailable: %t
+`, legacy, enabled, onlyAvailable)
+	}
+	cfg := reloadTestConfig{
+		name: "meta", tcpPort: freePort(t), udpPort: freePort(t), adminPort: freePort(t), seedPort: freePort(t),
+		meta: metaSection(true, false, true),
+	}
+	path := filepath.Join(t.TempDir(), "enode.config.yaml")
+	conn := startReloadServer(t, cfg, path)
+
+	cur := cfg
+	cur.meta = metaSection(true, true, false)
+	cur.write(t, path)
+	code, res, raw := postReload(t, cfg.adminPort)
+	effective := effectiveMetaSearch(t, cfg.adminPort)
+	t.Logf("input: metaSearch.torrent.onlyAvailable -> true, advertiseToLegacyClients -> false")
+	t.Logf("output: %d %s", code, raw)
+	if code != http.StatusOK {
+		t.Fatalf("reload failed: %d %s", code, raw)
+	}
+	want := []string{"metaSearch.advertiseToLegacyClients", "metaSearch.torrent.onlyAvailable"}
+	if !slices.Equal(res.Applied, want) || len(res.RestartRequired) != 0 {
+		t.Errorf("applied=%v restart=%v, want %v and nothing pending", res.Applied, res.RestartRequired, want)
+	}
+	if !effective.Torrent.OnlyAvailable || effective.AdvertiseToLegacyClientsOrDefault() {
+		t.Errorf("the effective config does not show the reloaded values: %+v", effective)
+	}
+	if !connStillOpen(conn) {
+		t.Fatal("the reload dropped the client connection")
+	}
+
+	cur.meta = metaSection(false, true, false)
+	cur.write(t, path)
+	code, res, raw = postReload(t, cfg.adminPort)
+	effective = effectiveMetaSearch(t, cfg.adminPort)
+	t.Logf("input: metaSearch.torrent.enabled -> false (no network left)")
+	t.Logf("output: %d %s", code, raw)
+	if code != http.StatusOK {
+		t.Fatalf("reload failed: %d %s", code, raw)
+	}
+	if len(res.Applied) != 0 || !slices.Contains(res.RestartRequired, "metaSearch (turning every network on or off)") {
+		t.Errorf("applied=%v restart=%v, want nothing applied and the restart reported", res.Applied, res.RestartRequired)
+	}
+	if !effective.Torrent.Enabled {
+		t.Errorf("turning the last network off was applied without a restart")
+	}
+}
+
+// effectiveMetaSearch is the metaSearch section of the admin page's effective config.
+func effectiveMetaSearch(t *testing.T, adminPort uint16) config.MetaSearchConfig {
+	t.Helper()
+	var view struct {
+		YAML string `json:"yaml"`
+	}
+	if err := json.Unmarshal([]byte(adminGet(t, adminPort, "/api/config")), &view); err != nil {
+		t.Fatal(err)
+	}
+	// Only the section asked for: redacted values elsewhere need not fit their types.
+	var cfg struct {
+		MetaSearch config.MetaSearchConfig `yaml:"metaSearch"`
+	}
+	if err := yaml.Unmarshal([]byte(view.YAML), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	return cfg.MetaSearch
 }

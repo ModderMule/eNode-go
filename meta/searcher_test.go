@@ -106,7 +106,7 @@ func TestSearchUDPSlotsExhausted(t *testing.T) {
 	cfg := testConfig(t, true, false)
 	cfg.UDPMaxConcurrent = 1
 	s := searcherFor(cfg, map[string]*fakeDaemon{NetworkTorrent: d})
-	s.udpSlots <- struct{}{} // the one slot is in use
+	s.state.Load().udpSlots <- struct{}{} // the one slot is in use
 
 	udp := s.Search(context.Background(), text("busy"), true, false)
 	tcp := s.Search(context.Background(), text("busy"), false, false)
@@ -127,7 +127,7 @@ func TestSearchUsesCache(t *testing.T) {
 
 	first := s.Search(context.Background(), text("cached"), false, false)
 	second := s.Search(context.Background(), text("CACHED"), false, false)
-	s.udpSlots <- struct{}{}
+	s.state.Load().udpSlots <- struct{}{}
 	udp := s.Search(context.Background(), text("cached"), true, false)
 	t.Logf("input: same query x3 (TCP, TCP differently cased, UDP with slots full); output: rows=%d/%d/%d daemonCalls=%d",
 		len(first), len(second), len(udp), d.searchCount())
@@ -170,7 +170,7 @@ func TestSearchFeedAndLiveDeduplicate(t *testing.T) {
 	cfg := testConfig(t, true, false)
 	cfg.Torrent.Feed.Enabled = true
 	s := searcherFor(cfg, map[string]*fakeDaemon{NetworkTorrent: d})
-	s.sources[0].feed.apply(&metav1.SubscribeResponse{Changes: []*metav1.ReleaseChange{upsert(1, shared)}, Cursor: 1})
+	s.sources()[0].feed.apply(&metav1.SubscribeResponse{Changes: []*metav1.ReleaseChange{upsert(1, shared)}, Cursor: 1})
 
 	got := s.Search(context.Background(), text("shared"), false, false)
 	t.Logf("input: feed holds shared.release, live returns it plus shared.other; output: %s", fileNames(got))
@@ -180,7 +180,7 @@ func TestSearchFeedAndLiveDeduplicate(t *testing.T) {
 
 	cfg.Torrent.MaxResults = 1
 	s = searcherFor(cfg, map[string]*fakeDaemon{NetworkTorrent: d})
-	s.sources[0].feed.apply(&metav1.SubscribeResponse{Changes: []*metav1.ReleaseChange{upsert(1, shared)}, Cursor: 1})
+	s.sources()[0].feed.apply(&metav1.SubscribeResponse{Changes: []*metav1.ReleaseChange{upsert(1, shared)}, Cursor: 1})
 	before := d.searchCount()
 	got = s.Search(context.Background(), text("shared"), false, false)
 	t.Logf("input: maxResults=1 and the feed matches; output: %s daemonCalls=%d", fileNames(got), d.searchCount()-before)

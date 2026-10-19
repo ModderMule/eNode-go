@@ -110,8 +110,9 @@ type NetworkStats struct {
 
 // Stats returns every enabled network's figures, in configuration order.
 func (s *Searcher) Stats() []NetworkStats {
-	out := make([]NetworkStats, 0, len(s.sources))
-	for _, src := range s.sources {
+	sources := s.sources()
+	out := make([]NetworkStats, 0, len(sources))
+	for _, src := range sources {
 		out = append(out, src.stats())
 	}
 	return out
@@ -123,8 +124,8 @@ func (s *Searcher) Stats() []NetworkStats {
 // daemon.
 func (s *Searcher) AdvertisedFiles() int {
 	total := 0
-	for _, src := range s.sources {
-		if src.countInStatus {
+	for _, src := range s.sources() {
+		if src.settings.Load().countInStatus {
 			total += src.filesForStatus()
 		}
 	}
@@ -137,7 +138,7 @@ func (s *Searcher) AdvertisedFiles() int {
 // GetInfo is older than staleWindow: a stopped daemon must not keep its users in the
 // server status. Like AdvertisedFiles it reads only what the poller holds.
 func (s *Searcher) NetworkUsers(network string) int {
-	for _, src := range s.sources {
+	for _, src := range s.sources() {
 		if src.network == network {
 			return src.usersForStatus()
 		}
@@ -148,10 +149,11 @@ func (s *Searcher) NetworkUsers(network string) int {
 // CacheEntries reports how many queries the shared result cache holds; 0 when the
 // cache is off.
 func (s *Searcher) CacheEntries() int {
-	if s.cache == nil {
+	cache := s.state.Load().cache
+	if cache == nil {
 		return 0
 	}
-	return s.cache.Len()
+	return cache.Len()
 }
 
 // sourceCounters are one network's search counters since start.
@@ -241,7 +243,7 @@ func (src *source) refreshInfo(parent context.Context) {
 // live search the daemon's whole catalogue is reachable, so its GetInfo file count;
 // without it only the feed answers, so the rows the feed holds.
 func (src *source) filesForStatus() int {
-	if src.live {
+	if src.settings.Load().live {
 		src.daemon.mu.Lock()
 		defer src.daemon.mu.Unlock()
 		return int(min(src.daemon.info.GetFiles(), uint64(maxStatusFiles)))
@@ -264,13 +266,14 @@ func (src *source) usersForStatus() int {
 }
 
 func (src *source) stats() NetworkStats {
+	set := src.settings.Load()
 	st := NetworkStats{
 		Network:             src.network,
 		URL:                 src.url,
-		Prefix:              src.prefix,
-		LiveSearch:          src.live,
+		Prefix:              set.prefix,
+		LiveSearch:          set.live,
 		FeedEnabled:         src.feed != nil,
-		CountInServerStatus: src.countInStatus,
+		CountInServerStatus: set.countInStatus,
 		Down:                src.isDown(),
 		SearchesTCP:         src.counters.searchesTCP.Load(),
 		SearchesUDP:         src.counters.searchesUDP.Load(),
@@ -319,7 +322,7 @@ func (src *source) stats() NetworkStats {
 		fs := src.feed.Stats()
 		st.FeedReleases, st.FeedRows, st.FeedCursor, st.FeedCaughtUp = fs.Releases, fs.Rows, fs.Cursor, fs.CaughtUp
 	}
-	if src.countInStatus {
+	if set.countInStatus {
 		st.Counted = src.filesForStatus()
 	}
 	return st

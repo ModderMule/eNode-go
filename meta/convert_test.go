@@ -250,3 +250,38 @@ func TestEntryToFileSizeZero(t *testing.T) {
 		}
 	}
 }
+
+// TestAvailable: each network's onlyAvailable check of one row, by the row's own
+// kind and counts.
+func TestAvailable(t *testing.T) {
+	row := func(kind metahash.Kind, seeders, peers uint32) storage.File {
+		return storage.File{Meta: &storage.MetaInfo{Kind: uint8(kind), Seeders: seeders, Peers: peers}}
+	}
+	cases := []struct {
+		name    string
+		network string
+		row     storage.File
+		want    bool
+	}{
+		{"torrent with seeders", NetworkTorrent, row(metahash.KindBTV1, 3, 0), true},
+		{"torrent with leechers only", NetworkTorrent, row(metahash.KindBTV2, 0, 2), true},
+		{"torrent nobody scraped", NetworkTorrent, row(metahash.KindBTV1, 0, 0), false},
+		{"kad with a source", NetworkKad, row(metahash.KindED2K, 0, 1), true},
+		{"kad without sources", NetworkKad, row(metahash.KindED2K, 0, 0), false},
+		{"usenet complete", NetworkUsenet, row(metahash.KindNZB, 99, 40), true},
+		{"usenet 98%", NetworkUsenet, row(metahash.KindNZB, 98, 40), false},
+		{"web with a live mirror", NetworkWeb, row(metahash.KindWeb, 1, 0), true},
+		{"web without one", NetworkWeb, row(metahash.KindWeb, 0, 0), false},
+		{"link container without one", NetworkWeb, row(metahash.KindContainer, 0, 0), false},
+		{"torrent a page offered", NetworkWeb, row(metahash.KindBTV1, 0, 0), true},
+		{"eD2K file a page offered", NetworkWeb, row(metahash.KindED2K, 0, 0), true},
+		{"no meta", NetworkTorrent, storage.File{}, true},
+	}
+	for _, tc := range cases {
+		got := available(tc.network, tc.row)
+		t.Logf("input: %s (%s); output: %t", tc.name, tc.network, got)
+		if got != tc.want {
+			t.Errorf("%s: got %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}

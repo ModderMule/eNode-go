@@ -70,8 +70,8 @@ func (s *Searcher) EnableCatalog(cfg CatalogConfig) {
 // one.
 func (s *Searcher) CatalogNetworks() []string {
 	var out []string
-	for _, src := range s.sources {
-		if src.live {
+	for _, src := range s.sources() {
+		if src.settings.Load().live {
 			out = append(out, src.network)
 		}
 	}
@@ -95,8 +95,8 @@ func (s *Searcher) SearchCatalog(ctx context.Context, network string, req *metav
 		return Chunk{}, ErrCatalogOff
 	}
 	var src *source
-	for _, candidate := range s.sources {
-		if candidate.network == network && candidate.live {
+	for _, candidate := range s.sources() {
+		if candidate.network == network && candidate.settings.Load().live {
 			src = candidate
 		}
 	}
@@ -107,7 +107,9 @@ func (s *Searcher) SearchCatalog(ctx context.Context, network string, req *metav
 		return Chunk{}, ErrNetworkDown
 	}
 	base := normalizeRequest(req)
-	key := network + "\x00" + requestKey(base) + "\x00" + strconv.Itoa(k)
+	// The source's generation keeps a daemon a reload replaced from answering
+	// out of its predecessor's chunks.
+	key := network + "\x00" + strconv.FormatUint(src.gen, 10) + "\x00" + requestKey(base) + "\x00" + strconv.Itoa(k)
 
 	loaded := false
 	chunk, err := s.catalog.Get(ctx, key, func() (Chunk, error) {

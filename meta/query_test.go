@@ -97,8 +97,50 @@ func TestQueryRequestAndKey(t *testing.T) {
 	}
 }
 
+// TestBuildQueryForwardsAvailability: eMule's availability floor on an AND path
+// becomes Search.min_seeders and is part of the cache key; one under an OR, an upper
+// bound and NotEqual are left to the post-filter.
+func TestBuildQueryForwardsAvailability(t *testing.T) {
+	cases := []struct {
+		name string
+		expr *storage.SearchExpr
+		want uint32
+	}{
+		{"at least 5", node(storage.SearchAnd, text("ubuntu"), tagUint(sourcesLeaf(storage.SearchOpGreaterEqual), 5)), 5},
+		{"more than 4", node(storage.SearchAnd, text("ubuntu"), tagUint(sourcesLeaf(storage.SearchOpGreater), 4)), 5},
+		{"exactly 3", node(storage.SearchAnd, text("ubuntu"), tagUint(sourcesLeaf(storage.SearchOpEqual), 3)), 3},
+		{"the higher of two floors", node(storage.SearchAnd,
+			node(storage.SearchAnd, text("ubuntu"), tagUint(sourcesLeaf(storage.SearchOpGreaterEqual), 2)),
+			tagUint(sourcesLeaf(storage.SearchOpGreaterEqual), 7)), 7},
+		{"an upper bound", node(storage.SearchAnd, text("ubuntu"), tagUint(sourcesLeaf(storage.SearchOpLess), 9)), 0},
+		{"not equal", node(storage.SearchAnd, text("ubuntu"), tagUint(sourcesLeaf(storage.SearchOpNotEqual), 1)), 0},
+		{"under an OR", node(storage.SearchAnd, text("ubuntu"),
+			node(storage.SearchOr, text("iso"), tagUint(sourcesLeaf(storage.SearchOpGreaterEqual), 5))), 0},
+	}
+	for _, tc := range cases {
+		q, _ := BuildQuery(tc.expr)
+		req := q.Request(10)
+		t.Logf("input: %s; output: MinSources=%d min_seeders=%d", tc.name, q.MinSources, req.GetMinSeeders())
+		if q.MinSources != tc.want || req.GetMinSeeders() != tc.want {
+			t.Errorf("%s: got %d / %d, want %d", tc.name, q.MinSources, req.GetMinSeeders(), tc.want)
+		}
+	}
+
+	a := Query{Terms: []string{"ubuntu"}, MinSources: 1}
+	b := Query{Terms: []string{"ubuntu"}, MinSources: 2}
+	t.Logf("input: %+v vs %+v; output: keys %q / %q", a, b, a.Key(), b.Key())
+	if a.Key() == b.Key() {
+		t.Fatalf("queries with different availability floors share a cache key")
+	}
+}
+
 // sizeLeaf is the TagType of an FT_FILESIZE leaf with operator op: op, a tag-name
 // length of 1, and the tag id, as one little-endian uint32.
 func sizeLeaf(op uint8) uint32 {
 	return uint32(op) | 1<<8 | uint32(storage.SearchTagSize)<<24
+}
+
+// sourcesLeaf is the TagType of an FT_SOURCES leaf with operator op.
+func sourcesLeaf(op uint8) uint32 {
+	return uint32(op) | 1<<8 | uint32(storage.SearchTagSources)<<24
 }

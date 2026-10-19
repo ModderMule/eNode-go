@@ -121,3 +121,29 @@ func TestMetaSearchValidation(t *testing.T) {
 		}
 	}
 }
+
+// TestMetaSearchOnlyAvailable: onlyAvailable is off unless a network sets it, and
+// each network reads its own key.
+func TestMetaSearchOnlyAvailable(t *testing.T) {
+	cfg, err := loadYAML(t, "name: test\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := cfg.MetaSearch
+	t.Logf("input: no metaSearch section; output: torrent=%t usenet=%t kad=%t web=%t",
+		m.Torrent.OnlyAvailable, m.Usenet.OnlyAvailable, m.Kad.OnlyAvailable, m.Web.OnlyAvailable)
+	if m.Torrent.OnlyAvailable || m.Usenet.OnlyAvailable || m.Kad.OnlyAvailable || m.Web.OnlyAvailable {
+		t.Fatal("onlyAvailable must be off by default")
+	}
+
+	body := "name: test\nmetaSearch:\n  usenet:\n    enabled: true\n    onlyAvailable: true\n  web:\n    enabled: true\n"
+	cfg, err = loadYAML(t, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = cfg.MetaSearch
+	t.Logf("input: %q; output: usenet=%t web=%t", body, m.Usenet.OnlyAvailable, m.Web.OnlyAvailable)
+	if !m.Usenet.OnlyAvailable || m.Web.OnlyAvailable {
+		t.Fatalf("usenet=%t web=%t, want only usenet on", m.Usenet.OnlyAvailable, m.Web.OnlyAvailable)
+	}
+}

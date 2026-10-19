@@ -615,6 +615,12 @@ type MetaNetworkConfig struct {
 	// LiveSearch forwards each search's keywords to the daemon's Search. *bool,
 	// defaults on. Off leaves only the feed (and the cache is then unused).
 	LiveSearch *bool `yaml:"liveSearch"`
+	// OnlyAvailable keeps only results that can be downloaded now, like the alive or
+	// complete box on the daemon's own search page: for torrent, Kad and web a live
+	// Search asks for alive releases (Search.alive), for Usenet for complete ones
+	// (Search.min_completion 100%). Feed rows are checked the same way. eD2K searches
+	// only: a MetaApi.Search caller chooses its own filters. Off by default.
+	OnlyAvailable bool `yaml:"onlyAvailable"`
 	// SearchTimeoutMs bounds the live call on a TCP search, which runs on that
 	// client's own connection goroutine. UDPSearchTimeoutMs is the shorter UDP bound.
 	SearchTimeoutMs    int `yaml:"searchTimeoutMs"`

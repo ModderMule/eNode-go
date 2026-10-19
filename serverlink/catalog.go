@@ -121,7 +121,12 @@ func (s *Searcher) catalogAnswer(ctx context.Context, req *metav1.SearchRequest)
 	if !ok {
 		return catalogAnswer{exact: true}
 	}
+	// alive is answered against sources, as Kad answers it (ingest contract
+	// amendment 20): a file is alive with one source, complete or not.
 	minSources := req.GetMinSeeders()
+	if req.GetAlive() {
+		minSources = max(minSources, 1)
+	}
 	exact := true
 
 	merged := newMerge()

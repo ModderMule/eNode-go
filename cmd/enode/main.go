@@ -644,21 +644,22 @@ func run(ctx context.Context, configPath string) error {
 	// buildGossipHandler above); only the sockets and timers start here, in
 	// reloader.startGossipIO, which a config reload that turns gossip on runs again.
 	reload := &reloader{
-		ctx:       ctx,
-		path:      configPath,
-		bootFile:  bootFileCfg,
-		boot:      cfg,
-		applied:   cfg,
-		derived:   derived,
-		runtime:   runtime,
-		engine:    engine,
-		content:   contentFilter,
-		adminSrv:  adminSrv,
-		udpCfg:    udpCfg,
-		mainConn:  udpConn,
-		obfConn:   obfUDPConn,
-		gossip:    gossipHandler,
-		stopLoops: func() {},
+		ctx:          ctx,
+		path:         configPath,
+		bootFile:     bootFileCfg,
+		boot:         cfg,
+		applied:      cfg,
+		derived:      derived,
+		runtime:      runtime,
+		engine:       engine,
+		content:      contentFilter,
+		adminSrv:     adminSrv,
+		metaSearcher: metaSearcher,
+		udpCfg:       udpCfg,
+		mainConn:     udpConn,
+		obfConn:      obfUDPConn,
+		gossip:       gossipHandler,
+		stopLoops:    func() {},
 	}
 	defer reload.close()
 	if gossipHandler != nil {

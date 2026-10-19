@@ -188,3 +188,38 @@ func mayHaveNoSize(entry model.Entry) bool {
 func isWholeSet(row storage.File) bool {
 	return row.Meta.FileIndex == metahash.FileIndexWholeSet32
 }
+
+// available reports whether a row of network passes that network's onlyAvailable
+// check, the row-side twin of the filter a live Search asks for. It is what keeps a
+// feed row, which no request filtered, to the same rule:
+//
+//   - torrent: a seeder or a leecher at the last scrape (Search.alive)
+//   - Kad: at least one source (amendment 20)
+//   - Usenet: seeders is min(99, completion%) (amendment 9), so 99 is the most
+//     complete a row can say; a live Search asks for 100% exactly
+//   - web: a web page or link container needs a mirror found alive. A torrent or
+//     eD2K file a page offered carries no counts at all (amendment 27), so it is left
+//     to the daemon's own alive check.
+func available(network string, row storage.File) bool {
+	m := row.Meta
+	if m == nil {
+		return true
+	}
+	switch network {
+	case NetworkTorrent:
+		return m.Seeders > 0 || m.Peers > 0
+	case NetworkKad:
+		return m.Peers > 0
+	case NetworkUsenet:
+		return m.Seeders >= usenetCompleteSeeders
+	case NetworkWeb:
+		switch metahash.Kind(m.Kind) {
+		case metahash.KindWeb, metahash.KindContainer:
+			return m.Seeders > 0
+		}
+	}
+	return true
+}
+
+// usenetCompleteSeeders is the seeders figure of a complete Usenet row.
+const usenetCompleteSeeders = 99

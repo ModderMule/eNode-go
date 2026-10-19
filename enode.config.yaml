@@ -310,6 +310,7 @@ metaSearch:
     token: ""
     namePrefix: "[torrent emule-qt.org] "       # prepended to every filename; "" for none
     liveSearch: true               # forward each search's keywords to the daemon
+    onlyAvailable: false           # only alive releases (a seeder or leecher at the last scrape)
     searchTimeoutMs: 1500          # TCP: the reply waits at most this long for the daemon
     udpSearchTimeoutMs: 800        # UDP: shorter, it holds a shared worker
     maxResults: 50                 # rows merged into one TCP search answer
@@ -331,6 +332,7 @@ metaSearch:
     token: ""
     namePrefix: "[usenet emule-qt.org] "
     liveSearch: true
+    onlyAvailable: false           # only 100% complete releases
     searchTimeoutMs: 1500
     udpSearchTimeoutMs: 800
     maxResults: 50
@@ -356,6 +358,7 @@ metaSearch:
     # strips a leading "[kad ...] " bracket; other clients show and keep it.
     namePrefix: "[kad emule-qt.org] "
     liveSearch: true
+    onlyAvailable: false           # only files with at least one source
     searchTimeoutMs: 1500
     udpSearchTimeoutMs: 800
     maxResults: 50
@@ -377,6 +380,7 @@ metaSearch:
     token: ""
     namePrefix: "[web emule-qt.org] "
     liveSearch: true
+    onlyAvailable: false           # only releases whose links were alive at the last check
     searchTimeoutMs: 1500
     udpSearchTimeoutMs: 800
     maxResults: 50

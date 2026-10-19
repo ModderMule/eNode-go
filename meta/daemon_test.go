@@ -90,6 +90,18 @@ func (d *fakeDaemon) searchCount() int {
 	return len(d.searches)
 }
 
+func (d *fakeDaemon) subscribeCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.subscribes)
+}
+
+func (d *fakeDaemon) lastSearch() *metav1.SearchRequest {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.searches[len(d.searches)-1]
+}
+
 func (d *fakeDaemon) client() metav1connect.MetaIngestClient {
 	server := connect.NewServer()
 	metav1connect.RegisterMetaIngestHandler(server, d)

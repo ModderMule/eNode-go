@@ -77,6 +77,7 @@ listener is closed and no client is disconnected.
 | `filter.banThreshold`, `filter.keywordBanThreshold`, `filter.banMinutes` | a ban already running keeps its length |
 | `storage.countCacheSeconds` | |
 | `admin.username`, `admin.password` | |
+| `metaSearch.*` | a network whose `url`, `token` and `feed` are unchanged keeps its feed and counters; one whose daemon changed is reconnected; one turned on or off is started or stopped. Turning **every** network on or off needs a restart (it is listed as `metaSearch (turning every network on or off)`) |
 
 Every other changed key is listed under `restartRequired` and keeps the value the
 process started with until it is restarted. The list is repeated on each reload for as

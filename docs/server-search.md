@@ -400,6 +400,6 @@ ENODE_INTEGRATION=1 go test ./storage -run 'BrowseFiles'   # MySQL and MongoDB, 
   part of what `ServerSearch` serves: a peer's files are never passed on to
   another server.
 - **The mirror is not persisted**, and is not shared between instances.
-- **No reload.** The section is restart-only, like `metaSearch` and `metaApi`.
+- **No reload.** The section is restart-only, like `metaApi`.
 - **A search cannot be forwarded.** A server asks its own peers and nobody
   else's: there is no hop count because there is no second hop.

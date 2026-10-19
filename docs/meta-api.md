@@ -274,6 +274,11 @@ sources, `catalog_id` is `ed2k:<MD4 hex>:<size>`. A peer's source count is cappe
 - **`min_seeders` compares sources**, as it does for Kad. For a peer's file it
   compares the capped count, so a value above 99 still matches a file a peer
   reports 99 or more sources for.
+- **`alive` compares sources too**, as for Kad: a file with one source is alive,
+  complete or not. With `min_seeders` the higher of the two floors applies. A file
+  nobody shares any more is never answered, so on this network `alive` drops only a
+  peer's file reported with no sources. `min_completion` is Usenet's and is ignored.
+  The daemon networks get every filter of the request as sent.
 - **One answer per search.** The whole list, up to `search.window`, is computed once
   and cached for `search.cache.ttlSeconds`. Paging it makes no further call to a
   peer. A live peer is asked within `search.timeoutMs`; one that is down or late

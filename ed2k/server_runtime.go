@@ -157,9 +157,10 @@ type ServerRuntime struct {
 	ipv6Probe func(*tcpClient) bool
 	// meta supplies torrent/Usenet/Kad/web rows merged into search answers, or nil when no
 	// catalogue daemon is configured. Set once by SetMetaSearcher before the listeners
-	// bind, then only read. metaAdvertiseLegacy sends them to clients that did not ask.
+	// bind, then only read. metaAdvertiseLegacy sends them to clients that did not ask;
+	// a config reload may flip it with the listeners live.
 	meta                MetaSearcher
-	metaAdvertiseLegacy bool
+	metaAdvertiseLegacy atomic.Bool
 	// boost is added to the counts in both status packets. Swapped by SetStatsBoost,
 	// which a config reload may call with the listeners live. nil advertises real counts.
 	boost atomic.Pointer[StatsBoost]

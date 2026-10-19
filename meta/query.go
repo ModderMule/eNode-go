@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,10 @@ type Query struct {
 	FileType string
 	MinSize  uint64
 	MaxSize  uint64
+	// MinSources is the client's availability floor (eMule's "Availability"), sent as
+	// Search.min_seeders: each daemon compares it with what its rows count as
+	// sources, and a Usenet daemon ignores it.
+	MinSources uint32
 }
 
 // BuildQuery extracts the forwardable part of a search tree. It reports false when
@@ -41,12 +46,13 @@ func BuildQuery(expr *storage.SearchExpr) (Query, bool) {
 // releases.
 func (q Query) Request(limit int) *metav1.SearchRequest {
 	return &metav1.SearchRequest{
-		Query:   strings.Join(q.Terms, " "),
-		Exclude: q.Exclude,
-		MinSize: q.MinSize,
-		MaxSize: q.MaxSize,
-		Type:    q.FileType,
-		Limit:   uint32(limit),
+		Query:      strings.Join(q.Terms, " "),
+		Exclude:    q.Exclude,
+		MinSize:    q.MinSize,
+		MaxSize:    q.MaxSize,
+		Type:       q.FileType,
+		MinSeeders: q.MinSources,
+		Limit:      uint32(limit),
 	}
 }
 
@@ -66,6 +72,8 @@ func (q Query) Key() string {
 	b.WriteString(strconv.FormatUint(q.MinSize, 10))
 	b.WriteByte(0)
 	b.WriteString(strconv.FormatUint(q.MaxSize, 10))
+	b.WriteByte(0)
+	b.WriteString(strconv.FormatUint(uint64(q.MinSources), 10))
 	return b.String()
 }
 
@@ -87,7 +95,14 @@ func (q *Query) walk(expr *storage.SearchExpr) {
 		}
 	case storage.SearchUInt32, storage.SearchUInt64:
 		tag, op, ok := storage.NumericConstraint(expr)
-		if !ok || tag != storage.SearchTagSize {
+		if !ok {
+			return
+		}
+		if tag == storage.SearchTagSources {
+			q.sourcesFloor(op, expr.ValueUint)
+			return
+		}
+		if tag != storage.SearchTagSize {
 			return
 		}
 		// The daemon's min_size and max_size are inclusive, so the strict forms are
@@ -192,5 +207,23 @@ func (q *Query) raiseMin(min uint64) {
 func (q *Query) lowerMax(max uint64) {
 	if max > 0 && (q.MaxSize == 0 || max < q.MaxSize) {
 		q.MaxSize = max
+	}
+}
+
+// sourcesFloor tightens MinSources from a sources constraint. Only a lower bound can
+// be forwarded; an upper bound or NotEqual is left to the post-filter.
+func (q *Query) sourcesFloor(op uint8, v uint64) {
+	var floor uint64
+	switch op {
+	case storage.SearchOpGreater:
+		floor = v + 1
+	case storage.SearchOpGreaterEqual, storage.SearchOpEqual:
+		floor = v
+	default:
+		return
+	}
+	floor = min(floor, math.MaxUint32)
+	if uint32(floor) > q.MinSources {
+		q.MinSources = uint32(floor)
 	}
 }

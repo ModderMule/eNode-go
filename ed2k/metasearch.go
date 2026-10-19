@@ -39,7 +39,13 @@ type MetaSearcher interface {
 // read without a lock by every search. nil leaves searches exactly as they were.
 func (s *ServerRuntime) SetMetaSearcher(m MetaSearcher, advertiseToLegacy bool) {
 	s.meta = m
-	s.metaAdvertiseLegacy = advertiseToLegacy
+	s.metaAdvertiseLegacy.Store(advertiseToLegacy)
+}
+
+// SetMetaAdvertiseLegacy changes metaSearch.advertiseToLegacyClients on a running
+// server; a config reload calls it. The searcher itself stays attached.
+func (s *ServerRuntime) SetMetaAdvertiseLegacy(advertiseToLegacy bool) {
+	s.metaAdvertiseLegacy.Store(advertiseToLegacy)
 }
 
 // AdvertisedFiles is the file total sent in OP_SERVERSTATUS and OP_GLOBSERVSTATRES:
@@ -54,7 +60,7 @@ func (s *ServerRuntime) AdvertisedFiles() int {
 // metaSearchFor reports whether a requester gets pseudo-hash rows (torrent, Usenet, web).
 // capable is whether it announced it can act on them.
 func (s *ServerRuntime) metaSearchFor(capable bool) bool {
-	return s.meta != nil && (s.metaAdvertiseLegacy || capable)
+	return s.meta != nil && (s.metaAdvertiseLegacy.Load() || capable)
 }
 
 // startMetaSearch begins the meta half of a search alongside the storage query, so

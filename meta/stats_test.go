@@ -100,7 +100,7 @@ func TestStatsKeepsFiguresWhenUnreachable(t *testing.T) {
 	cfg := testConfig(t, true, false)
 	cfg.Torrent.CountInServerStatus = true
 	s := searcherFor(cfg, map[string]*fakeDaemon{NetworkTorrent: d})
-	src := s.sources[0]
+	src := s.sources()[0]
 
 	src.refreshInfo(context.Background())
 	before := s.Stats()[0]
@@ -130,7 +130,7 @@ func TestStatsStaleWhenSearchStillAnswers(t *testing.T) {
 		entries: []*metav1.MetaEntry{torrentEntry("stale.mkv", 1)},
 	}
 	s := searcherFor(testConfig(t, true, false), map[string]*fakeDaemon{NetworkTorrent: d})
-	src := s.sources[0]
+	src := s.sources()[0]
 
 	src.refreshInfo(context.Background())
 	_ = s.Search(context.Background(), text("stale"), false, false)
@@ -168,7 +168,7 @@ func TestStatsNotStaleWithoutSearchAnswer(t *testing.T) {
 		searchErr: errors.New("boom"),
 	}
 	s := searcherFor(testConfig(t, true, false), map[string]*fakeDaemon{NetworkTorrent: d})
-	src := s.sources[0]
+	src := s.sources()[0]
 
 	unpolled := s.Stats()[0]
 	src.refreshInfo(context.Background())
@@ -190,7 +190,7 @@ func TestStatsNotStaleWithoutSearchAnswer(t *testing.T) {
 func TestStatsShutdownIsNotAFailure(t *testing.T) {
 	d := &fakeDaemon{info: &metav1.GetInfoResponse{Files: 5}}
 	s := searcherFor(testConfig(t, true, false), map[string]*fakeDaemon{NetworkTorrent: d})
-	src := s.sources[0]
+	src := s.sources()[0]
 	src.refreshInfo(context.Background())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -214,10 +214,10 @@ func TestStatsSearchCounters(t *testing.T) {
 
 	_ = s.Search(context.Background(), text("count"), false, false) // miss, live call, 1 row
 	_ = s.Search(context.Background(), text("count"), false, false) // hit, 1 row
-	s.udpSlots <- struct{}{}
+	s.state.Load().udpSlots <- struct{}{}
 	_ = s.Search(context.Background(), text("count"), true, false) // slots full: skipped, cache hit, 1 row
 	_ = s.Search(context.Background(), text("other"), true, false) // slots full: skipped, nothing cached
-	<-s.udpSlots
+	<-s.state.Load().udpSlots
 
 	d.mu.Lock()
 	d.searchErr = errors.New("boom")
@@ -257,7 +257,7 @@ func TestNetworkUsersFromDaemonInfo(t *testing.T) {
 		NetworkUsersSeenWindow: 2592000, NetworkUsersSeenSince: 1791072000,
 	}}
 	s := searcherFor(testConfig(t, true, false), map[string]*fakeDaemon{NetworkTorrent: d})
-	src := s.sources[0]
+	src := s.sources()[0]
 
 	never := s.NetworkUsers(NetworkTorrent)
 	src.refreshInfo(context.Background())

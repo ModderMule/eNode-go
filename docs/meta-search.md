@@ -194,6 +194,7 @@ metaSearch:
     maxResults: 50
     maxUDPResults: 10
     countInServerStatus: false      # add this network's files to the server status total
+    onlyAvailable: false            # only results that can be downloaded now; see below
     feed:
       enabled: false
       maxRows: 250000
@@ -215,6 +216,41 @@ The server refuses to start in these cases:
 
 It logs a warning at startup when an enabled daemon is not on loopback and no token
 is set.
+
+### Reload
+
+The whole `metaSearch` section is applied by a config reload (the dashboard's
+**Reload config**). A network whose `url`, `token` and `feed` are unchanged keeps its
+feed, its counters and its daemon figures, and the next search uses the new limits. A
+network whose daemon changed gets a new client, and its cached answers are not reused.
+A network turned off is stopped, and one turned on is started. Turning every network
+on, or every network off, needs a restart: that decides whether the server advertises
+`FlagMetaSearch` and whether the Meta API offers a catalogue.
+
+### Only available results
+
+By default a meta search returns every match, including dead torrents and incomplete
+Usenet releases. `onlyAvailable: true` on a network keeps only what can be downloaded
+now. It does the same as the checkbox next to the search box on that daemon's own web
+page:
+
+| Network | Live Search asks for | A row is kept when |
+|---|---|---|
+| torrent | `alive`: a seeder or leecher at the last scrape | seeders or leechers > 0 |
+| kad | `alive`: at least one source (amendment 20) | sources > 0 |
+| web | `alive`: every file had a live link at its last check | a web or link-container row has a mirror alive; a torrent or eD2K file a page offered is left to the daemon |
+| usenet | `min_completion` 100% | seeders (completion, capped at 99) is 99 |
+
+Rows from the feed and from the cache are checked as well, because no request
+filtered them. A Usenet row cannot tell 99.x% from 100%, so a feed row at 99% passes.
+The live answer is exact, and usenet-crawler publishes only complete releases by
+default (`catalog.min_completion: 100`). The setting is off by default and affects
+eD2K searches only: a Meta API caller sends `alive` and `min_completion` itself.
+
+eMule's own **Availability** field (minimum sources) is sent to every daemon as
+`min_seeders`, whatever this setting says. A torrent daemon compares it with
+seeders, a Kad or web daemon with sources or mirrors, and a Usenet daemon ignores it.
+The full search tree is still applied to every row afterwards.
 
 ## Server status and the dashboard
 
