@@ -47,8 +47,10 @@ type MetaAPIConfig struct {
 	MaxMetafileBytes int `yaml:"maxMetafileBytes"`
 
 	RateLimit MetaAPIRateLimitConfig `yaml:"rateLimit"`
-	Search    MetaAPISearchConfig    `yaml:"search"`
-	Accounts  AccountsConfig         `yaml:"accounts"`
+	// GlobalRateLimit caps every request on both listeners, whatever it asks for.
+	GlobalRateLimit MetaAPIGlobalRateLimitConfig `yaml:"globalRateLimit"`
+	Search          MetaAPISearchConfig          `yaml:"search"`
+	Accounts        AccountsConfig               `yaml:"accounts"`
 }
 
 // MetaAPISearchConfig is MetaApi.Search: a paged search of the torrent, Usenet,
@@ -123,6 +125,21 @@ type MetaAPIRateLimitConfig struct {
 	PerAccountPerMinute int `yaml:"perAccountPerMinute"`
 }
 
+// MetaAPIGlobalRateLimitConfig caps every request on the gRPC and HTTP listeners,
+// per client address and, when a request carries a login, per account too: a
+// client holding many hashes cannot fetch more metafiles by mixing calls or by
+// spreading one account over many addresses. It sits on top of the per-call limits.
+// Kept in memory only. GET /healthz and payment webhooks are not counted.
+type MetaAPIGlobalRateLimitConfig struct {
+	// Enabled is *bool, defaults on.
+	Enabled *bool `yaml:"enabled"`
+	// PerMinute is the requests allowed per minute and key; 0 means the default.
+	PerMinute int `yaml:"perMinute"`
+}
+
+// DefaultMetaAPIGlobalRequestsPerMinute is metaApi.globalRateLimit.perMinute when unset.
+const DefaultMetaAPIGlobalRequestsPerMinute = 30
+
 // AccountsConfig is optional username/password authentication. Off means the API is
 // public. On, a user registers on the server's website first; Steps are what that
 // registration takes beyond a username and password (payment, and later others).
@@ -171,6 +188,15 @@ func (c MetaAPIConfig) HTTPListenerEnabled() bool {
 // defaulting to on whenever that listener runs.
 func (c MetaAPIConfig) PublicStatusEnabled() bool {
 	return c.HTTPListenerEnabled() && boolOrDefault(c.HTTP.Status, true)
+}
+
+// GlobalRequestsPerMinute is the global request limit per client address and per
+// account, or 0 when metaApi.globalRateLimit is off.
+func (c MetaAPIConfig) GlobalRequestsPerMinute() int {
+	if !boolOrDefault(c.GlobalRateLimit.Enabled, true) {
+		return 0
+	}
+	return c.GlobalRateLimit.PerMinute
 }
 
 // TLSEnabled reports whether the listeners serve TLS.
@@ -266,6 +292,12 @@ func setMetaAPIDefaults(c *MetaAPIConfig) error {
 	}
 	if c.RateLimit.PerIPPerMinute < 0 || c.RateLimit.PerAccountPerMinute < 0 {
 		return fmt.Errorf("metaApi.rateLimit values must not be negative; 0 disables a limit")
+	}
+	switch {
+	case c.GlobalRateLimit.PerMinute < 0:
+		return fmt.Errorf("metaApi.globalRateLimit.perMinute must not be negative; use enabled: false to turn the limit off")
+	case c.GlobalRateLimit.PerMinute == 0:
+		c.GlobalRateLimit.PerMinute = DefaultMetaAPIGlobalRequestsPerMinute
 	}
 	if err := setMetaAPISearchDefaults(&c.Search); err != nil {
 		return err

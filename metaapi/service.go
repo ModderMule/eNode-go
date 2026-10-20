@@ -46,6 +46,9 @@ type Service struct {
 	maxMetafileBytes  int
 	trustForwardedFor bool
 
+	// requests caps every request, per address and per account, on top of the
+	// per-call limits below.
+	requests limits
 	// metafileLimits cap GetMetaFile; search has its own.
 	metafileLimits limits
 	loginLimit     *ratelimit.Limiter
@@ -77,7 +80,10 @@ type ServiceConfig struct {
 	MaxMetafileBytes    int
 	PerIPPerMinute      int
 	PerAccountPerMinute int
-	TrustForwardedFor   bool
+	// RequestsPerMinute caps every request per client address and per account,
+	// whatever it asks for. 0 disables it.
+	RequestsPerMinute int
+	TrustForwardedFor bool
 	// Search serves MetaApi.Search; nil answers it unimplemented.
 	Search *SearchConfig
 }
@@ -95,6 +101,7 @@ func NewService(cfg ServiceConfig, fetcher *Fetcher, accts *accounts.Service) *S
 		httpURL:           cfg.HTTPURL,
 		maxMetafileBytes:  cfg.MaxMetafileBytes,
 		trustForwardedFor: cfg.TrustForwardedFor,
+		requests:          limits{ip: ratelimit.New(cfg.RequestsPerMinute), account: ratelimit.New(cfg.RequestsPerMinute)},
 		metafileLimits:    limits{ip: ratelimit.New(cfg.PerIPPerMinute), account: ratelimit.New(cfg.PerAccountPerMinute)},
 		loginLimit:        ratelimit.New(20),
 		basicCache:        map[string]basicEntry{},
@@ -114,6 +121,16 @@ func NewService(cfg ServiceConfig, fetcher *Fetcher, accts *accounts.Service) *S
 // Stats returns the counters.
 func (s *Service) Stats() *ServiceStats { return &s.stats }
 
+// AdmitIP takes one request from ip's share of the global limit. A refusal is a
+// resource_exhausted connect error carrying rate_limited. Every RPC calls it; the
+// HTTP listener calls it for its other routes.
+func (s *Service) AdmitIP(ip string) error {
+	if s.requests.ip.Allow(ip) {
+		return nil
+	}
+	return s.rateLimited()
+}
+
 // AuthMode is the server's mode.
 func (s *Service) AuthMode() metav1.AuthMode {
 	if s.accounts == nil {
@@ -123,7 +140,10 @@ func (s *Service) AuthMode() metav1.AuthMode {
 }
 
 // GetCaps describes the server. Never authenticated.
-func (s *Service) GetCaps(context.Context, *metav1.GetCapsRequest) (*metav1.Caps, error) {
+func (s *Service) GetCaps(ctx context.Context, _ *metav1.GetCapsRequest) (*metav1.Caps, error) {
+	if err := s.admitCall(ctx); err != nil {
+		return nil, err
+	}
 	caps := &metav1.Caps{
 		ContractVersion:  ContractVersion,
 		Kinds:            s.fetcher.Kinds(),
@@ -144,6 +164,9 @@ func (s *Service) GetCaps(context.Context, *metav1.GetCapsRequest) (*metav1.Caps
 // GetMetaFile returns the metafile behind a row, once the caller is allowed to.
 func (s *Service) GetMetaFile(ctx context.Context, req *metav1.GetMetaFileRequest) (*metav1.MetaFile, error) {
 	auth, ip := callAuth(ctx, s.trustForwardedFor)
+	if err := s.AdmitIP(ip); err != nil {
+		return nil, err
+	}
 	if _, err := s.Authorize(ctx, auth, ip); err != nil {
 		return nil, err
 	}
@@ -157,6 +180,9 @@ func (s *Service) GetMetaFile(ctx context.Context, req *metav1.GetMetaFileReques
 // GetAuthStatus reports the caller's login state. It never fails for a missing or
 // bad credential; it reports it.
 func (s *Service) GetAuthStatus(ctx context.Context, _ *metav1.GetAuthStatusRequest) (*metav1.AuthStatus, error) {
+	if err := s.admitCall(ctx); err != nil {
+		return nil, err
+	}
 	if s.accounts == nil {
 		return &metav1.AuthStatus{AuthMode: metav1.AuthMode_AUTH_MODE_PUBLIC}, nil
 	}
@@ -188,6 +214,9 @@ func (s *Service) GetAuthStatus(ctx context.Context, _ *metav1.GetAuthStatusRequ
 
 // Login exchanges a username and password for a bearer token.
 func (s *Service) Login(ctx context.Context, req *metav1.LoginRequest) (*metav1.LoginResponse, error) {
+	if err := s.admitCall(ctx); err != nil {
+		return nil, err
+	}
 	if s.accounts == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, "this server's Meta API is public: no login is needed")
 	}
@@ -220,6 +249,9 @@ func (s *Service) Login(ctx context.Context, req *metav1.LoginRequest) (*metav1.
 
 // Logout revokes the bearer token of the call.
 func (s *Service) Logout(ctx context.Context, _ *metav1.LogoutRequest) (*metav1.LogoutResponse, error) {
+	if err := s.admitCall(ctx); err != nil {
+		return nil, err
+	}
 	if s.accounts == nil {
 		return &metav1.LogoutResponse{}, nil
 	}
@@ -239,9 +271,24 @@ func (s *Service) Authorize(ctx context.Context, auth, ip string) (storage.Accou
 	return s.authorize(ctx, auth, ip, s.metafileLimits, s.accounts != nil)
 }
 
-// resolve turns an Authorization header into an account: a bearer session token,
-// or Basic username and password.
+// resolve turns an Authorization header into an account and takes one request
+// from that account's share of the global limit, so one account spread over many
+// addresses is still capped.
 func (s *Service) resolve(ctx context.Context, auth, ip string) (storage.Account, error) {
+	acct, err := s.resolveCredential(ctx, auth, ip)
+	if err != nil {
+		return acct, err
+	}
+	if !s.requests.account.Allow("a:" + acct.Username) {
+		s.stats.RateLimited.Add(1)
+		return storage.Account{}, accounts.NewError(accounts.KindRateLimited, accounts.CodeRateLimited)
+	}
+	return acct, nil
+}
+
+// resolveCredential turns an Authorization header into an account: a bearer
+// session token, or Basic username and password.
+func (s *Service) resolveCredential(ctx context.Context, auth, ip string) (storage.Account, error) {
 	if token, ok := bearer(auth); ok {
 		acct, _, err := s.accounts.Authenticate(ctx, token)
 		if err != nil && accounts.AsError(err).Kind == accounts.KindUnauthenticated {
@@ -432,4 +479,16 @@ func (s *Service) authorize(ctx context.Context, auth, ip string, lim limits, re
 		return storage.Account{}, s.toConnectError(accounts.NewError(accounts.KindRateLimited, accounts.CodeRateLimited))
 	}
 	return acct, nil
+}
+
+// admitCall is AdmitIP for the address of an RPC.
+func (s *Service) admitCall(ctx context.Context) error {
+	_, ip := callAuth(ctx, s.trustForwardedFor)
+	return s.AdmitIP(ip)
+}
+
+// rateLimited counts a refusal and returns it as a connect error.
+func (s *Service) rateLimited() error {
+	s.stats.RateLimited.Add(1)
+	return s.toConnectError(accounts.NewError(accounts.KindRateLimited, accounts.CodeRateLimited))
 }

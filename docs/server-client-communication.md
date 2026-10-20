@@ -392,7 +392,7 @@ endpoint fields are **big-endian**. IPv6 hole-punching is gated by `natTraversal
 the family is IPv4-only. The registry is keyed by user hash and is **login-independent**:
 `natTraversal.serverIndependent` (default on) makes the server pair two registered
 clients regardless of which eD2K server (if any) they are on — cross-server / serverless
-LowID↔LowID — and advertise it via `SRV_TCPFLG_NAT_RENDEZVOUS (0x8000)` plus a
+LowID↔LowID — and advertise it via `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` plus a
 `ST_NAT_PORT (0x9d)` uint16 tag in `OP_SERVERIDENT`; when off, pairing is restricted to
 clients logged into this server (`OP_NAT_FAILED` reason `0x03`). Full protocol + byte-exact
 layouts: [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.md) §9.

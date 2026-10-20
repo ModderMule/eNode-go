@@ -285,7 +285,7 @@ the rest is derived from `ENodeVersionStr` so a release carries it. See §8 and
 **Two further tags ride on our reply when `serverSearch.mode` is `gossip`:**
 `ST_SERVER_SEARCH` (`0xA0`, the base URL of the server-to-server search service) and
 `ST_SERVER_SEARCH_FP` (`0xA1`, its certificate pin), after the tags above. The UDP flags
-word is left alone: setting the contract's `FlagServerSearch` (`0x20000`) makes eserver
+word is left alone: setting the contract's `FlagServerSearch` (`0x80000`, was `0x20000`) makes eserver
 17.14 answer every peer-list request with an empty list, measured in
 `TestGossipPropagatesThroughEserver`, so the bit is reserved and never sent. We read both
 tags from a peer's reply, only once it has passed the admission test, and afresh each time: a

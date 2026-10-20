@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"enode/config"
@@ -138,3 +139,22 @@ func (r Registry) Types() []string {
 
 // StepPath is the site path under which a step's pages live.
 func StepPath(stepID string) string { return "/account/step/" + stepID + "/" }
+
+// StepWebhookPath is the route prefix a step's provider webhooks are posted to,
+// followed by the provider name.
+func StepWebhookPath(stepID string) string { return StepPath(stepID) + "hook/" }
+
+// IsStepWebhook reports whether r is a provider's webhook call to a step,
+// POST /account/step/{id}/hook/{provider}. Those come from the payment provider's
+// servers, not from users, and are exempt from the per-client request limits.
+func IsStepWebhook(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	rest, ok := strings.CutPrefix(r.URL.Path, "/account/step/")
+	if !ok {
+		return false
+	}
+	parts := strings.Split(rest, "/")
+	return len(parts) == 3 && parts[0] != "" && parts[1] == "hook" && parts[2] != ""
+}

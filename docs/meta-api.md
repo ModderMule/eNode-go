@@ -138,6 +138,35 @@ Rate limits: `rateLimit.perIPPerMinute` for every download, and
 `perAccountPerMinute` per account when accounts are on. Behind a reverse proxy, set
 `trustForwardedFor` so the limits see real client addresses.
 
+### Global rate limit
+
+`metaApi.globalRateLimit` caps **every** request on both listeners, whatever it
+asks for, so a client holding a long list of torrent or eD2K hashes cannot fetch
+more files per minute by mixing calls:
+
+```yaml
+metaApi:
+  globalRateLimit:
+    enabled: true   # default on
+    perMinute: 30   # default 30
+```
+
+- Counted: every MetaApi and AccountApi call (gRPC, gRPC-Web, Connect), `GET /caps`,
+  `GET /status`, `GET /meta/v1/{hash}` and the `/account` website. One request costs
+  one token.
+- Keys: the client address, and additionally the account whenever a request carries
+  a login (bearer token or Basic). One account spread over many addresses is
+  therefore still held to `perMinute`. The website is limited by address only.
+- Not counted: `GET /healthz` (supervisors) and payment webhooks
+  (`POST /account/step/{id}/hook/{provider}`, sent by the provider, not a user).
+- Refusal: `resource_exhausted` with MsgCode `ratelimit.exceeded` on RPCs, HTTP 429
+  with the same JSON body on the plain routes. Refusals count in the dashboard's
+  rate-limited figure.
+- It sits on top of the per-call limits (`rateLimit`, `search.rateLimit`, login and
+  `/status` limits); a request must pass both.
+- Token buckets live in memory only: a restart forgets them, and idle buckets are
+  dropped after two minutes. Changing the block needs a restart.
+
 ## Searching the catalogues
 
 `MetaApi.Search(SearchRequest)` searches the catalogue daemons directly: the whole

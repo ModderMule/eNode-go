@@ -100,10 +100,13 @@ var networkOrder = []string{networkTorrent, networkUsenet, networkServers, netwo
 // Search pages through the torrent, Usenet, server and Kad catalogues. See the
 // contract's MetaApi.Search for the paging rules.
 func (s *Service) Search(ctx context.Context, req *metav1.SearchRequest) (*metav1.SearchResponse, error) {
+	auth, ip := callAuth(ctx, s.trustForwardedFor)
+	if err := s.AdmitIP(ip); err != nil {
+		return nil, err
+	}
 	if s.search == nil {
 		return nil, s.toConnectError(&FetchError{Code: connect.CodeUnimplemented, MsgCode: CodeSearchDisabled})
 	}
-	auth, ip := callAuth(ctx, s.trustForwardedFor)
 	required := s.accounts != nil && s.search.cfg.RequireAccount
 	if _, err := s.authorize(ctx, auth, ip, s.search.limits, required); err != nil {
 		return nil, err

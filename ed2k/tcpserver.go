@@ -24,7 +24,7 @@ type TCPServerConfig struct {
 	// advertisement — a dual-stack server is exactly the one that supports IPv6.
 	// False reproduces the original IPv4-only behaviour exactly.
 	DualStack bool
-	// NatRendezvous advertises FlagNatRendezvous (0x8000): this server offers
+	// NatRendezvous advertises FlagNatRendezvous (0x40000): this server offers
 	// server-independent (cross-server / serverless) PR_NAT hole-punch rendezvous.
 	NatRendezvous bool
 	// Gate holds the accept loop while closed; nil accepts from the start. See Gate.

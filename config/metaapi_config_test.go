@@ -53,6 +53,7 @@ func TestMetaAPIValidation(t *testing.T) {
 		{"bad step id", "accounts:\n  steps:\n    - {id: 'Pay Now', type: payment}", "is invalid"},
 		{"step without type", "accounts:\n  steps:\n    - {id: pay}", "has no type"},
 		{"negative rate", "rateLimit: {perIPPerMinute: -1}", "negative"},
+		{"negative global rate", "globalRateLimit: {perMinute: -1}", "metaApi.globalRateLimit.perMinute"},
 		{"negative search rate", "search: {rateLimit: {perAccountPerMinute: -1}}", "metaApi.search.rateLimit"},
 		{"search limit too high", "search: {maxLimit: 501}", "metaApi.search.maxLimit"},
 		{"search window too deep", "search: {window: 20000}", "metaApi.search.window"},
@@ -165,6 +166,36 @@ func TestShippedConfigMetaAPI(t *testing.T) {
 	if c.Search.Enabled == nil || !*c.Search.Enabled || c.Search.RequireAccount == nil || !*c.Search.RequireAccount ||
 		c.Search.RateLimit.PerIPPerMinute != 30 {
 		t.Fatalf("the shipped search block: %+v", c.Search)
+	}
+	if c.GlobalRateLimit.Enabled == nil || !*c.GlobalRateLimit.Enabled || c.GlobalRequestsPerMinute() != 30 {
+		t.Fatalf("the shipped globalRateLimit block: %+v", c.GlobalRateLimit)
+	}
+}
+
+func TestMetaAPIGlobalRateLimit(t *testing.T) {
+	cases := []struct {
+		yaml string
+		want int
+	}{
+		{"enabled: true", DefaultMetaAPIGlobalRequestsPerMinute},
+		{"globalRateLimit: {enabled: true}", DefaultMetaAPIGlobalRequestsPerMinute},
+		{"globalRateLimit: {perMinute: 10}", 10},
+		{"globalRateLimit: {enabled: false, perMinute: 10}", 0},
+	}
+	for _, tc := range cases {
+		var c MetaAPIConfig
+		if err := yaml.Unmarshal([]byte(tc.yaml), &c); err != nil {
+			t.Fatalf("%q: yaml: %v", tc.yaml, err)
+		}
+		c, err := ApplyMetaAPIDefaults(c)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.yaml, err)
+		}
+		got := c.GlobalRequestsPerMinute()
+		t.Logf("input: %q output: %d requests/min", tc.yaml, got)
+		if got != tc.want {
+			t.Errorf("%q: got %d, want %d", tc.yaml, got, tc.want)
+		}
 	}
 }
 

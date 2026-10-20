@@ -368,14 +368,16 @@ const (
 	// FlagNatRendezvous advertises that this server offers server-independent
 	// (cross-server / serverless) PR_NAT hole-punch rendezvous — it will pair two
 	// registered clients regardless of which eD2K server (if any) they are logged
-	// into. 0x8000 is the next clean bit above FlagIPv6 (0x4000); eMule's SrvTcpFlag
-	// word tops out at TCPOBFUSCATION 0x400, so nothing collides. Clients ignore
-	// unknown bits. Advertised only when natTraversal.serverIndependent is on. See
-	// docs/ipv6-client-implementation-spec.md §9.
-	FlagNatRendezvous uint32 = 0x8000
+	// into. Was 0x8000 until 2026-10-20; moved because ed2k-server (0.9.83+) sets
+	// 0x8000 for "accepts OP_IPV6_UPDATE (0x63)" and aMule reads it that way. Taken
+	// on the public network: 0x05DD, 0x1000 (Lugdunum NAT callback), 0x4000 (IPv6),
+	// 0x8000 (ed2k-server IPv6 update), 0x10000 (meta search), 0x20000 (ed2k-server
+	// LowID hole punch). 0x40000 is the next clean bit. Clients ignore unknown bits. Advertised only when
+	// natTraversal.serverIndependent is on. See docs/ipv6-client-implementation-spec.md §9.
+	FlagNatRendezvous uint32 = 0x40000
 	// FlagMetaSearch advertises that search answers may carry torrent/Usenet/web rows
 	// (FT_META_* tags, docs/meta-search.md). 0x10000 is the next clean bit above
-	// FlagNatRendezvous; clients ignore unknown bits. Set on both the TCP and UDP word
+	// 0x8000; clients ignore unknown bits. Set on both the TCP and UDP word
 	// when a catalogue daemon is configured.
 	FlagMetaSearch uint32 = 0x10000
 	// FlagServerSearch is the contract's bit (enodemeta/tags) for "this server offers
@@ -386,7 +388,9 @@ const (
 	// peer-list request with an empty list from then on, so the peer and everything
 	// behind it drop out of the mesh. With the bit clear and the ST_SERVER_SEARCH tags
 	// still sent, the same case passes. The tags alone are the advertisement.
-	FlagServerSearch uint32 = 0x20000
+	// Was 0x20000 until 2026-10-20; moved off ed2k-server's LowID hole-punch bit and
+	// above FlagNatRendezvous (0x40000).
+	FlagServerSearch uint32 = 0x80000
 	// SrvCapMetaSearch is the client's CT_SERVER_FLAGS login bit asking for meta rows;
 	// SrvCapUDPMetaSearch is the same request in OP_GLOBSEARCHREQ3's
 	// CT_SERVER_UDPSEARCH_FLAGS tag (0x0e, decoded under TagSearchTree's name).

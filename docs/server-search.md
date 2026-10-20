@@ -140,7 +140,7 @@ list by id and skip one they do not know (`srchybrid/UDPSocket.cpp`, eMuleQt
 eserver still reads 17.7 or above, and the interop suite passes against eserver
 17.14 with the tags present.
 
-**No flag bit is sent.** The contract reserves `FlagServerSearch` (`0x20000`)
+**No flag bit is sent.** The contract reserves `FlagServerSearch` (`0x80000`, was `0x20000`)
 for the UDP flags word, and eNode-go never sets it: measured against eserver
 17.14, a peer that sets that bit is still held and pinged, but eserver answers
 every peer-list request with an empty list from then on, so the peer drops out

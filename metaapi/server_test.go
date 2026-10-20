@@ -63,6 +63,17 @@ type fixture struct {
 // MetaApi.Search when search is given.
 func start(t *testing.T, withAccounts, httpAPI bool, perIP int, search ...*SearchConfig) *fixture {
 	t.Helper()
+	svcCfg := ServiceConfig{MaxMetafileBytes: 1 << 20, PerIPPerMinute: perIP}
+	if len(search) > 0 {
+		svcCfg.Search = search[0]
+	}
+	return startWith(t, withAccounts, httpAPI, svcCfg)
+}
+
+// startWith is start with the whole ServiceConfig given; the server trusts
+// X-Forwarded-For when the service does.
+func startWith(t *testing.T, withAccounts, httpAPI bool, svcCfg ServiceConfig) *fixture {
+	t.Helper()
 	file, hash := testTorrent(t, "Served.Release.2026")
 	src := newFakeSource()
 	src.files["cat-7"] = &metav1.MetaFile{Content: file}
@@ -85,13 +96,10 @@ func start(t *testing.T, withAccounts, httpAPI bool, perIP int, search ...*Searc
 		fx.accts = svc
 		web = accounts.NewWeb(svc, accounts.PortalConfig{ServerName: "t"})
 	}
-	cfg := ServerConfig{GRPCListen: "127.0.0.1:0", HTTPAPI: httpAPI, MaxMetafileBytes: 1 << 20}
+	cfg := ServerConfig{GRPCListen: "127.0.0.1:0", HTTPAPI: httpAPI, MaxMetafileBytes: 1 << 20,
+		TrustForwardedFor: svcCfg.TrustForwardedFor}
 	if httpAPI || withAccounts {
 		cfg.HTTPListen = "127.0.0.1:0"
-	}
-	svcCfg := ServiceConfig{MaxMetafileBytes: 1 << 20, PerIPPerMinute: perIP}
-	if len(search) > 0 {
-		svcCfg.Search = search[0]
 	}
 	fx.svc = NewService(svcCfg, fetcher, fx.accts)
 	srv, err := NewServer(cfg, fx.svc, web)

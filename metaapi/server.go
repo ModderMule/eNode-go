@@ -89,6 +89,9 @@ type Server struct {
 	statusLimit *ratelimit.Limiter
 }
 
+// rpcPathPrefix starts the path of every MetaApi and AccountApi call.
+const rpcPathPrefix = "/enode.meta.v1."
+
 // grpcContentTypes are what the gRPC listener accepts. The Connect protocol and its
 // JSON form belong on the HTTP listener, which the operator may keep off.
 var grpcContentTypes = connectsrv.GRPCContentTypes
@@ -107,7 +110,7 @@ func NewServer(cfg ServerConfig, svc *Service, web *accounts.Web) (*Server, erro
 		s.grpc = s.newHTTPServer(cfg.GRPCListen, onlyContentTypes(s.connectHandler(), grpcContentTypes))
 	}
 	if cfg.HTTPListen != "" {
-		s.http = s.newHTTPServer(cfg.HTTPListen, s.httpHandler())
+		s.http = s.newHTTPServer(cfg.HTTPListen, s.limitRequests(s.httpHandler()))
 	}
 	return s, nil
 }
@@ -259,6 +262,25 @@ func (s *Server) handleRawMetaFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ToLower(r.PathValue("hash"))+ext+`"`)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = w.Write(mf.GetContent())
+}
+
+// limitRequests applies the global request limit to the HTTP listener's routes
+// other than the RPCs, which the Service counts itself (they arrive on the gRPC
+// listener too). GET /healthz and payment webhooks are not counted: a supervisor
+// and a payment provider are not clients.
+func (s *Server) limitRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		exempt := strings.HasPrefix(r.URL.Path, rpcPathPrefix) ||
+			(r.Method == http.MethodGet && r.URL.Path == "/healthz") ||
+			accounts.IsStepWebhook(r)
+		if !exempt {
+			if err := s.svc.AdmitIP(ratelimit.ClientIP(r, s.cfg.TrustForwardedFor)); err != nil {
+				writeHTTPError(w, err)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) newHTTPServer(addr string, h http.Handler) *http.Server {

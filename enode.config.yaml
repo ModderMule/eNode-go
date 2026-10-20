@@ -443,6 +443,13 @@ metaApi:
   rateLimit:
     perIPPerMinute: 30             # metafile downloads per client address; 0 = unlimited
     perAccountPerMinute: 120       # per logged-in account; 0 = unlimited
+  # Global limit on every request to both listeners (gRPC and HTTP: API calls, /caps,
+  # /status, /meta/v1, the account website), per client address and, with a login,
+  # per account too. Applies on top of the limits above. In memory only. GET /healthz
+  # and payment webhooks are not counted.
+  globalRateLimit:
+    enabled: true
+    perMinute: 30                  # requests per client address and per account
   # MetaApi.Search: paged search of the torrent, Usenet, Kad and web catalogues (the
   # metaSearch networks with liveSearch on). A request picks one network, or all of
   # them (default).

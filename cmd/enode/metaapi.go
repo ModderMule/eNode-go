@@ -41,6 +41,8 @@ type metaAPIRuntime struct {
 	publicStatus bool
 	// tls is whether the listeners serve TLS, for the logged local URLs.
 	tls bool
+	// requestsPerMinute is the global request limit, 0 when off, for the log.
+	requestsPerMinute int
 }
 
 // buildMetaAPI builds the Meta API when metaApi.enabled is on, or returns nil.
@@ -87,7 +89,8 @@ func buildMetaAPI(ctx context.Context, cfg config.Config, engine, servedFiles st
 		time.Duration(c.MetafileCache.TTLSeconds)*time.Second, time.Duration(c.MetafileCache.NegativeTTLSeconds)*time.Second)
 
 	tls := c.TLSEnabled()
-	rt := &metaAPIRuntime{fetcher: fetcher, accounts: accts, publicStatus: c.PublicStatusEnabled(), tls: tls}
+	rt := &metaAPIRuntime{fetcher: fetcher, accounts: accts, publicStatus: c.PublicStatusEnabled(), tls: tls,
+		requestsPerMinute: c.GlobalRequestsPerMinute()}
 	if c.GRPCEnabled() {
 		rt.grpcURL = metaAPIURL(c.AdvertiseURL, c.GRPC.Listen, tls, advertisedIP)
 	}
@@ -99,6 +102,7 @@ func buildMetaAPI(ctx context.Context, cfg config.Config, engine, servedFiles st
 		MaxMetafileBytes:    c.MaxMetafileBytes,
 		PerIPPerMinute:      c.RateLimit.PerIPPerMinute,
 		PerAccountPerMinute: c.RateLimit.PerAccountPerMinute,
+		RequestsPerMinute:   c.GlobalRequestsPerMinute(),
 		TrustForwardedFor:   c.TrustForwardedFor,
 	}
 	rt.searchMode = "off"
@@ -202,7 +206,11 @@ func (rt *metaAPIRuntime) start(ctx context.Context) (func(), error) {
 	if rt.accounts != nil {
 		mode = fmt.Sprintf("accounts (%d registration steps, register at %s)", len(rt.accounts.Steps()), rt.accounts.RegistrationURL())
 	}
-	logging.Infof("meta api: grpc=%s http=%s mode=%s", orOff(rt.grpcURL), orOff(rt.httpURL), mode)
+	limit := "off"
+	if rt.requestsPerMinute > 0 {
+		limit = fmt.Sprintf("%d/min per address and account", rt.requestsPerMinute)
+	}
+	logging.Infof("meta api: grpc=%s http=%s mode=%s request limit=%s", orOff(rt.grpcURL), orOff(rt.httpURL), mode, limit)
 	if addr := rt.server.HTTPAddr(); addr != nil {
 		base := metaAPILocalURL(addr, rt.tls)
 		status := "off"

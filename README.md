@@ -32,7 +32,7 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   and a v6 candidate per client, v6 preferred); gated by `natTraversal.ipv6` (default
   on). The registry is login-independent, so `natTraversal.serverIndependent` (default
   on) pairs clients across **different servers or no server** — cross-server /
-  serverless LowID↔LowID — advertised via `SRV_TCPFLG_NAT_RENDEZVOUS (0x8000)` + an
+  serverless LowID↔LowID — advertised via `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` + an
   `OP_SERVERIDENT` NAT-port tag. See
   [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md) §9.
 - Files larger than 4 GiB

@@ -31,7 +31,7 @@ to the pre-IPv6 server. IPv6 is entirely additive and opt-in.
 | `OP_CALLBACKREQUESTED_IPV6` | `0x26` | server→client, TCP |
 | `OP_NAT_REGISTER_IPV6` | `0xEC` (under `PR_NAT 0xF1`) | server→client, UDP |
 | `OP_NAT_SYNC_IPV6` | `0xED` (under `PR_NAT 0xF1`) | server→client, UDP |
-| `SRV_TCPFLG_NAT_RENDEZVOUS` | `0x00008000` | `OP_IDCHANGE` / `OP_SERVERIDENT` flags word |
+| `SRV_TCPFLG_NAT_RENDEZVOUS` | `0x00040000` | `OP_IDCHANGE` / `OP_SERVERIDENT` flags word |
 | `ST_NAT_PORT` (server NAT UDP port) | tag `0x9D`, type `TAGTYPE_UINT16` | `OP_SERVERIDENT` (server→client) |
 
 **Byte order:** every 16-byte IPv6 field is the raw `in6_addr` in network byte
@@ -132,7 +132,7 @@ A dual-stack client with a routable IPv4 still gets a HighID as usual.
   agnostically among the ident tags; unknown tags before/after it must be
   consumed by type and skipped (a `TAGTYPE_HASH` tag is 16 bytes). This is
   informational — you still reach the server on the same address you connected to.
-- **NAT-rendezvous capability.** `SRV_TCPFLG_NAT_RENDEZVOUS (0x8000)` in the flags
+- **NAT-rendezvous capability.** `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` (was `0x8000`, which ed2k-server uses for `OP_IPV6_UPDATE`) in the flags
   word signals the server offers **server-independent** (cross-server / serverless)
   PR_NAT hole-punch rendezvous (§9): it will pair two registered clients regardless
   of which eD2K server, if any, they are logged into. When set, `OP_SERVERIDENT` also
@@ -549,7 +549,7 @@ servers or none** rendezvous through a common server that runs `PR_NAT`.
 
 **How a client uses it (client side — the discovery half):**
 
-1. **Detect** a rendezvous-capable server: `SRV_TCPFLG_NAT_RENDEZVOUS (0x8000)` in its
+1. **Detect** a rendezvous-capable server: `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` in its
    flags word, and read `ST_NAT_PORT (0x9D)` from `OP_SERVERIDENT` for the UDP port
    (fall back to `2004` if absent). This may be a server you are logged into, or any
    public server you choose as your rendezvous **R**.

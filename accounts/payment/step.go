@@ -252,7 +252,7 @@ func (s *Step) Routes(mux *http.ServeMux, portal accounts.Portal) {
 	mux.HandleFunc("POST "+base+"checkout", func(w http.ResponseWriter, r *http.Request) { s.handleCheckout(w, r, portal) })
 	mux.HandleFunc("GET "+base+"return", func(w http.ResponseWriter, r *http.Request) { s.handleReturn(w, r, portal) })
 	mux.HandleFunc("POST "+base+"refresh", func(w http.ResponseWriter, r *http.Request) { s.handleRefresh(w, r, portal) })
-	mux.HandleFunc("POST "+base+"hook/{provider}", s.handleWebhook)
+	mux.HandleFunc("POST "+accounts.StepWebhookPath(s.id)+"{provider}", s.handleWebhook)
 }
 
 // Reconcile re-fetches one payment by its provider id and grants it if paid. It is

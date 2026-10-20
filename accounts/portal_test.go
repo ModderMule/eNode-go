@@ -163,3 +163,25 @@ func TestPortalRejectsMismatchedPasswordsAndNoticeInjection(t *testing.T) {
 		t.Fatalf("an unknown notice code was reflected")
 	}
 }
+
+func TestIsStepWebhook(t *testing.T) {
+	cases := []struct {
+		method, path string
+		want         bool
+	}{
+		{http.MethodPost, StepWebhookPath("payment") + "woocommerce", true},
+		{http.MethodGet, StepWebhookPath("payment") + "woocommerce", false},
+		{http.MethodPost, StepPath("payment") + "checkout", false},
+		{http.MethodPost, "/account/step//hook/woocommerce", false},
+		{http.MethodPost, StepWebhookPath("payment"), false},
+		{http.MethodPost, "/account/login", false},
+	}
+	for _, tc := range cases {
+		r := httptest.NewRequest(tc.method, tc.path, nil)
+		got := IsStepWebhook(r)
+		t.Logf("input: %s %s output: %v", tc.method, tc.path, got)
+		if got != tc.want {
+			t.Errorf("%s %s: got %v, want %v", tc.method, tc.path, got, tc.want)
+		}
+	}
+}

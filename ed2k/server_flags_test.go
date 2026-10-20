@@ -33,17 +33,21 @@ func TestBuildTCPFlagsSupportCryptDrivesObfuscation(t *testing.T) {
 }
 
 func TestBuildTCPFlagsNatRendezvous(t *testing.T) {
-	// FlagNatRendezvous (0x8000) advertises server-independent PR_NAT rendezvous and
-	// is orthogonal to the other bits.
+	// FlagNatRendezvous (0x40000) advertises server-independent PR_NAT rendezvous and
+	// is orthogonal to the other bits. It must stay off ed2k-server's 0x8000
+	// (accepts OP_IPV6_UPDATE) and 0x20000 (LowID hole punch), and off FlagServerSearch.
+	if FlagNatRendezvous == 0x8000 || FlagNatRendezvous == 0x20000 || FlagNatRendezvous == FlagServerSearch {
+		t.Fatalf("FlagNatRendezvous 0x%05x collides with an ed2k-server flag", FlagNatRendezvous)
+	}
 	on := BuildTCPFlags(TCPServerConfig{NatRendezvous: true})
 	if on&FlagNatRendezvous == 0 {
-		t.Fatalf("NatRendezvous bit must be set: 0x%04x", on)
+		t.Fatalf("NatRendezvous bit must be set: 0x%05x", on)
 	}
 	off := BuildTCPFlags(TCPServerConfig{NatRendezvous: false})
 	if off&FlagNatRendezvous != 0 {
-		t.Fatalf("NatRendezvous bit must be clear when off: 0x%04x", off)
+		t.Fatalf("NatRendezvous bit must be clear when off: 0x%05x", off)
 	}
-	t.Logf("input: NatRendezvous on/off; output flags on=0x%04x off=0x%04x", on, off)
+	t.Logf("input: NatRendezvous on/off; output flags on=0x%05x off=0x%05x", on, off)
 }
 
 func TestBuildUDPFlags(t *testing.T) {
