@@ -123,6 +123,11 @@ tr.sel{outline:2px solid var(--accent);outline-offset:-2px}
 <table id="metaApiTable"></table>
 </section>
 
+<section id="ed3kSection" hidden>
+<h2>ed3k index node</h2>
+<table id="ed3kTable"></table>
+</section>
+
 <section id="serverSearchSection" hidden>
 <h2>Server search</h2>
 <table id="serverSearchTable"></table>
@@ -388,6 +393,34 @@ function renderServerSearch(d){
     var v = tr.insertCell(); v.className = 'v'; v.textContent = parts.join(' · ');
   });
 }
+// renderEd3k fills the ed3k index node table; hidden when the node is off.
+function renderEd3k(d){
+  var a = d.ed3k;
+  var section = document.getElementById('ed3kSection');
+  if(!section){ return; }
+  section.hidden = !a;
+  if(!a){ return; }
+  var rows = [
+    ['Node', a.nodeId + (a.network ? ' (named network)' : '')],
+    ['Advertised', a.link || 'not advertised'],
+    ['Connections', num(a.connections) + ' open · ' + num(a.accepted) + ' accepted · ' + num(a.refused) + ' refused · '
+      + num(a.exchanges) + ' exchanges'],
+    ['Requests', num(a.searches) + ' searches · ' + num(a.stores) + ' stores · ' + num(a.busy) + ' busy · '
+      + num(a.malformed) + ' malformed'],
+    ['Records', num(a.sources) + ' sources (' + num(a.kept) + ' kept for live connections) · ' + num(a.keywords)
+      + ' keywords · ' + num(a.notes) + ' notes'],
+    ['Relay', num(a.relayLeaves) + ' reservations · ' + num(a.punches) + ' punches forwarded · ' + num(a.punchFailed) + ' failed'],
+    ['Datagrams', num(a.obfsDropped) + ' not ed3k · ' + num(a.probes) + ' probes ignored'],
+    ['eD2K bridge', a.bridge ? num(a.bridgeListed) + ' sources listed' : 'off']
+  ];
+  var table = document.getElementById('ed3kTable');
+  table.replaceChildren();
+  rows.forEach(function(r){
+    var tr = table.insertRow();
+    var k = tr.insertCell(); k.className = 'k'; k.textContent = r[0];
+    var v = tr.insertCell(); v.className = 'v'; v.textContent = r[1];
+  });
+}
 function setStatus(text, cls){
   var el = document.getElementById('status');
   if(el){ el.textContent = text; el.className = 'badge ' + cls; }
@@ -427,6 +460,7 @@ async function refresh(){
     renderMeta(d);
     renderMetaAPI(d);
     renderServerSearch(d);
+    renderEd3k(d);
     renderUpdate(d.update);
     setText('updated', 'updated ' + new Date(d.time).toLocaleTimeString());
     setStatus('live', 'ok');

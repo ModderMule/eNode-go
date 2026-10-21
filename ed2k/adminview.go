@@ -1,6 +1,7 @@
 package ed2k
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"strings"
@@ -38,6 +39,8 @@ type ClientView struct {
 	Nick          string
 	Software      string
 	ConnectedAt   time.Time
+	// Ed3kID is the ed3k node ID of the CT_ED3K login tag, "" when none was sent.
+	Ed3kID string
 }
 
 // PeerView is one gossip peer as the admin surface shows it. It carries nothing a
@@ -184,6 +187,10 @@ func (c *tcpClient) view() ClientView {
 	info := c.snapshotInfo()
 	c.infoMu.RLock()
 	nick, software, v6Capable := c.nick, softwareWithMod(c.software, c.mod), c.ipv6Capable
+	ed3kID := ""
+	if len(c.ed3kID) == 16 {
+		ed3kID = hex.EncodeToString(c.ed3kID)
+	}
 	c.infoMu.RUnlock()
 
 	view := ClientView{
@@ -197,6 +204,7 @@ func (c *tcpClient) view() ClientView {
 		Nick:          nick,
 		Software:      software,
 		ConnectedAt:   c.connectedAt,
+		Ed3kID:        ed3kID,
 	}
 	copy(view.Hash[:], info.Hash)
 	if len(info.IPv6) == net.IPv6len {

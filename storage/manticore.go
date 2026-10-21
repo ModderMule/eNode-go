@@ -136,6 +136,9 @@ type ManticoreEngine struct {
 	// passStarted (unix nanoseconds; 0 when no pass runs).
 	passWritten atomic.Uint64
 	passStarted atomic.Int64
+	// ed3k is the mirror of the ed3k keyword records (ed3k_manticore.go).
+	ed3k ed3kManticore
+
 	// statusMu guards lastPass and lastError, which only Status reads.
 	statusMu    sync.Mutex
 	lastPass    ManticorePass

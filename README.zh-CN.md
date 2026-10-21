@@ -44,6 +44,11 @@
   而不会覆盖他人的记录。缺少有效大小的记录会被直接拒绝，因为它永远无法被提供下载。
   详见 [`docs/server-client-communication.md`](docs/server-client-communication.md#file-identity)。
 - eD2K 搜索中的 Torrent、Usenet、Kad 与网页结果：每次 TCP 与 UDP 搜索的关键词会通过 `MetaIngest` 服务（兼容 gRPC，基于共享契约 [`enodemeta`](https://github.com/ModderMule/enodemeta)）转发给 torrent-crawler / usenet-crawler / kademlia-crawler / web-crawler 守护进程，其结果合并进同一个回复中。Torrent、Usenet 与网页条目使用伪哈希与 `FT_META_*` 标签，Kad 条目是真实的 eD2K 文件；所有条目都在文件名前加上前缀（`[torrent] ` / `[usenet] ` / `[kad] ` / `[web] `），便于普通客户端区分。每个网络、其订阅源以及结果缓存均为可选项，默认关闭。详见 [`docs/meta-search.md`](docs/meta-search.md)。
+- ed3k 索引节点（可选，默认关闭）：服务器同时作为 ed3k（eD2K 的 QUIC 后继网络）的索引节点运行，
+  不承担 Kad 路由职责。它把每个文件的来源、关键词与评论保存在所配置的存储引擎中
+  （memory、MySQL、MongoDB，关键词搜索可用 Manticore），中转打洞请求，并通过 `OP_SERVERIDENT`
+  （`ST_ED3K`）向 eD2K 客户端公布自己。可选的桥接功能会把同时支持 eD2K 的 ed3k 节点列为 eD2K 来源。
+  详见 [`docs/ed3k-index-node.md`](docs/ed3k-index-node.md)。
 - 易于扩展多种存储引擎
 
 ## NAT Traversal 传输截图
@@ -121,6 +126,32 @@ udp:
 files:                       # 每个客户端的发布上限（见 docs/server-client-communication.md）
   softLimit: 10000           # 每个客户端的不同文件数；超出的新文件被忽略，并向客户端发送一次警告；0 表示不限制
   hardLimit: 20000           # 每个 OP_OFFERFILES 数据包的文件数；达到后告知客户端原因并断开连接；0 表示不限制
+
+ed3k:                        # ed3k 索引节点（见 docs/ed3k-index-node.md）；默认关闭
+  enabled: false
+  port: 0                    # UDP 端口；0 = 与 tcp.port 相同的端口号（ed3k 的端口规则）
+  listen: ""                 # 绑定地址；"" = 双栈所有地址
+  advertise: ""              # 公布链接中的 IPv4；"" = 服务器公布的 IP
+  advertiseIPv6: ""          # 链接中的 IPv6；"" = ipv6.dynIp6（若为具体地址）
+  keyFile: "data/ed3k.key"   # Ed25519 节点密钥，首次启动时生成；节点 ID 由它派生
+  network: ""                # 测试网络或封闭网络的名称；"" = 公共 ed3k 网络
+  nick: ""                   # 节点 Hello 中发送的昵称
+  requestsPerMinute: 120     # 每个地址、每种记录、搜索/存储每分钟的 KadRequest 数；超出则 BUSY
+  limits:
+    maxConnections: 50000    # 连接总数
+    connectionsPerHost: 256  # 每个 IPv4 /32 或 IPv6 /64
+    connectionsPerSite: 1024 # 每个 /24 或 /48
+    newPerHostPerMinute: 120 # 每个地址每分钟的新连接数
+    relayLeaves: 1024        # 打洞中转预留总数
+    relayPerHost: 8
+    relayPerSite: 32
+    recordsPerHost: 50000    # 一个地址在所有文件上可存储的记录数
+    recordsPerSite: 200000
+    maxRecords: 50000000     # 存储中的记录总数；超出则 BUSY
+  bridge:
+    enabled: false           # 将通过 TCP 测试的 ed3k 节点列为 eD2K 来源（会发起外连 TCP）
+    maxPerAnswer: 20         # 每个 OP_FOUNDSOURCES 最多加入的 ed3k 来源
+    tcpTestMinutes: 30       # TCP 测试结果的保留时间
 
 natTraversal:
   enabled: true              # 是否启用 NAT 穿透服务

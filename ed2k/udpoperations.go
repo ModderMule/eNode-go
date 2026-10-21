@@ -28,6 +28,9 @@ type UDPConfig struct {
 	ObservedIP net.IP
 	// ServerSearch is appended to the extended OP_SERVER_DESC_RES when its URL is set.
 	ServerSearch ServerSearchAdvert
+	// Ed3k is the ed3k:node link of the server's index node, appended to the extended
+	// OP_SERVER_DESC_RES as ST_ED3K (TagEd3k) when set.
+	Ed3k string
 }
 
 // ServerSearchAdvert is where a server's server-to-server search service is: the
@@ -231,6 +234,9 @@ func BuildServerDescResPacket(challenge uint32, cfg UDPConfig) (*Buffer, error) 
 		if cfg.ServerSearch.Fingerprint != "" {
 			tags = append(tags, Tag{Type: TypeString, Code: TagServerSearchFingerprint, Data: cfg.ServerSearch.Fingerprint})
 		}
+	}
+	if cfg.Ed3k != "" {
+		tags = append(tags, Tag{Type: TypeString, Code: TagEd3k, Data: cfg.Ed3k})
 	}
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpServerDescRes},

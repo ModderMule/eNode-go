@@ -551,6 +551,8 @@ func tagName(code uint8) string {
 		return "metaapiver"
 	case TagMetaAPIFingerprint:
 		return "metaapifp"
+	case TagEd3k:
+		return "ed3k"
 	default:
 		return fmt.Sprintf("0x%x", code)
 	}

@@ -35,6 +35,8 @@ type bootDerived struct {
 	// serverSearch is advertised to other servers in gossip mode; a zero value
 	// advertises nothing and leaves FlagServerSearch clear.
 	serverSearch ed2k.ServerSearchAdvert
+	// ed3k is the ed3k:node link of the index node (ST_ED3K); "" when ed3k is off.
+	ed3k string
 }
 
 // reloader applies config reloads. One exists per process; run() creates it once every
@@ -330,6 +332,7 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		ServerIPv6:        d.serverIPv6,
 		NatRendezvousPort: natRendezvousPort,
 		MetaAPI:           d.metaAPI,
+		Ed3k:              d.ed3k,
 		SoftFileLimit:     cfg.Files.SoftLimitOrDefault(),
 		HardFileLimit:     cfg.Files.HardLimitOrDefault(),
 		CounterCacheTTL:   time.Duration(cfg.Storage.CountCacheSecondsOrDefault()) * time.Second,
@@ -361,6 +364,7 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 			MaxIntervalStddevMs:   cfg.UDP.BotDetection.MaxIntervalStddevMs,
 		},
 		ServerSearch: d.serverSearch,
+		Ed3k:         d.ed3k,
 	}
 	return tcp, udp
 }

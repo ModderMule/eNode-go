@@ -29,6 +29,8 @@ var secretKeys = []string{
 	"metaApi.tls.keyFile",
 	"serverSearch.tls.keyFile",
 	"serverSearch.peers.token",
+	"ed3k.keyFile",
+	"ed3k.network",
 	"storage.mysql.host",
 	"storage.mysql.user",
 	"storage.mysql.pass",

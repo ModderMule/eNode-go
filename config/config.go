@@ -74,6 +74,8 @@ type Config struct {
 
 	ServerSearch ServerSearchConfig `yaml:"serverSearch"`
 
+	Ed3k Ed3kConfig `yaml:"ed3k"`
+
 	Storage StorageConfig `yaml:"storage"`
 	Debug   DebugConfig   `yaml:"debug"`
 
@@ -1088,6 +1090,9 @@ func setDefaults(cfg *Config) error {
 		return err
 	}
 	if err := setServerSearchDefaults(&cfg.ServerSearch, cfg.Gossip.EnabledOrDefault()); err != nil {
+		return err
+	}
+	if err := setEd3kDefaults(&cfg.Ed3k); err != nil {
 		return err
 	}
 	if cfg.Storage.MongoDB.Port == 0 {

@@ -87,6 +87,13 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   record instead of overwriting someone else's. A record with no usable size is refused
   outright — it could never be served. See
   [`docs/server-client-communication.md`](docs/server-client-communication.md#file-identity).
+- ed3k index node (optional, off by default): the server also serves ed3k, the
+  QUIC successor network of eD2K, as an index node without Kad routing duty. It
+  stores sources, keywords and notes for every file in the configured storage engine
+  (memory, MySQL, MongoDB, with Manticore for keyword search), relays hole-punch
+  requests, and is advertised to eD2K clients in `OP_SERVERIDENT` (`ST_ED3K`). An
+  optional bridge lists ed3k nodes that also speak eD2K as eD2K sources. See
+  [`docs/ed3k-index-node.md`](docs/ed3k-index-node.md).
 - Easy support for multiple storage engines
 
 ## NAT Traversal Transfer Screenshot
@@ -164,6 +171,32 @@ udp:
 files:                       # Per-client publish caps (see docs/server-client-communication.md)
   softLimit: 10000           # Distinct files per client; new files past it are ignored and the client is warned once; 0 = unlimited
   hardLimit: 20000           # Files per OP_OFFERFILES packet; at it the client is told why and disconnected; 0 = unlimited
+
+ed3k:                        # ed3k index node (see docs/ed3k-index-node.md); off by default
+  enabled: false
+  port: 0                    # UDP port; 0 = the number of tcp.port (ed3k's port rule)
+  listen: ""                 # Bind address; "" = every address of both families
+  advertise: ""              # IPv4 in the advertised link; "" = the server's advertised IP
+  advertiseIPv6: ""          # IPv6 in the link; "" = ipv6.dynIp6 when it names one
+  keyFile: "data/ed3k.key"   # Ed25519 node key, created on first start; the node ID derives from it
+  network: ""                # Name of a test or closed network; "" = the public ed3k network
+  nick: ""                   # Sent in the node's Hello
+  requestsPerMinute: 120     # KadRequests per address, kind and search/store; beyond: BUSY
+  limits:
+    maxConnections: 50000    # Open connections in all
+    connectionsPerHost: 256  # Per IPv4 /32 or IPv6 /64
+    connectionsPerSite: 1024 # Per /24 or /48
+    newPerHostPerMinute: 120 # New connections per address and minute
+    relayLeaves: 1024        # Hole-punch relay reservations in all
+    relayPerHost: 8
+    relayPerSite: 32
+    recordsPerHost: 50000    # Records one address may have stored, over all files
+    recordsPerSite: 200000
+    maxRecords: 50000000     # Records in the store; beyond: BUSY
+  bridge:
+    enabled: false           # List TCP-tested ed3k nodes as eD2K sources (outgoing TCP connects)
+    maxPerAnswer: 20         # ed3k sources added to one OP_FOUNDSOURCES
+    tcpTestMinutes: 30       # How long a TCP test result is kept
 
 natTraversal:
   enabled: true              # Enable NAT traversal service

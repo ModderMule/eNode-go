@@ -284,6 +284,19 @@ const (
 	TagServerSearchFingerprint uint8 = 0xa1
 )
 
+// TagEd3k is 0xE3 in two tag spaces (the ed3k spec, docs/ed2k-tags.md §2):
+//
+//   - ST_ED3K, a string tag in OP_SERVERIDENT and in the extended OP_SERVER_DESC_RES:
+//     the server's ed3k index node as an ed3k:node?id=…&ep=… link, so that clients
+//     and other servers find it. Emitted only when ed3k.enabled is on.
+//   - CT_ED3K, a 16-byte hash tag in OP_LOGINREQUEST: the client's ed3k node ID,
+//     which lets the server pair a user hash with a node ID.
+//
+// 0xE3 is free in the server-tag and login-tag spaces of every surveyed client and
+// server tree (spec docs/ed2k-tags.md §3); it is also PrED2K and OpNatRegisterEx
+// here, which are other namespaces. Both client trees skip a tag they do not know.
+const TagEd3k uint8 = 0xe3
+
 // TagMeta* are the FT_META_* search-result tags of the enode.meta.v1 contract, carried
 // by a row that stands for a torrent, Usenet or web release (docs/meta-search.md). The
 // 0x60-0x6F block is free in every surveyed eMule tree; the values are pinned against

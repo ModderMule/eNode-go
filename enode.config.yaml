@@ -590,6 +590,57 @@ serverSearch:
     # Drop a peer's files when no walk of it completed for this many hours.
     staleHours: 24
 
+# ed3k index node: the server's place in ed3k, the QUIC successor network of
+# eD2K (docs/ed3k-index-node.md). Clients find it in OP_SERVERIDENT (ST_ED3K).
+# It stores sources, keywords and notes for every file in the storage engine
+# above, and relays hole-punch requests; it does no Kad routing. Off by default.
+# Changing anything here needs a restart.
+ed3k:
+  enabled: false
+  # UDP port. 0 takes the number of tcp.port, as ed3k's port rule asks; the
+  # server's eD2K UDP port is tcp.port+4, so the two never collide.
+  port: 0
+  # Bind address; "" binds every address of both families.
+  listen: ""
+  # Addresses in the advertised link. "" takes the server's IPv4, and its IPv6
+  # when ipv6.dynIp6 names one.
+  advertise: ""
+  advertiseIPv6: ""
+  # The node's Ed25519 key, created on first start. The node ID derives from it:
+  # keep the file, or clients must learn a new link.
+  keyFile: "data/ed3k.key"
+  # Name of a test or closed network; "" is the public ed3k network.
+  network: ""
+  # Sent in the node's Hello; "" sends none.
+  nick: ""
+  # KadRequests per minute from one address, per record kind and per search or
+  # store. Beyond it a search is told BUSY and a store is BUSY for every record.
+  requestsPerMinute: 120
+  limits:
+    # Open connections in all, per address (IPv4 /32, IPv6 /64) and per site
+    # (/24, /48), and new connections per address and minute.
+    maxConnections: 50000
+    connectionsPerHost: 256
+    connectionsPerSite: 1024
+    newPerHostPerMinute: 120
+    # Hole-punch relay: reservations in all, per address and per site.
+    relayLeaves: 1024
+    relayPerHost: 8
+    relayPerSite: 32
+    # Records one address or site may have stored, over all files, and in all.
+    recordsPerHost: 50000
+    recordsPerSite: 200000
+    maxRecords: 50000000
+  # List ed3k nodes that also speak eD2K as sources in OP_FOUNDSOURCES. The server
+  # connects to each such node's eD2K TCP port first and lists only those that
+  # answer, so this makes outgoing TCP connections. Off by default.
+  bridge:
+    enabled: false
+    # Most ed3k sources added to one answer.
+    maxPerAnswer: 20
+    # How long a TCP test result is kept.
+    tcpTestMinutes: 30
+
 natTraversal:
   enabled: true
   port: 2004

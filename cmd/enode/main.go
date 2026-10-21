@@ -287,6 +287,15 @@ func run(ctx context.Context, configPath string) error {
 		return fmt.Errorf("meta api: %w", err)
 	}
 
+	// The ed3k index node, built before the runtime for the same reason: both
+	// OP_SERVERIDENT and the description reply advertise its link. Its socket is
+	// bound here; it starts with the other services below. See
+	// docs/ed3k-index-node.md.
+	ed3kNode, err := buildEd3k(ctx, cfg, engine, advertisedIP, serverIPv6, contentFilter)
+	if err != nil {
+		return fmt.Errorf("ed3k: %w", err)
+	}
+
 	serverHash := ed2k.MD5([]byte(fmt.Sprintf("%s%d", serverIdentitySeed(advertisedIP, cfg.Address), cfg.TCP.Port)))
 
 	udpSecret, err := loadUDPSecret(cfg)
@@ -304,9 +313,12 @@ func run(ctx context.Context, configPath string) error {
 		metaSearch:   metaSearcher != nil,
 		metaAPI:      metaAPI.advertisement(),
 		serverSearch: serverSearch.advertisement(),
+		ed3k:         ed3kNode.advertisement(),
 	}
 	runtimeTCP, runtimeUDP := buildRuntimeConfigs(cfg, derived)
-	runtime := ed2k.NewServerRuntime(runtimeTCP, runtimeUDP, engine)
+	// The ed3k bridge, when on, adds ed3k nodes to the sources the runtime serves.
+	runtime := ed2k.NewServerRuntime(runtimeTCP, runtimeUDP, ed3kNode.wrapSources(engine))
+	ed3kNode.attach(runtime)
 
 	// Attached only when there is one: a nil *Filter stored in the interface would
 	// not compare equal to nil.
@@ -417,6 +429,12 @@ func run(ctx context.Context, configPath string) error {
 		defer stopMetaAPI()
 	}
 
+	stopEd3k, err := ed3kNode.start(ctx)
+	if err != nil {
+		return fmt.Errorf("ed3k: %w", err)
+	}
+	defer stopEd3k()
+
 	if serverSearch != nil {
 		warnServerSearch(cfg)
 		serverSearch.attach(runtime, accessFilter)
@@ -479,6 +497,7 @@ func run(ctx context.Context, configPath string) error {
 					Meta:             metaStats,
 					MetaAPI:          metaAPI.adminStats(),
 					ServerSearch:     serverSearch.adminStats(),
+					Ed3k:             ed3kNode.adminStats(),
 					Update:           updateChecker.Info(),
 				}
 			},

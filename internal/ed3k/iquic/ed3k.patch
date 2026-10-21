@@ -1,0 +1,29 @@
+diff -ruN a/internal/handshake/cipher_suite_fips140.go b/internal/handshake/cipher_suite_fips140.go
+--- a/internal/handshake/cipher_suite_fips140.go	2026-10-21 03:37:10
++++ b/internal/handshake/cipher_suite_fips140.go	2026-10-21 03:37:10
+@@ -2,19 +2,14 @@
+ 
+ import (
+ 	"crypto/cipher"
+-	_ "unsafe" // for go:linkname
+ )
+ 
+-// Reaching into crypto/tls is a bit of a hack, but it's the only way to get the FIPS 140
+-// compliant AEAD, because the standard library doesn't yet expose the NewGCMForQUIC constructor
+-// added in https://go-review.googlesource.com/c/go/+/723760.
+-// See https://github.com/golang/go/issues/79219 for details.
+-//
+-// Once the standard library exposes the necessary constructors, we can use a shared code path
+-// for both FIPS 140 and non-FIPS 140 modes.
+-//
+-//go:linkname cryptoTLSAEAD_AESGCMTLS13 crypto/tls.aeadAESGCMTLS13
+-func cryptoTLSAEAD_AESGCMTLS13(key, nonceMask []byte) cipher.AEAD
++// ed3k: upstream reaches into crypto/tls with go:linkname for the FIPS 140
++// AES-GCM AEAD. This fork runs on the vendored TLS of internal/ed3k/itls, which
++// has no FIPS 140 mode, so the path is refused instead of linked.
++func cryptoTLSAEAD_AESGCMTLS13(key, nonceMask []byte) cipher.AEAD {
++	panic("ed3k: QUIC in FIPS 140 mode is not supported by this fork")
++}
+ 
+ func aeadAESGCMTLS13FIPS140(key, nonceMask []byte) cipher.AEAD {
+ 	return &tls13AESGCMAEADFIPS140{aead: cryptoTLSAEAD_AESGCMTLS13(key, nonceMask)}

@@ -67,6 +67,9 @@ type TCPRuntimeConfig struct {
 	NatRendezvousPort uint16
 	// MetaAPI is advertised in OP_SERVERIDENT when the Meta API is on.
 	MetaAPI MetaAPIAdvert
+	// Ed3k is the ed3k:node link of the index node, advertised in OP_SERVERIDENT as
+	// ST_ED3K when ed3k is on. Empty omits the tag.
+	Ed3k string
 	// SoftFileLimit and HardFileLimit cap what one session may publish. The soft
 	// limit is how many distinct files it may source at once: a new file past it is
 	// ignored and the client is warned once. The hard limit is how many records one
@@ -111,6 +114,9 @@ type UDPRuntimeConfig struct {
 	// ServerSearch is advertised in the extended OP_SERVER_DESC_RES when
 	// serverSearch.mode is "gossip". An empty URL omits the tags.
 	ServerSearch ServerSearchAdvert
+	// Ed3k is the index node's ed3k:node link for the extended OP_SERVER_DESC_RES
+	// when ed3k is on. Empty omits the tag.
+	Ed3k string
 }
 
 type ServerRuntime struct {
@@ -146,6 +152,9 @@ type ServerRuntime struct {
 	// keyed on the assigned ID and so cannot answer this lookup.
 	sessionsMu     sync.RWMutex
 	sessionsByHash map[[16]byte]*tcpClient
+	// sessionsByEd3k indexes the same sessions by the ed3k node ID of their CT_ED3K
+	// login tag, for the ed3k bridge (Ed3kPairing). Under sessionsMu.
+	sessionsByEd3k map[[16]byte]*tcpClient
 	// firewallProbe indirects the IPv4 dial-back so a test can drive both branches
 	// of the login ID decision without a reachable listener, and can assert that
 	// the decision short-circuits before dialling at all. nil selects the real
@@ -368,6 +377,12 @@ func (s *ServerRuntime) registerSession(hash []byte, client *tcpClient) {
 		s.sessionsByHash = make(map[[16]byte]*tcpClient)
 	}
 	s.sessionsByHash[key] = client
+	if id, ok := client.ed3kNodeID(); ok {
+		if s.sessionsByEd3k == nil {
+			s.sessionsByEd3k = make(map[[16]byte]*tcpClient)
+		}
+		s.sessionsByEd3k[id] = client
+	}
 }
 
 // unregisterSession removes the index entry, but only when it still points at this
@@ -389,6 +404,41 @@ func (s *ServerRuntime) unregisterSession(hash []byte, client *tcpClient) {
 	if s.sessionsByHash[key] == client {
 		delete(s.sessionsByHash, key)
 	}
+	if id, ok := client.ed3kNodeID(); ok && s.sessionsByEd3k[id] == client {
+		delete(s.sessionsByEd3k, id)
+	}
+}
+
+// Ed3kPairing returns the eD2K session whose CT_ED3K login tag named this ed3k
+// node ID: its user hash, crypt options and IPv4 address. The tag is the client's
+// claim; the caller decides what to trust (the ed3k bridge requires the session's
+// address to be the ed3k source's).
+func (s *ServerRuntime) Ed3kPairing(nodeID [16]byte) (hash [16]byte, crypt byte, ipv4 net.IP, ok bool) {
+	s.sessionsMu.RLock()
+	c := s.sessionsByEd3k[nodeID]
+	s.sessionsMu.RUnlock()
+	if c == nil {
+		return hash, 0, nil, false
+	}
+	c.infoMu.Lock()
+	defer c.infoMu.Unlock()
+	if len(c.info.Hash) != 16 {
+		return hash, 0, nil, false
+	}
+	copy(hash[:], c.info.Hash)
+	return hash, c.info.CryptOptions, c.peerIP.To4(), true
+}
+
+// ed3kNodeID is the session's CT_ED3K node ID.
+func (c *tcpClient) ed3kNodeID() ([16]byte, bool) {
+	var id [16]byte
+	c.infoMu.Lock()
+	defer c.infoMu.Unlock()
+	if len(c.ed3kID) != 16 {
+		return id, false
+	}
+	copy(id[:], c.ed3kID)
+	return id, true
 }
 
 // TouchSessionByHash extends the idle deadline of the eD2K session belonging to a user
@@ -647,6 +697,9 @@ type tcpClient struct {
 	// CT_SERVER_FLAGS: it can act on torrent/Usenet/web rows. Written once on this
 	// connection's goroutine before its first search, and read only by it.
 	metaCapable bool
+	// ed3kID is the ed3k node ID the client sent as CT_ED3K at login, or nil. Read
+	// and written under infoMu.
+	ed3kID []byte
 
 	// infoMu guards info, logged and hasLowID. The connection's own goroutine
 	// writes them during login, but two other goroutines read them: the periodic
@@ -1181,6 +1234,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	c.info.CryptOptions = cryptOptionsFromLoginFlags(loginFlags(req.Tags))
 	c.metaCapable = loginFlags(req.Tags)&SrvCapMetaSearch != 0
 	c.nick, c.software = loginNick(req.Tags), loginSoftware(req.Tags)
+	c.ed3kID = loginEd3k(req.Tags)
 	c.info.IPv6 = v6Bytes
 	// ipv6Capable is read cross-goroutine by the callback path (isV6Capable), so it
 	// is written under infoMu here rather than as a bare field assignment.
@@ -1963,6 +2017,7 @@ func (c *tcpClient) sendServerIdent() {
 		ClientIPv6:       clientV6,
 		ClientIPv6Status: v6Status,
 		MetaAPI:          cfg.MetaAPI,
+		Ed3k:             cfg.Ed3k,
 	})
 	if err != nil {
 		logging.Warnf("tcp server ident not sent remote=%s err=%v", c.remoteHost, err)
@@ -2741,6 +2796,7 @@ func (s *ServerRuntime) udpServDescRes(b *Buffer, remote *net.UDPAddr, conn UDPR
 		Description:  s.udp().Description,
 		DynIP:        s.udp().DynIP,
 		ServerSearch: s.udp().ServerSearch,
+		Ed3k:         s.udp().Ed3k,
 	})
 	if err != nil {
 		return
@@ -3027,6 +3083,21 @@ func localBindForNetwork(network, address string) net.IP {
 		if !isV4 {
 			return ip
 		}
+	}
+	return nil
+}
+
+// loginEd3k returns the client's ed3k node ID from the CT_ED3K (0xe3) login tag, a
+// 16-byte hash (spec docs/ed2k-tags.md §2), or nil when absent or of another form.
+func loginEd3k(tags []NamedTag) []byte {
+	for _, t := range tags {
+		if t.Name != "ed3k" {
+			continue
+		}
+		if b, ok := t.Value.([]byte); ok && len(b) == 16 && t.Type == TypeHash {
+			return append([]byte(nil), b...)
+		}
+		return nil
 	}
 	return nil
 }

@@ -197,6 +197,7 @@ func (s *ServerRuntime) udpServerDescRes(b *Buffer, remote *net.UDPAddr, module 
 		// stops being called.
 		if g.NoteDescription(remote.IP, d.Name, d.Desc) {
 			g.NoteServerSearch(remote.IP, d.ServerSearch)
+			g.NoteEd3k(remote.IP, d.Ed3k)
 		}
 	}
 }
@@ -261,6 +262,9 @@ type ServerDesc struct {
 	// ServerSearch is where its server-to-server search service is, when the reply
 	// carried the tags. Only the extended form can.
 	ServerSearch ServerSearchAdvert
+	// Ed3k is the ed3k:node link of the server's index node (ST_ED3K), when the
+	// extended reply carried it.
+	Ed3k string
 }
 
 // ParseServerDescRes decodes the name and the description of an OP_SERVER_DESC_RES.
@@ -304,6 +308,8 @@ func ParseServerDesc(b *Buffer) (ServerDesc, error) {
 						d.ServerSearch.URL = s
 					case tagName(TagServerSearchFingerprint):
 						d.ServerSearch.Fingerprint = s
+					case tagName(TagEd3k):
+						d.Ed3k = s
 					}
 				}
 				if gotName {

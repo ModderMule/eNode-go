@@ -211,6 +211,8 @@ type MemoryEngine struct {
 	// accts is the AccountStore half (accounts_memory.go), under its own lock.
 	acctMu sync.Mutex
 	accts  memoryAccounts
+	// ed3k is the Ed3kStore half (ed3k_memory.go), under its own lock.
+	ed3k memoryEd3k
 }
 
 // memRec is one file. Its fields are ordered and sized to fit 80 bytes; a record

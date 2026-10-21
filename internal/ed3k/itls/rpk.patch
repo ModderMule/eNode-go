@@ -1,0 +1,500 @@
+diff -ruN a/common.go b/common.go
+--- a/common.go	2026-10-21 04:15:07
++++ b/common.go	2026-10-21 04:15:07
+@@ -126,6 +126,8 @@
+ 	extensionPSKModes                uint16 = 45
+ 	extensionCertificateAuthorities  uint16 = 47
+ 	extensionSignatureAlgorithmsCert uint16 = 50
++	extensionClientCertificateType   uint16 = 19 // ed3k: RFC 7250
++	extensionServerCertificateType   uint16 = 20 // ed3k: RFC 7250
+ 	extensionKeyShare                uint16 = 51
+ 	extensionQUICTransportParameters uint16 = 57
+ 	extensionRenegotiationInfo       uint16 = 0xff01
+@@ -908,6 +910,17 @@
+ 	// clients, see the EncryptedClientHelloConfigList field.
+ 	EncryptedClientHelloKeys []EncryptedClientHelloKey
+ 
++	// RawPublicKeys makes both sides authenticate with RFC 7250 raw public
++	// keys instead of X.509 certificates (ed3k fork; TLS 1.3 only, mutual).
++	// The leaf of Certificates[0] is then a DER SubjectPublicKeyInfo (see
++	// RawPublicKeyCertificate), and the peer's key is checked by
++	// VerifyConnection through ConnectionState.PeerCertificates[0].PublicKey,
++	// a synthetic certificate that carries only the key. A peer that does not
++	// offer raw public keys fails the handshake. A server should also set
++	// ClientAuth to RequireAnyClientCert, so that a client without a key gets
++	// certificate_required.
++	RawPublicKeys bool
++
+ 	// mutex protects sessionTicketKeys and autoSessionTicketKeys.
+ 	mutex sync.RWMutex
+ 	// sessionTicketKeys contains zero or more ticket keys. If set, it means
+@@ -1045,6 +1058,7 @@
+ 		EncryptedClientHelloConfigList:      c.EncryptedClientHelloConfigList,
+ 		EncryptedClientHelloRejectionVerify: c.EncryptedClientHelloRejectionVerify,
+ 		EncryptedClientHelloKeys:            c.EncryptedClientHelloKeys,
++		RawPublicKeys:                       c.RawPublicKeys,
+ 		sessionTicketKeys:                   c.sessionTicketKeys,
+ 		autoSessionTicketKeys:               c.autoSessionTicketKeys,
+ 	}
+diff -ruN a/conn.go b/conn.go
+--- a/conn.go	2026-10-21 04:15:07
++++ b/conn.go	2026-10-21 04:15:07
+@@ -47,6 +47,7 @@
+ 	handshakes       int
+ 	extMasterSecret  bool
+ 	didResume        bool // whether this connection was a session resumption
++	rawPublicKeys    bool // ed3k: RFC 7250 raw public keys were negotiated
+ 	didHRR           bool // whether a HelloRetryRequest was sent/received
+ 	cipherSuite      uint16
+ 	curveID          CurveID
+diff -ruN a/handshake_client.go b/handshake_client.go
+--- a/handshake_client.go	2026-10-21 04:15:07
++++ b/handshake_client.go	2026-10-21 04:15:07
+@@ -171,6 +171,15 @@
+ 		hello.quicTransportParameters = p
+ 	}
+ 
++	if c.config.RawPublicKeys { // ed3k: RFC 7250, offered for both sides
++		if c.config.MinVersion != 0 && c.config.MinVersion < VersionTLS13 ||
++			c.config.MaxVersion != 0 && c.config.MaxVersion < VersionTLS13 {
++			return nil, nil, nil, errors.New("tls: RawPublicKeys requires TLS 1.3")
++		}
++		hello.clientCertificateTypes = []uint8{certTypeRawPublicKey}
++		hello.serverCertificateTypes = []uint8{certTypeRawPublicKey}
++	}
++
+ 	var ech *echClientContext
+ 	if c.config.EncryptedClientHelloConfigList != nil {
+ 		if c.config.MinVersion != 0 && c.config.MinVersion < VersionTLS13 {
+@@ -1103,6 +1112,9 @@
+ // verifyServerCertificate parses and verifies the provided chain, setting
+ // c.verifiedChains and c.peerCertificates or sending the appropriate alert.
+ func (c *Conn) verifyServerCertificate(certificates [][]byte) error {
++	if c.rawPublicKeys { // ed3k: RFC 7250
++		return c.verifyRawPublicKey(certificates, false)
++	}
+ 	certs := make([]*x509.Certificate, len(certificates))
+ 	for i, asn1Data := range certificates {
+ 		cert, err := globalCertCache.newCert(asn1Data)
+@@ -1274,6 +1286,10 @@
+ func (c *Conn) getClientCertificate(cri *CertificateRequestInfo) (*Certificate, error) {
+ 	if c.config.GetClientCertificate != nil {
+ 		return c.config.GetClientCertificate(cri)
++	}
++
++	if c.rawPublicKeys && len(c.config.Certificates) > 0 { // ed3k: RFC 7250, no chain to match
++		return &c.config.Certificates[0], nil
+ 	}
+ 
+ 	for _, chain := range c.config.Certificates {
+diff -ruN a/handshake_client_tls13.go b/handshake_client_tls13.go
+--- a/handshake_client_tls13.go	2026-10-21 04:15:07
++++ b/handshake_client_tls13.go	2026-10-21 04:15:07
+@@ -544,6 +544,20 @@
+ 	}
+ 	c.clientProtocol = encryptedExtensions.alpnProtocol
+ 
++	// ed3k: RFC 7250. The server must confirm raw public keys for both sides
++	// when they were offered, and must not send the extensions otherwise.
++	if c.config.RawPublicKeys {
++		if encryptedExtensions.serverCertificateType != certTypeRawPublicKey ||
++			encryptedExtensions.clientCertificateType != certTypeRawPublicKey {
++			c.sendAlert(alertUnsupportedCertificate)
++			return errors.New("tls: server did not negotiate raw public keys")
++		}
++		c.rawPublicKeys = true
++	} else if encryptedExtensions.serverCertificateType != 0 || encryptedExtensions.clientCertificateType != 0 {
++		c.sendAlert(alertUnsupportedExtension)
++		return errors.New("tls: server sent unrequested certificate type extensions")
++	}
++
+ 	if c.quic != nil {
+ 		if encryptedExtensions.quicTransportParameters == nil {
+ 			// RFC 9001 Section 8.2.
+diff -ruN a/handshake_messages.go b/handshake_messages.go
+--- a/handshake_messages.go	2026-10-21 04:15:07
++++ b/handshake_messages.go	2026-10-21 04:15:07
+@@ -98,6 +98,9 @@
+ 	pskBinders                       [][]byte
+ 	quicTransportParameters          []byte
+ 	encryptedClientHello             []byte
++	// ed3k: RFC 7250 certificate types offered, as uint8 lists.
++	clientCertificateTypes []uint8
++	serverCertificateTypes []uint8
+ 	// extensions are only populated on the server-side of a handshake
+ 	extensions []uint16
+ }
+@@ -156,6 +159,22 @@
+ 		exts.AddUint16(extensionEarlyData)
+ 		exts.AddUint16(0) // empty extension_data
+ 	}
++	if len(m.clientCertificateTypes) > 0 { // ed3k: RFC 7250, Section 4.1
++		exts.AddUint16(extensionClientCertificateType)
++		exts.AddUint16LengthPrefixed(func(exts *cryptobyte.Builder) {
++			exts.AddUint8LengthPrefixed(func(exts *cryptobyte.Builder) {
++				exts.AddBytes(m.clientCertificateTypes)
++			})
++		})
++	}
++	if len(m.serverCertificateTypes) > 0 { // ed3k: RFC 7250, Section 4.1
++		exts.AddUint16(extensionServerCertificateType)
++		exts.AddUint16LengthPrefixed(func(exts *cryptobyte.Builder) {
++			exts.AddUint8LengthPrefixed(func(exts *cryptobyte.Builder) {
++				exts.AddBytes(m.serverCertificateTypes)
++			})
++		})
++	}
+ 	if m.quicTransportParameters != nil { // marshal zero-length parameters when present
+ 		// RFC 9001, Section 8.2
+ 		exts.AddUint16(extensionQUICTransportParameters)
+@@ -624,6 +643,16 @@
+ 		case extensionEarlyData:
+ 			// RFC 8446, Section 4.2.10
+ 			m.earlyData = true
++		case extensionClientCertificateType: // ed3k: RFC 7250
++			if !readUint8LengthPrefixed(&extData, &m.clientCertificateTypes) ||
++				len(m.clientCertificateTypes) == 0 {
++				return false
++			}
++		case extensionServerCertificateType: // ed3k: RFC 7250
++			if !readUint8LengthPrefixed(&extData, &m.serverCertificateTypes) ||
++				len(m.serverCertificateTypes) == 0 {
++				return false
++			}
+ 		case extensionPSKModes:
+ 			// RFC 8446, Section 4.2.9
+ 			if !readUint8LengthPrefixed(&extData, &m.pskModes) {
+@@ -715,6 +744,8 @@
+ 		pskBinders:                       slices.Clone(m.pskBinders),
+ 		quicTransportParameters:          slices.Clone(m.quicTransportParameters),
+ 		encryptedClientHello:             slices.Clone(m.encryptedClientHello),
++		clientCertificateTypes:           slices.Clone(m.clientCertificateTypes),
++		serverCertificateTypes:           slices.Clone(m.serverCertificateTypes),
+ 	}
+ }
+ 
+@@ -1008,6 +1039,9 @@
+ 	earlyData               bool
+ 	echRetryConfigs         []byte
+ 	serverNameAck           bool
++	// ed3k: RFC 7250 negotiated certificate types; 0 = extension absent.
++	clientCertificateType uint8
++	serverCertificateType uint8
+ }
+ 
+ func (m *encryptedExtensionsMsg) marshal() ([]byte, error) {
+@@ -1047,6 +1081,18 @@
+ 				b.AddUint16(extensionServerName)
+ 				b.AddUint16(0) // empty extension_data
+ 			}
++			if m.clientCertificateType != 0 { // ed3k: RFC 7250, Section 4.2
++				b.AddUint16(extensionClientCertificateType)
++				b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
++					b.AddUint8(m.clientCertificateType)
++				})
++			}
++			if m.serverCertificateType != 0 { // ed3k: RFC 7250, Section 4.2
++				b.AddUint16(extensionServerCertificateType)
++				b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
++					b.AddUint8(m.serverCertificateType)
++				})
++			}
+ 		})
+ 	})
+ 
+@@ -1107,6 +1153,14 @@
+ 				return false
+ 			}
+ 			m.serverNameAck = true
++		case extensionClientCertificateType: // ed3k: RFC 7250
++			if !extData.ReadUint8(&m.clientCertificateType) || m.clientCertificateType == 0 {
++				return false
++			}
++		case extensionServerCertificateType: // ed3k: RFC 7250
++			if !extData.ReadUint8(&m.serverCertificateType) || m.serverCertificateType == 0 {
++				return false
++			}
+ 		default:
+ 			// Ignore unknown extensions.
+ 			continue
+diff -ruN a/handshake_server.go b/handshake_server.go
+--- a/handshake_server.go	2026-10-21 04:15:07
++++ b/handshake_server.go	2026-10-21 04:15:07
+@@ -942,6 +942,13 @@
+ // certificateMsg message or a certificateMsgTLS13 message and verifies them.
+ func (c *Conn) processCertsFromClient(certificate Certificate) error {
+ 	certificates := certificate.Certificate
++	if c.rawPublicKeys { // ed3k: RFC 7250
++		if len(certificates) == 0 {
++			c.sendAlert(alertCertificateRequired)
++			return errors.New("tls: client didn't provide a raw public key")
++		}
++		return c.verifyRawPublicKey(certificates, true)
++	}
+ 	certs := make([]*x509.Certificate, len(certificates))
+ 	var err error
+ 	for i, asn1Data := range certificates {
+diff -ruN a/handshake_server_tls13.go b/handshake_server_tls13.go
+--- a/handshake_server_tls13.go	2026-10-21 04:15:07
++++ b/handshake_server_tls13.go	2026-10-21 04:15:07
+@@ -114,6 +114,17 @@
+ 	hs.hello.vers = VersionTLS12
+ 	hs.hello.supportedVersion = c.vers
+ 
++	// ed3k: RFC 7250. A server that wants raw public keys needs a client that
++	// offers them for both sides; there is no X.509 fallback.
++	if c.config.RawPublicKeys {
++		if !slices.Contains(hs.clientHello.serverCertificateTypes, certTypeRawPublicKey) ||
++			!slices.Contains(hs.clientHello.clientCertificateTypes, certTypeRawPublicKey) {
++			c.sendAlert(alertUnsupportedCertificate)
++			return errors.New("tls: client did not offer raw public keys")
++		}
++		c.rawPublicKeys = true
++	}
++
+ 	if len(hs.clientHello.supportedVersions) == 0 {
+ 		c.sendAlert(alertIllegalParameter)
+ 		return errors.New("tls: client used the legacy version field to negotiate TLS 1.3")
+@@ -793,6 +804,11 @@
+ 		encryptedExtensions.serverNameAck = true
+ 	}
+ 
++	if c.rawPublicKeys { // ed3k: RFC 7250, Section 4.2
++		encryptedExtensions.serverCertificateType = certTypeRawPublicKey
++		encryptedExtensions.clientCertificateType = certTypeRawPublicKey
++	}
++
+ 	// If client sent ECH extension, but we didn't accept it,
+ 	// send retry configs, if available.
+ 	echKeys := hs.c.config.EncryptedClientHelloKeys
+@@ -819,7 +835,7 @@
+ }
+ 
+ func (hs *serverHandshakeStateTLS13) requestClientCert() bool {
+-	return hs.c.config.ClientAuth >= RequestClientCert && !hs.usingPSK
++	return (hs.c.config.ClientAuth >= RequestClientCert || hs.c.rawPublicKeys) && !hs.usingPSK // ed3k: raw keys are mutual
+ }
+ 
+ func (hs *serverHandshakeStateTLS13) sendServerCertificate() error {
+diff -ruN a/rawkey.go b/rawkey.go
+--- a/rawkey.go	1970-01-01 07:00:00
++++ b/rawkey.go	2026-10-21 04:15:07
+@@ -0,0 +1,77 @@
++// Copyright 2026 The eNode-go Authors. Use of this source code is governed by a
++// BSD-style license that can be found in the LICENSE file of this directory.
++//
++// The design follows the RFC 7250 patch of github.com/tmc/go-iroh
++// (internal/itls, MIT license).
++
++package tls
++
++// ed3k: RFC 7250 raw public keys. Added to this fork of crypto/tls; see docs/ed3k-tls-quic-forks.md.
++
++import (
++	"crypto/ed25519"
++	"crypto/x509"
++	"errors"
++	"time"
++)
++
++// certTypeRawPublicKey is the RFC 7250 certificate type RawPublicKey.
++const certTypeRawPublicKey uint8 = 2
++
++// RawPublicKeyCertificate returns a Certificate for a raw public key handshake:
++// its one entry is the DER SubjectPublicKeyInfo of the key.
++func RawPublicKeyCertificate(priv ed25519.PrivateKey) (Certificate, error) {
++	spki, err := x509.MarshalPKIXPublicKey(priv.Public())
++	if err != nil {
++		return Certificate{}, err
++	}
++	return Certificate{Certificate: [][]byte{spki}, PrivateKey: priv}, nil
++}
++
++// verifyRawPublicKey takes the peer's Certificate entries under RFC 7250: exactly
++// one bare SubjectPublicKeyInfo. It sets c.peerCertificates to a synthetic
++// certificate that carries the key, so the CertificateVerify path reads
++// PublicKey as it does for X.509, and runs VerifyPeerCertificate and, for the
++// client side, VerifyConnection (the server side calls it after this).
++func (c *Conn) verifyRawPublicKey(certificates [][]byte, fromClient bool) error {
++	if len(certificates) != 1 {
++		c.sendAlert(alertBadCertificate)
++		return errors.New("tls: raw public key handshake needs exactly one certificate entry")
++	}
++	pub, err := x509.ParsePKIXPublicKey(certificates[0])
++	if err != nil {
++		c.sendAlert(alertDecodeError)
++		return errors.New("tls: failed to parse raw public key: " + err.Error())
++	}
++	cert := &x509.Certificate{
++		Raw:                     certificates[0],
++		RawSubjectPublicKeyInfo: certificates[0],
++		PublicKey:               pub,
++		PublicKeyAlgorithm:      publicKeyAlgorithmOf(pub),
++		// A raw key has no validity period.
++		NotBefore: time.Unix(0, 0),
++		NotAfter:  time.Unix(1<<62, 0),
++	}
++	c.peerCertificates = []*x509.Certificate{cert}
++
++	if c.config.VerifyPeerCertificate != nil {
++		if err := c.config.VerifyPeerCertificate(certificates, nil); err != nil {
++			c.sendAlert(alertBadCertificate)
++			return err
++		}
++	}
++	if !fromClient && c.config.VerifyConnection != nil {
++		if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
++			c.sendAlert(alertBadCertificate)
++			return err
++		}
++	}
++	return nil
++}
++
++func publicKeyAlgorithmOf(pub any) x509.PublicKeyAlgorithm {
++	if _, ok := pub.(ed25519.PublicKey); ok {
++		return x509.Ed25519
++	}
++	return x509.UnknownPublicKeyAlgorithm
++}
+diff -ruN a/rawkey_test.go b/rawkey_test.go
+--- a/rawkey_test.go	1970-01-01 07:00:00
++++ b/rawkey_test.go	2026-10-21 04:15:07
+@@ -0,0 +1,137 @@
++// ed3k: tests of the RFC 7250 patch. See docs/ed3k-tls-quic-forks.md.
++
++package tls
++
++import (
++	"bytes"
++	"crypto/ed25519"
++	"crypto/rand"
++	"net"
++	"strings"
++	"testing"
++	"time"
++)
++
++func rawConfig(t *testing.T, priv ed25519.PrivateKey, server bool) *Config {
++	t.Helper()
++	cert, err := RawPublicKeyCertificate(priv)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cfg := &Config{
++		RawPublicKeys:          true,
++		Certificates:           []Certificate{cert},
++		MinVersion:             VersionTLS13,
++		NextProtos:             []string{"ed3k/1"},
++		InsecureSkipVerify:     true, // no chain; the key is checked in VerifyConnection
++		SessionTicketsDisabled: true,
++	}
++	if server {
++		cfg.ClientAuth = RequireAnyClientCert
++	}
++	return cfg
++}
++
++func handshakePair(t *testing.T, client, server *Config) (cs, ss ConnectionState, cerr, serr error) {
++	t.Helper()
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer ln.Close()
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		s, err := ln.Accept()
++		if err != nil {
++			serr = err
++			return
++		}
++		defer s.Close()
++		sc := Server(s, server)
++		serr = sc.Handshake()
++		ss = sc.ConnectionState()
++		if serr == nil {
++			sc.Write([]byte{1})
++		}
++	}()
++	c, err := net.Dial("tcp", ln.Addr().String())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer c.Close()
++	cc := Client(c, client)
++	cerr = cc.Handshake()
++	cs = cc.ConnectionState()
++	if cerr == nil {
++		// In TLS 1.3 the client is done before the server has checked its key;
++		// a refusal shows on the first read.
++		c.SetReadDeadline(time.Now().Add(5 * time.Second))
++		_, cerr = cc.Read(make([]byte, 1))
++	}
++	<-done
++	return
++}
++
++func TestRawPublicKeyHandshake(t *testing.T) {
++	cpub, cpriv, _ := ed25519.GenerateKey(rand.Reader)
++	spub, spriv, _ := ed25519.GenerateKey(rand.Reader)
++	var sawServer, sawClient []byte
++	ccfg := rawConfig(t, cpriv, false)
++	ccfg.VerifyConnection = func(st ConnectionState) error {
++		sawServer = st.PeerCertificates[0].PublicKey.(ed25519.PublicKey)
++		return nil
++	}
++	scfg := rawConfig(t, spriv, true)
++	scfg.VerifyConnection = func(st ConnectionState) error {
++		sawClient = st.PeerCertificates[0].PublicKey.(ed25519.PublicKey)
++		return nil
++	}
++	cs, _, cerr, serr := handshakePair(t, ccfg, scfg)
++	t.Logf("client err=%v server err=%v alpn=%q", cerr, serr, cs.NegotiatedProtocol)
++	if cerr != nil || serr != nil {
++		t.Fatalf("handshake failed")
++	}
++	t.Logf("server key seen by client %x, client key seen by server %x", sawServer, sawClient)
++	if !bytes.Equal(sawServer, spub) || !bytes.Equal(sawClient, cpub) {
++		t.Fatal("peer keys differ")
++	}
++}
++
++func TestRawPublicKeyRefusals(t *testing.T) {
++	_, cpriv, _ := ed25519.GenerateKey(rand.Reader)
++	_, spriv, _ := ed25519.GenerateKey(rand.Reader)
++
++	// A client that does not offer raw keys: unsupported_certificate.
++	plain := rawConfig(t, cpriv, false)
++	plain.RawPublicKeys = false
++	_, _, cerr, serr := handshakePair(t, plain, rawConfig(t, spriv, true))
++	t.Logf("x509 client: client err=%v server err=%v", cerr, serr)
++	if serr == nil || !strings.Contains(serr.Error(), "raw public keys") {
++		t.Fatalf("server accepted a client without raw keys")
++	}
++
++	// A client without a key: certificate_required.
++	nokey := rawConfig(t, cpriv, false)
++	nokey.Certificates = nil
++	_, _, cerr, serr = handshakePair(t, nokey, rawConfig(t, spriv, true))
++	t.Logf("keyless client: client err=%v server err=%v", cerr, serr)
++	if serr == nil || cerr == nil || !strings.Contains(cerr.Error(), "certificate required") {
++		t.Fatalf("keyless client not refused with certificate_required")
++	}
++
++	// A VerifyConnection that refuses the server key fails the client.
++	wrong := rawConfig(t, cpriv, false)
++	wrong.VerifyConnection = func(ConnectionState) error { return errWrongPeer }
++	_, _, cerr, _ = handshakePair(t, wrong, rawConfig(t, spriv, true))
++	t.Logf("wrong peer: client err=%v", cerr)
++	if cerr != errWrongPeer {
++		t.Fatalf("client did not refuse the wrong peer")
++	}
++}
++
++var errWrongPeer = &wrongPeer{}
++
++type wrongPeer struct{}
++
++func (*wrongPeer) Error() string { return "wrong peer" }

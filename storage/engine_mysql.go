@@ -79,6 +79,8 @@ type MySQLEngine struct {
 	// sessions keeps a Connect from running into the middle of a Disconnect of the
 	// same user; see hashGate.
 	sessions hashGate
+	// ed3kState is the paging secret of the ed3k index store (ed3k_mysql.go).
+	ed3kState mysqlEd3k
 }
 
 func NewMySQLEngine(cfg MySQLConfig) (*MySQLEngine, error) {

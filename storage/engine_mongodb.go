@@ -48,6 +48,8 @@ type MongoDBEngine struct {
 	// sessions keeps a Connect from running into the middle of a Disconnect of the
 	// same user; see hashGate.
 	sessions hashGate
+	// ed3kState is the paging secret of the ed3k index store (ed3k_mongodb.go).
+	ed3kState mongoEd3k
 }
 
 // offerMark is how addFilesChunk learns which of the sources it just wrote were not

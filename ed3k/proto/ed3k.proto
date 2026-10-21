@@ -1,0 +1,1015 @@
+// ed3k wire version 1: the normative message definitions.
+//
+// Every message of Protocol.md and of the extensions in extensions/ is here, with the
+// extension fields at the numbers those documents assign. The markdown explains the
+// semantics; where this file and a document disagree on a name, a number or a type, that is
+// a fault to be reported (Protocol.md §5.4).
+//
+// Conventions (Protocol.md §0):
+// - proto3. `bytes` fields with a fixed layout say so in a comment; integers inside such
+//   layouts are big-endian.
+// - `optional` marks explicit presence: an absent optional field means "unchanged / not
+//   told", a present one carries a value even when it is 0 or empty.
+// - A field that holds a random 64-bit value is `fixed64`.
+//
+// Frame types (Protocol.md §5.1). The tag of a frame is `(type << 1) | z`:
+//
+//   1 Hello            2 Error            3 KadRequest       4 KadAnswer
+//   5 FileRequest      6 FileStatus       7 BlockRequest     8 Block
+//   9 HashRequest     10 HashAnswer      11 Punch           12 Relay
+//  13 ReachTest       14 Browse          15 BrowseAnswer    16 Chat
+//  17 SlotOffer       18 ChatAck         19 LiveJoin        20 LiveState
+//  21 LiveGet         22 TopicJoin       23 TopicState      24 LanQuery
+//  25 LanAnswer       26 HopCreate       27 HopCreated      28 HopExtend
+//  29 HopGate         30 HopLookup       31 HopLookupAnswer 32 HopStream
+//  33 HopConnect      34 HopJoin         35 Receipt         36 CreditRelay
+//  37 CreditRelayAnswer 38 BadBlock      39 HopOk          40 KeyRequest
+//  41 KeyAnswer
+//  48–63 reserved (Protocol.md §10.6)
+//
+// Messages without a type are file formats or sub-messages carried inside another message.
+
+syntax = "proto3";
+
+package ed3k.v1;
+
+option go_package = "enode/ed3k/ed3kpb";
+
+// ---------------------------------------------------------------------------------------
+// Common types (Protocol.md §5.4)
+// ---------------------------------------------------------------------------------------
+
+// An endpoint is a bytes field: ip ‖ port(2, big-endian). 6 bytes = IPv4, 18 bytes = IPv6.
+// A compact node is node_id(16) ‖ endpoint: 22 bytes (IPv4) or 34 bytes (IPv6).
+
+message Peer {
+  bytes id = 1;               // 16 B node ID                                  Protocol.md §5.4
+  bytes ep4 = 2;              // endpoint, 6 B
+  bytes ep6 = 3;              // endpoint, 18 B
+  bytes relays4 = 4;          // n × 22 B compact nodes; only for a node that is not open in a family (Protocol.md §9.4)
+  bytes relays6 = 5;          // n × 34 B compact nodes; likewise
+  reserved 6;                 // `bindings` of docs/transport-bindings.md; not part of version 1
+}
+
+message FileInfo {
+  bytes  root = 1;            // 32 B BLAKE3 root                              Protocol.md §7
+  uint64 size = 2;
+  string name = 3;            // at most 255 B in UTF-8                        Protocol.md §10.7
+  bytes  ed2k = 4;            // 16 B eD2K MD4 hash                            Protocol.md §7.4
+  uint32 sources = 5;         // complete sources known to the sender
+  uint32 duration = 6;        // media length in seconds, 0 = unknown
+  uint32 bitrate = 7;         // kbit/s, 0 = unknown
+  uint32 set_files = 8;       // number of files, inner sets included; 0 = not a set   file-set.md §3
+  uint64 set_size = 9;        // sum of their sizes                            file-set.md §3
+  uint32 partial = 10;        // sources known to the sender that hold the file in part   Protocol.md §10.3
+}
+
+// ---------------------------------------------------------------------------------------
+// Hello and Error (Protocol.md §5.5, §5.6)
+// ---------------------------------------------------------------------------------------
+
+message Hello {               // type 1
+  uint64 caps = 1;            // capability bits                               Protocol.md §2
+  string agent = 2;           // "eMuleQt 0.7.0"; at most 64 B
+  bytes  observed = 3;        // your endpoint as I see it
+  bytes  ep4 = 4;             // my advertised endpoints; absent = none in that family
+  bytes  ep6 = 5;
+  uint32 nat = 6;             // my class in the family of this connection: 0 unknown, 1 open, 2 cone, 3 symmetric   Protocol.md §9.2
+  string nick = 7;            // optional; at most 64 B
+  bytes  dgram_cookie = 8;    // 8 B; sent by a ROUTER node with KAD_DGRAM: the cookie it accepts from your endpoint; not part of version 1   kad-datagram.md §6, Protocol.md §10.6
+  bytes  puzzle = 9;          // epoch(4, big-endian) ‖ nonce(8); not part of version 1   key-puzzle.md §3, Protocol.md §6.3
+  uint32 dict = 10;           // highest zstd dictionary ID held; 0 or absent = holds no dictionary   Protocol.md §5.3
+  reserved 11;                // `bindings` of docs/transport-bindings.md; not part of version 1
+}
+
+message Error {               // type 2
+  enum Code {
+    UNKNOWN = 0;
+    UNSUPPORTED = 1;          // message type or option not handled
+    MALFORMED = 2;            // a body does not parse or breaks a size rule; a frame header that does not parse, a `len` above 1 MiB included, closes the connection (Protocol.md §5.6)
+    NOT_FOUND = 3;            // file not shared
+    BUSY = 4;                 // queue full, store full, no relay slot
+    DENIED = 5;               // banned, filtered, not allowed
+    reserved 6;               // was NOT_RESPONSIBLE; never used, removed
+  }
+  Code   code = 1;
+  uint32 retry_after = 2;     // seconds, a hint; 0 = no hint: the wait of the section concerned, else 60 s   Protocol.md §5.6
+}
+
+// ---------------------------------------------------------------------------------------
+// NAT traversal (Protocol.md §9)
+// ---------------------------------------------------------------------------------------
+
+message ReachTest {           // type 13
+  bytes   target_id = 1;      // set when forwarded: node to probe              Protocol.md §9.3
+  bytes   target_ep = 2;      // set when forwarded: endpoint to probe
+  fixed64 nonce = 3;          // random; goes into the PROBE as 8 B, big-endian
+  bool    ok = 4;             // answer: a prober was asked
+}
+
+message Relay {               // type 12
+  bool   reserve = 1;         // request: true = hold a slot, false = release   Protocol.md §9.4
+  uint32 ttl = 2;             // answer: seconds the slot is held without traffic
+}
+
+message Punch {               // type 11
+  bytes   peer_id = 1;        // to the relay: the target; to the target: the initiator; in the target's answer: the initiator; in the relay's answer to the initiator: the target   Protocol.md §9.5
+  bytes   ep4 = 2;            // sender's endpoints; the relay replaces the one of the family it received the Punch on (Protocol.md §9.5 steps 2 and 4)
+  bytes   ep6 = 3;
+  uint32  nat = 4;            // sender's class in the family of its own hop to the relay, which `seen` names to the receiver   Protocol.md §9.5
+  fixed64 nonce = 5;          // chosen by I, random; forwarded unchanged; T copies it into each PROBE as 8 B, big-endian; 0 in T's answer
+  uint32  seen = 6;           // set by the relay only: bit 0 = ep4, bit 1 = ep6 is the endpoint the relay itself observed; the other is claimed
+}
+
+// ---------------------------------------------------------------------------------------
+// Kad (Protocol.md §10)
+// ---------------------------------------------------------------------------------------
+
+enum Kind {
+  NONE = 0;                   // find nodes only                               Protocol.md §10.3
+  SOURCE = 1;
+  KEYWORD = 2;
+  NOTE = 3;
+  HEAD = 4;                   // file-set.md §5.2
+  MEMBER = 5;                 // file-set.md §6
+  LIVE = 6;                   // live.md §5
+  SUB = 7;                    // pubsub.md §5
+  HIDDEN = 8;                 // hidden-set.md §3
+  PART = 9;                   // multi-author-set.md §3.4
+  FRIEND = 10;                // friend.md §4
+  ANON = 11;                  // hops.md §4.3
+  GATE = 12;                  // hops.md §4.3
+  ALIAS = 13;                 // alias.md §1
+}
+
+message KadRequest {          // type 3
+  bytes  target = 1;          // 16 B                                          Protocol.md §10.3
+  uint32 want = 2;            // bit 0: IPv4 contacts, bit 1: IPv6 contacts; 0 = no contacts
+  Kind   kind = 3;            // NONE = find nodes only
+  Query  search = 4;          // present, also when empty: search for records of `kind`
+  Store  store = 5;           // present: store records of `kind`; never together with `search`
+  uint32 level = 6;           // KEYWORD: level the target was computed for; 0 in version 1   Protocol.md §10.1
+}
+
+message Query {
+  repeated string all = 1;    // every word must be a word of the name; normalised by the sender   Protocol.md §10.1
+  repeated string none = 2;   // no word may be a word of the name; normalised by the sender; at most 64 terms with `all`
+  uint64 min_size = 3;
+  uint64 max_size = 4;        // 0 = no limit
+  uint32 min_sources = 5;     // compared with FileInfo.sources of the record
+  string ext = 6;             // extension of the name without the `.`, normalised by the sender; empty = any   Protocol.md §10.1
+  uint32 offset = 7;          // skip this many matching records               Protocol.md §10.3
+}
+
+message Store {
+  Peer     source = 1;        // SOURCE, and the kinds stored like it (LIVE, SUB): my endpoints and relays; `id` MUST be empty   Protocol.md §10.3
+  repeated Signed files = 2;  // KEYWORD: files whose name contains the keyword; a Store holds at most 256 records   Protocol.md §10.3, §10.7
+  Signed   note = 3;          // NOTE                                          Protocol.md §10.7
+  repeated HttpSource http = 4;   // SOURCE: HTTP sources of the file; 3 per publisher and file   http-source.md §2
+  Signed   head = 5;          // HEAD, HIDDEN or PART                          file-set.md §5.2
+  bytes    signer = 6;        // 32 B key under which the records of this Store are checked and counted when it is not the key of the connection; allowed for every signed kind; ignored for SOURCE, LIVE, SUB and FRIEND   Protocol.md §10.7
+  repeated Signed members = 7;    // MEMBER                                    file-set.md §6
+  bytes    also = 8;          // SOURCE: n × 16 B further targets that get the same record; at most 256   Protocol.md §10.4
+  bytes    sealed = 9;        // FRIEND: exactly 384 B, padded before sealing; any other length than 384 B: REJECTED   friend.md §4
+  Signed   anon = 10;         // ANON or GATE; `signer` is always present      hops.md §4.3
+  repeated Signed aliases = 11;   // ALIAS                                     alias.md §1
+  repeated HttpSource links = 12; // SOURCE: links at file hosters; 3 per publisher and file   hoster.md §2
+}
+
+message Note {
+  uint32 rating = 1;          // 1..5, 0 = none                                Protocol.md §10.3
+  string text = 2;            // at most 512 B of UTF-8                        Protocol.md §10.7
+}
+
+message KadAnswer {           // type 4
+  bytes  nodes4 = 1;          // n × 22 B compact nodes, closest first          Protocol.md §10.3
+  bytes  nodes6 = 2;          // n × 34 B
+  bool   responsible = 3;     // this node considers the target inside its zone
+  uint32 load = 4;            // 0..100: files held under this target, in percent of the level size, rounded down   Protocol.md §10.8
+  repeated Peer   sources = 5;
+  repeated Signed files = 6;  // Protocol.md §10.7
+  repeated Signed notes = 7;  // Protocol.md §10.7
+  bool   more = 8;            // further results exist; ask again with `offset`
+  repeated bytes  keys = 9;   // 32 B publisher keys, referenced by Signed.key
+  repeated StoreResult results = 10;  // one per record of the Store, in order, then one per target of `also`; absent = all stored; entries missing from a shorter list read as STORED
+  bool   spill = 11;          // this node answered FULL for this target within the last record lifetime
+  repeated uint32 sites = 12; // one per entry of `files`, of `sets` in a MEMBER answer, or of `aliases`: publisher sites counted; 0 = not counted
+  repeated HttpSource http = 13;  // SOURCE search: HTTP sources; 16 per answer   http-source.md §2
+  repeated Signed sets = 14;  // answer to a search of kind HEAD, HIDDEN, PART or MEMBER   file-set.md §5.2
+  repeated bytes  friends = 15;   // answer to a search of kind FRIEND          friend.md §4
+  bytes  anon = 16;           // SOURCE search: n × 16 B node IDs of anonymous sources   hops.md §4.3
+  Signed gate = 17;           // GATE search                                   hops.md §4.3
+  repeated Signed aliases = 18;   // answer to a search of kind ALIAS          alias.md §1
+  repeated HttpSource links = 19; // SOURCE search: links at file hosters; 16 per answer   hoster.md §2
+}
+
+enum StoreResult {
+  STORED = 0;                 // Protocol.md §10.3
+  FULL = 1;                   // no room under this target                     Protocol.md §10.8
+  BUSY = 2;                   // no room on this node, or the sender is over its request rate; says nothing about the target
+  REJECTED = 3;               // failed a check (Protocol.md §10.7), or over a limit per address or per publisher on what is held
+  FAR = 4;                    // a target of `also` this node is not responsible for
+  OLDER = 5;                  // a newer or winning record is held; nothing changed
+}
+
+// ---------------------------------------------------------------------------------------
+// Signed records (Protocol.md §10.7)
+// ---------------------------------------------------------------------------------------
+
+message Record {
+  uint64   expires = 1;       // Unix time in seconds                          Protocol.md §10.7
+  FileInfo file = 2;          // KEYWORD
+  Note     note = 3;          // NOTE
+  Head     head = 4;          // HEAD                                          file-set.md §5.2
+  SetRef   member = 5;        // MEMBER                                        file-set.md §6
+  OnAir    on_air = 6;        // ON_AIR topic item; not stored in Kad          pubsub.md §4.2
+  Sealed   sealed = 7;        // HIDDEN                                        hidden-set.md §3
+  Joint    joint = 8;         // HEAD signed by several keys                   multi-author-set.md §1.3
+  Part     part = 9;          // PART                                          multi-author-set.md §3.4
+  Gates    gates = 10;        // GATE                                          hops.md §4.3
+  Alias    alias = 11;        // ALIAS                                         alias.md §1
+}
+
+message Signature {
+  uint32 alg = 1;             // 1 = Ed25519; 0 (absent) is invalid            Protocol.md §10.7
+  bytes  sig = 2;
+  reserved 3;                 // batch form: one signature over many records
+}
+
+message Signed {
+  bytes  body = 1;            // a serialised Record, verified over exactly these bytes   Protocol.md §10.7
+  uint32 key = 2;             // index into KadAnswer.keys; absent in a Store, and ignored there
+  repeated Signature sigs = 3;
+}
+
+// ---------------------------------------------------------------------------------------
+// File transfer (Protocol.md §12)
+// ---------------------------------------------------------------------------------------
+
+message FileRequest {         // type 5
+  bytes  root = 1;            // 32 B; required in the first FileRequest of the stream, ignored in later ones   Protocol.md §12.1
+  optional bytes have = 2;    // my piece bitmap, LSB first; missing bits are 0, so an empty bitmap holds no piece (the opposite of FileStatus.have); absent = unchanged (first message: not told)
+  uint32 want_sources = 3;    // max number of sources wanted, 0 = none
+  optional bytes relays4 = 4; // n × 22 B compact nodes: my relays, if I am not open; empty = none; absent = unchanged; the first 2 are used   Protocol.md §12.1, §12.5
+  optional bytes relays6 = 5; // n × 34 B; likewise
+  bool   brief = 6;           // I know name, ed2k and note; leave them out
+  repeated HttpResult http_results = 7;   // outcome per HTTP source or link used   http-source.md §2.1
+  bool   want_members = 8;    // on the stream of a manifest: tell me which members you have   file-set.md §4.1
+  CreditBid credit = 9;       // credit.md §4.1
+}
+
+message FileStatus {          // type 6
+  uint64 size = 1;            // Protocol.md §12.1
+  string name = 2;
+  bytes  ed2k = 3;            // Protocol.md §7.4
+  optional bytes  have = 4;   // uploader's piece bitmap, LSB first; missing bits are 1, so an empty bitmap is the complete file; absent = unchanged / not told
+  optional uint32 rank = 5;   // queue position; 0 = upload slot granted; absent = unchanged / not told
+  repeated Peer sources = 6;  // source exchange; at most `want_sources` of the request, and at most 50
+  Note   note = 7;            // uploader's rating/comment on the file
+  optional uint32 recheck = 8;    // queued: 0 = stay connected, else ask again after this many seconds; ignored while rank = 0; absent = unchanged / not told   Protocol.md §12.5
+  repeated HttpSource http = 9;   // HTTP sources; 8 per message                http-source.md §2
+  optional bytes members = 10; // bitmap over FileSet.files, LSB first; bit set = member complete; missing bits are 0; absent = not told   file-set.md §4.1
+  CreditOffer credit = 11;    // credit.md §4.1
+  repeated HttpSource links = 12; // links at file hosters; 8 per message      hoster.md §2
+  bool   ping = 13;           // answer this message with a FileRequest within 30 s   Protocol.md §12.5
+}
+
+message SlotOffer {           // type 17
+  bytes  root = 1;            // the file the downloader is queued for         Protocol.md §12.5
+}
+
+message BlockRequest {        // type 7
+  repeated uint64 offset = 1; // packed; each a multiple of 256 KiB            Protocol.md §12.2
+  repeated uint32 length = 2; // packed, same count; the length of the block at that offset
+  bool   raw = 3;             // send these ranges as they are, never compressed   Protocol.md §12.3
+}
+
+message Block {               // type 8; followed by `size` raw bytes outside the frame
+  uint64 offset = 1;          // Protocol.md §12.3
+  uint32 size = 2;            // number of bytes that follow this frame; the range length when not compressed; at most 256 KiB
+  uint32 plain = 3;           // set when those bytes are zstd: length of the file data they hold
+}
+
+message HashRequest {         // type 9
+  uint64 first = 1;           // first block index                             Protocol.md §12.4
+  uint32 count = 2;           // number of blocks; at most 32,000
+}
+
+message HashAnswer {          // type 10
+  bytes cvs = 1;              // count × 32 B block chaining values            Protocol.md §12.4
+  bytes proof = 2;            // n × 32 B sibling values linking the range to the root
+}
+
+message BadBlock {            // type 38, downloader → uploader, on the file stream; not answered
+  uint64 offset = 1;          // start of the block that failed, in the file of the stream   Protocol.md §12.3
+}
+
+// ---------------------------------------------------------------------------------------
+// Browse (browse.md), Chat (chat.md)
+// ---------------------------------------------------------------------------------------
+
+message Browse {              // type 14
+  string dir = 1;             // empty = top level                             browse.md §1
+  uint32 offset = 2;          // skip this many entries
+}
+
+message BrowseAnswer {        // type 15
+  repeated string   dirs = 1; // browse.md §1
+  repeated FileInfo files = 2;
+  bool   more = 3;            // further entries exist; ask again with `offset`
+}
+
+message Chat {                // type 16
+  string  text = 1;           // at most 4,096 bytes in UTF-8                  chat.md §1
+  fixed64 id = 2;             // random per message, the same again when it is repeated: a replay id, not a request id
+}
+
+message ChatAck {             // type 18
+}
+
+// ---------------------------------------------------------------------------------------
+// HTTP sources (http-source.md), links at file hosters (hoster.md)
+// ---------------------------------------------------------------------------------------
+
+message HttpSource {
+  string url = 1;             // absolute http or https URL, or a hoster link (hoster.md)   http-source.md §1
+  uint64 offset = 2;          // position in the file of the first byte this source holds
+  uint64 length = 3;          // number of file bytes it holds; 0 = up to the end of the file
+  uint64 expires = 4;         // Unix time after which the URL may be gone; 0 = unknown
+  SealedChunk sealed = 5;     // absent = plain source                         http-source.md §1
+  string hashes = 6;          // optional: URL of the file's hash body         http-source.md §3.1
+}
+
+message SealedChunk {         // http-source.md §1 (not `Sealed`, the record of hidden-set.md)
+  uint32 alg = 1;             // 1 = AES-256-CBC with PKCS#7 padding, SHA-256 over the ciphertext
+  bytes  key = 2;             // 32 B
+  bytes  iv = 3;              // 16 B
+  bytes  digest = 4;          // 32 B: hash of the whole ciphertext
+}
+
+message HttpResult {
+  bytes  url_id = 1;          // H("ed3k v1 http", url)[0..8)                  http-source.md §2.1
+  Code   code = 2;
+  uint64 bytes = 3;           // bytes fetched; sent with OK only                 http-source.md §2.1
+
+  enum Code {
+    OK = 0;                   // fetched and verified                          http-source.md §2.1
+    DISABLED = 1;             // downloads over HTTP are switched off
+    BUSY = 2;                 // at the limit of concurrent fetches
+    NOT_WANTED = 3;           // range not needed (any more)
+    BAD_SOURCE = 4;           // failed a check of http-source.md §5 on the description itself: scheme, form of the URL, range, sealed fields
+    HTTP_FAILED = 5;          // transport failure, a status that is not 200 or 206, or a target address refused by http-source.md §5
+    SIZE_MISMATCH = 6;        // the server sent another length than described
+    CORRUPT = 7;              // digest, padding or BLAKE3 verification failed
+    NO_RESOLVER = 8;          // this client has no resolver for the hoster   hoster.md §2
+    NEEDS_USER = 9;           // a wait, a puzzle, a login or a quota stands in the way; not tried further for now   hoster.md §2
+    GONE = 10;                // the hoster says the file was removed          hoster.md §2
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// File sets (file-set.md), hidden sets (hidden-set.md), several authors
+// (multi-author-set.md), torrents (torrent.md), Usenet (usenet.md), chaintube (chaintube.md)
+// ---------------------------------------------------------------------------------------
+
+// The manifest file is "ed3kset" ‖ 0x01 ‖ SetFile (file-set.md §1).
+message SetFile {
+  bytes  body = 1;            // a serialised FileSet                          file-set.md §1
+  bytes  key = 2;             // optional: 32 B Ed25519 key of the author
+  repeated Signature sigs = 3;    // optional: over "ed3k v1 set manifest" ‖ body; with `key`, exactly one of `sigs` and `grant`   file-set.md §2.4
+  SignedGrant grant = 4;      // multi-author-set.md §1.1
+  repeated CoSig cosigs = 5;  // each over "ed3k v1 set cosig" ‖ body          multi-author-set.md §1.2
+  Cert   cert = 6;            // for display only; the certificate that counts is in the PART record   multi-author-set.md §3.3
+}
+
+message FileSet {
+  string title = 1;           // file-set.md §1
+  repeated string dirs = 2;   // directory paths, "/" between components
+  repeated Member files = 3;
+  string comment = 4;
+  uint64 created = 5;         // Unix time in seconds; 0 = not told
+  bytes  id = 6;              // optional: 1 to 32 B, names a set that changes   file-set.md §5
+  uint64 seq = 7;             // with `id`: version number, higher = newer
+  Open    open = 8;           // multi-author-set.md §3.1
+  Torrent torrent = 9;        // torrent.md §1
+  Usenet  usenet = 10;        // usenet.md §3
+  Tube    tube = 11;          // chaintube.md §2.3
+  SignedOffer offer = 12;     // paid set                                      subscription.md §3
+  EpochKey released = 13;     // newest released epoch key                     subscription.md §4.3
+  SignedChain released_chain = 14;  // the season of `released`
+}
+
+message Member {
+  bytes  root = 1;            // 32 B BLAKE3 root                              file-set.md §1
+  uint64 size = 2;
+  string name = 3;            // file name, one path component
+  uint32 dir = 4;             // 0 = top level of the set; else 1 + index into `dirs`
+  bytes  ed2k = 5;            // optional: 16 B eD2K hash                      Protocol.md §7.4
+  bool   set = 6;             // this member is the manifest of an inner set   file-set.md §2.5
+  uint32 set_files = 7;       // with `set`: number of files in the inner set, its inner sets included
+  uint64 set_size = 8;        // with `set`: sum of their sizes
+  bool   sealed = 9;          // the shared file is sealed with k_data; root and size are those of the sealed file   hidden-set.md §4.2
+  Mount  mount = 10;          // with `set`: a directory handed to another author   multi-author-set.md §2
+  repeated string links = 11; // links that deliver this member whole; at most 4, each at most 1,024 B   hoster.md §5
+  optional uint64 epoch = 12; // sealed with the key of this epoch; root and size are those of the sealed file   subscription.md §8.1
+}
+
+message Head {
+  bytes  id = 1;              // FileSet.id, 1 to 32 B                         file-set.md §5.2
+  uint64 seq = 2;             // FileSet.seq of the manifest named here
+  bytes  root = 3;            // 32 B root of that manifest
+  uint64 size = 4;            // its size
+  string name = 5;            // its file name, at most 255 B
+}
+
+message SetRef {
+  bytes  set = 1;             // 32 B root of a manifest that lists the file   file-set.md §6
+  uint64 size = 2;            // size of that manifest
+  string name = 3;            // its file name, at most 255 B
+  uint32 set_files = 4;       // as in FileInfo                                file-set.md §3
+  uint64 set_size = 5;
+}
+
+message Sealed {
+  uint64 seq = 1;             // FileSet.seq of the manifest named inside      hidden-set.md §3
+  bytes  data = 2;            // sealed with k_head: a serialised Head (file-set.md §5.2); 12 to 256 B
+  optional uint64 epoch = 3;  // paid hidden set: data and manifest sealed with keys of this epoch   subscription.md §8.3
+}
+
+message Grant {
+  bytes  id = 1;              // FileSet.id of the set                         multi-author-set.md §1.1
+  uint64 number = 2;          // 1 or higher; a higher number replaces every lower one
+  repeated bytes keys = 3;    // 32 B Ed25519 keys, at most 8 (initial)
+  uint32 required = 4;        // 1 .. min(4, number of keys) (initial)
+}
+
+message SignedGrant {
+  bytes  body = 1;            // a serialised Grant                            multi-author-set.md §1.1
+  bytes  key = 2;             // 32 B owner key
+  repeated Signature sigs = 3;    // by the owner key, over "ed3k v1 set grant" ‖ body
+}
+
+message CoSig {
+  uint32 signer = 1;          // index into Grant.keys                         multi-author-set.md §1.1
+  repeated Signature sigs = 2;
+}
+
+message Joint {
+  bytes  head = 1;            // a serialised Head (file-set.md §5.2)          multi-author-set.md §1.3
+  SignedGrant grant = 2;
+  repeated CoSig cosigs = 3;  // each over "ed3k v1 joint head" ‖ target(16) ‖ Grant.number(8, big-endian) ‖ head
+}
+
+message Mount {
+  bytes  key = 1;             // 32 B owner key of the set that fills this directory   multi-author-set.md §2
+  bytes  id = 2;              // its id
+  uint64 max_size = 3;        // sum of file sizes it may hold; 0 = no limit (file-set.md §2.1 has none on sizes)
+  uint32 max_files = 4;       // number of files it may hold; 0 = likewise
+}
+
+message Open {
+  string dir = 1;             // directory of the set under which the parts appear; not empty   multi-author-set.md §3.1
+  repeated Issuer issuers = 2;    // empty = every key may add a part
+  uint64 max_size = 3;        // per part, when there is no issuer; 0 = the caps of multi-author-set.md §3.1 only
+  uint32 max_files = 4;       // 0 = likewise
+  repeated Change changes = 5;    // decisions about single authors
+}
+
+message Issuer {
+  bytes  key = 1;             // 32 B Ed25519 key                              multi-author-set.md §3.1
+  string name = 2;            // shown with the names it certifies
+  uint64 max_size = 3;        // per part of an author with a certificate of this issuer; 0 = the caps of multi-author-set.md §3.1 only
+  uint32 max_files = 4;       // 0 = likewise
+}
+
+message Change {
+  bytes  author = 1;          // 16 B node ID of the author's key              multi-author-set.md §3.1
+  bool   banned = 2;          // no part of this author is shown
+  uint64 below = 3;           // versions of the part with seq below this are not shown
+  uint64 max_size = 4;        // other limits for this author; 0 = no change
+  uint32 max_files = 5;
+}
+
+message Cert {
+  bytes  issuer = 1;          // 32 B key of the issuer                        multi-author-set.md §3.2
+  string name = 2;            // at most 64 B
+  uint64 expires = 3;         // Unix time in seconds; 0 = never
+  repeated Signature sigs = 4;    // by the issuer, over "ed3k v1 part cert" ‖ author key(32) ‖ expires(8, big-endian) ‖ name
+}
+
+message Part {
+  bytes  set_key = 1;         // 32 B owner key of the set                     multi-author-set.md §3.4
+  bytes  id = 2;              // id of the set, 1 to 32 B
+  Cert   cert = 3;            // absent for a set without issuers
+  uint64 seq = 4;             // version of the part
+  bytes  root = 5;            // 32 B root of the part's manifest
+  uint64 size = 6;
+}
+
+message Torrent {
+  bytes  btih = 1;            // 20 B: SHA-1 of the info dictionary; a version 1 or hybrid torrent   torrent.md §1
+  bytes  btmh = 2;            // 32 B: SHA-256 of the info dictionary; a version 2 or hybrid torrent
+  bytes  info = 3;            // 32 B BLAKE3 root of the info dictionary
+  uint32 info_size = 4;       // its size in bytes
+}
+
+message Usenet {
+  bytes  id = 1;              // 32 B: the post id                             usenet.md §1
+  bytes  list = 2;            // 32 B BLAKE3 root of the article list         usenet.md §2
+  uint32 list_size = 3;       // its size in bytes
+}
+
+// The article list file is "ed3knzb" ‖ 0x01 ‖ ArticleList (usenet.md §2).
+message ArticleList {
+  repeated Post files = 1;    // in ascending order of their file ids; equal file ids once   usenet.md §1
+}
+
+message Post {
+  string name = 1;            // file name, from the articles                  usenet.md §2
+  uint64 size = 2;            // size of the decoded file, from the articles
+  repeated string ids = 3;    // message IDs of parts 1 to n, without "<" and ">"
+}
+
+message Tube {
+  uint64 chain = 1;           // chain ID                                      chaintube.md §2.3
+  bytes  contract = 2;        // 20 B address of the contract that holds the entry; the content contract for a video
+  bytes  author = 3;          // 20 B address of the account that publishes the set on the chain
+  uint64 content_id = 4;      // ID of the entry at `contract`; 0 = not yet known (the first upload)   chaintube.md §2.3
+}
+
+// ---------------------------------------------------------------------------------------
+// Other names of a file (alias.md)
+// ---------------------------------------------------------------------------------------
+
+message Alias {
+  string scheme = 1;          // the kind of name                              alias.md §2
+  bytes  id = 2;              // the name, in the form the scheme fixes; 1 to 64 B
+  Relation rel = 3;
+  bytes  root = 4;            // 32 B BLAKE3 root
+  uint64 size = 5;            // size of the file with that root
+  string name = 6;            // its file name
+  uint32 set_files = 7;       // SET and PACKED: as in FileInfo (file-set.md §3)
+  uint64 set_size = 8;
+  string entry = 9;           // PACKED: path of the file inside the archive, "/" between components; absent = the only file
+  string password = 10;       // PACKED: password of the archive, if it has one
+
+  enum Relation {
+    SAME = 0;                 // the bytes that `id` names are the file `root`   alias.md §1
+    SET = 1;                  // `id` names several files; `root` is the manifest that lists them
+    PACKED = 2;               // `root` is the manifest of an archive; unpacked, it gives the file `id` names
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// Live streams (live.md)
+// ---------------------------------------------------------------------------------------
+
+// The channel file is "ed3klive" ‖ 0x01 ‖ LiveFile (live.md §1.2).
+message LiveFile {
+  bytes body = 1;             // a serialised Channel, verified over exactly these bytes   live.md §1.2
+  bytes key = 2;              // 32 B channel key
+  repeated Signature sigs = 3;    // over "ed3k v1 live channel" ‖ body
+}
+
+message Channel {
+  bytes  id = 1;              // 1 to 16 B                                     live.md §1.1
+  string title = 2;
+  string comment = 3;
+  string lang = 4;            // BCP 47 tag, for example "en"
+  string media = 5;           // media type of a segment, for example "video/mp4"
+  string codecs = 6;          // RFC 6381 codecs string, for example "avc1.64001f,mp4a.40.2"
+  uint32 kbps = 7;            // typical bit rate
+  uint32 segment_ms = 8;      // duration a segment aims at
+  uint32 window = 9;          // segments a viewer keeps, 8 to 240; 0 or absent = 30
+  uint64 created = 10;
+  SignedOffer offer = 11;     // paid channel                                  subscription.md §3
+}
+
+message LiveRecord {
+  bytes body = 1;             // a serialised LiveSegment, verified over exactly these bytes   live.md §2.2
+  repeated Signature sigs = 2;    // over "ed3k v1 live segment" ‖ stream(16) ‖ body
+}
+
+message LiveSegment {
+  uint64 start = 1;           // the broadcast                                 live.md §1.1
+  uint64 seq = 2;
+  bytes  root = 3;            // 32 B
+  uint32 size = 4;
+  uint32 ms = 5;              // duration
+  bytes  init = 6;            // root of the init data; absent = none
+  uint32 init_size = 7;
+  bool   gap = 8;             // not continuous with the segment before: the player resets
+  bool   end = 9;             // the broadcast is over; no segment, `root` absent
+  optional uint64 epoch = 10; // paid channel: the segment is sealed with the key of this epoch   subscription.md §7.1
+  optional uint64 init_epoch = 11;  // paid: init data sealed with the key of this epoch; absent = `epoch`
+}
+
+message LiveJoin {            // type 19
+  bytes  stream = 1;          // 16 B                                          live.md §3
+  uint32 want_peers = 2;      // max number of peers wanted, 0 = none
+  bool   want_channel = 3;    // send `media` and `codecs`
+  bytes  relays4 = 4;         // n × 22 B compact nodes: my relays, if I am a leaf
+  bytes  relays6 = 5;         // n × 34 B
+  bytes  proof = 6;           // private channel: 16 B                         live.md §10.3
+  reserved 7, 8;              // the joiner's pass travels in LiveState        subscription.md §6.3
+  uint64 offer_issued = 9;    // paid channel: `issued` of the offer I hold, from the channel file or newer; 0 = none
+}
+
+message LiveState {           // type 20
+  optional uint64 start = 1;  // broadcast this state is about; absent = unchanged / not told   live.md §3
+  optional uint64 first = 2;  // seq of bit 0 of `have`; absent = unchanged / not told
+  optional bytes  have = 3;   // segments I hold completely, LSB first; absent = unchanged / not told
+  repeated LiveRecord records = 4;
+  repeated Peer peers = 5;    // other peers of this stream
+  string media = 6;           // answer to want_channel
+  string codecs = 7;
+  Refusal refusal = 8;        // set: I do not take you as a neighbour
+  bytes  proof = 9;           // private channel: 16 B, in the first answer to a valid proof, whatever `refusal`   live.md §10.3
+  SignedPass pass = 10;       // paid channel: the peer's in its first answer; the joiner's in its first LiveState after it   subscription.md §6.3
+  PassProof pass_proof = 11;
+  EpochKey key = 12;          // pushed to a neighbour whose viewer pass covers it
+  SignedOffer offer = 13;     // in the first answer if newer than `offer_issued`, and pushed
+  SignedChain chain = 14;     // the season of `key`; with the first key of each season sent on this exchange
+}
+
+enum Refusal {                // live.md §3; prefixed, since enum values share one scope per package
+  LIVE_NONE = 0;
+  LIVE_FULL = 1;
+  LIVE_LEFT = 2;
+  LIVE_BLOCKED = 3;
+  LIVE_PASS = 4;              // no valid pass for this scope and epoch        subscription.md §6.3
+}
+
+message LiveGet {             // type 21
+  bytes  stream = 1;          // live.md §3.2
+  bytes  root = 2;            // a segment or init data
+}
+
+// ---------------------------------------------------------------------------------------
+// Publish and subscribe (pubsub.md)
+// ---------------------------------------------------------------------------------------
+
+enum TopicType {
+  TOPIC_NONE = 0;             // pubsub.md §1
+  SET_HEAD = 1;               // key and id of a set that changes (file-set.md §5.1)
+  ON_AIR = 2;                 // key and id of a live channel (live.md §1.1)
+  PAID = 3;                   // pass holders of a paid scope; topic = scope   subscription.md §8.4
+}
+
+message TopicJoin {           // type 22
+  bytes     topic = 1;        // 16 B                                          pubsub.md §2
+  TopicType type = 2;
+  uint64    held = 3;         // order number of the item I hold (SET_HEAD: Head.seq, ON_AIR: issued, PAID: Sealed.seq), or the highest remembered (pubsub.md §4.1, §4.2) when it ran out; 0 = none
+  uint32    want_peers = 4;   // max number of peers wanted, 0 = none
+  bytes     relays4 = 5;      // n × 22 B compact nodes: my relays, if I am a leaf
+  bytes     relays6 = 6;      // n × 34 B
+  uint64    held_grant = 7;   // Grant.number of the joint head I hold, 0 = none or a sole-author head   pubsub.md §2.1
+  reserved 8, 9;              // the joiner's pass travels in TopicState       subscription.md §6.3
+  uint64    offer_issued = 10;  // PAID: `issued` of the offer I hold; 0 = none
+}
+
+message TopicState {          // type 23
+  TopicItem item = 1;         // pubsub.md §2
+  repeated Peer peers = 2;    // other subscribers of this topic
+  TopicRefusal refusal = 3;   // set: I do not take you as a neighbour
+  EpochKey  key = 4;          // PAID: pushed to a neighbour whose viewer pass covers it   subscription.md §6.3
+  SignedPass pass = 5;        // PAID: the peer's in its first answer; the joiner's in its first TopicState after it
+  PassProof pass_proof = 6;
+  SignedOffer offer = 7;      // PAID: in the first answer if newer than `offer_issued`, and pushed
+  SignedChain chain = 8;      // PAID: the season of `key`; with the first key of each season sent on this exchange
+}
+
+message TopicItem {
+  Signed head = 1;            // SET_HEAD: `key` absent                        pubsub.md §4.1
+  Signed on_air = 2;          // ON_AIR: `key` absent                          pubsub.md §4.2
+  Signed hidden = 3;          // PAID, hidden set: the HIDDEN record; `key` absent   subscription.md §8.4
+}
+
+enum TopicRefusal {
+  TOPIC_OK = 0;               // pubsub.md §2
+  TOPIC_FULL = 1;
+  TOPIC_LEFT = 2;
+  TOPIC_PASS = 3;             // no valid pass for this scope and epoch        subscription.md §6.3
+}
+
+message OnAir {
+  bytes  id = 1;              // channel id                                    pubsub.md §4.2
+  uint64 start = 2;           // the broadcast (live.md §1.1)
+  uint64 issued = 3;          // Unix time in seconds when this notice was signed
+  bool   end = 4;             // the broadcast is over
+}
+
+// ---------------------------------------------------------------------------------------
+// Finding nodes in the local network (lan-discovery.md)
+// ---------------------------------------------------------------------------------------
+
+// Carried in the multicast datagram salt(8) ‖ mask(magic(4) ‖ body), outside any connection.
+message LanAnnounce {
+  bytes  id = 1;              // 16 B node ID                                  lan-discovery.md §1
+  uint32 port = 2;            // UDP port the node listens on, on this interface
+  bool   reply = 3;           // sent in answer to an announce; is not answered
+}
+
+message LanQuery {            // type 24
+  bytes roots = 1;            // n × 16 B: root[0..16) of files I look for; at most 256   lan-discovery.md §2
+}
+
+message LanAnswer {           // type 25
+  bytes have = 1;             // one bit per entry, LSB first: I share that file, completely or in part   lan-discovery.md §2
+}
+
+// ---------------------------------------------------------------------------------------
+// Anonymous paths (hops.md)
+// ---------------------------------------------------------------------------------------
+
+message HopCreate {           // type 26. First frame of an exchange between two neighbours
+  bytes path = 1;             // 8 B, random, chosen by the sender; names the path on this connection only, in both directions   hops.md §2.2
+  bytes e = 2;                // 32 B, X25519 public value made by the owner for this hop alone
+}
+
+message HopCreated {          // type 27
+  bytes f = 1;                // 32 B, X25519 public value made by the hop for this path   hops.md §2.2
+  bytes proof = 2;            // 32 B                                          hops.md §2.3
+}
+
+message HopExtend {           // type 28. From the owner to the last hop, on the control stream
+  bytes node = 1;             // compact node, 22 or 34 B: the hop to add      hops.md §2.2
+  HopCreate create = 2;       // `path` is left empty; the last hop fills it in
+}
+
+message HopGate {             // type 29. Request and answer on the control stream
+  bytes gate = 1;             // answer: 8 B, random, chosen by the last hop   hops.md §3.1
+}
+
+message HopLookup {           // type 30. First frame on a stream, read by the last hop
+  KadRequest request = 1;     // hops.md §4.1
+}
+
+message HopLookupAnswer {     // type 31
+  repeated KadAnswer answers = 1;   // those of the closest set (Protocol.md §10.4), closest first   hops.md §4.1
+}
+
+message HopStream {           // type 32. First frame of an exchange between two neighbours; followed by raw bytes
+  bytes  path = 1;            // as in HopCreate, for this connection          hops.md §2.4
+  uint64 number = 2;          // never 0; the opener counts up and never uses a number twice on a path; the receiver accepts unseen numbers above (highest seen − 1,024) (hops.md §2.4). Even: opened by the owner. Odd: opened at the last hop
+}
+
+message HopOk {}              // type 39. Status frame, first in the reverse direction after HopStream, HopConnect, HopJoin; raw bytes follow   hops.md §2.4, §3.1
+
+message HopConnect {          // type 33. First frame on a stream, read by the last hop; answered HopOk or Error, then raw bytes
+  bytes node = 1;             // compact node, 22 or 34 B                      hops.md §3.1
+  bytes gate = 2;             // 8 B; absent = the node itself is meant
+  bytes relays4 = 3;          // n × 22 B compact nodes: relays of `node`, from its Peer record; empty = none   hops.md §3.1
+  bytes relays6 = 4;          // n × 34 B; likewise
+}
+
+message HopJoin {             // type 34. First frame of an exchange from outside a path; answered HopOk or Error, then raw bytes
+  bytes gate = 1;             // 8 B; absent = this node itself is meant       hops.md §3.1
+}
+
+message Gates {
+  uint64 issued = 1;          // Unix time; the later record replaces the earlier   hops.md §4.3
+  repeated Gate gates = 2;    // at most 4
+}
+
+message Gate {
+  bytes node = 1;             // compact node, 22 or 34 B                      hops.md §4.3
+  bytes gate = 2;             // 8 B
+}
+
+// ---------------------------------------------------------------------------------------
+// Credits (credit.md)
+// ---------------------------------------------------------------------------------------
+
+message CreditBid {
+  bytes  payer = 1;           // 20 B, my credit address; in the first FileRequest of the stream   credit.md §4.1
+  optional uint64 max_price = 2; // µ per MiB I pay at most for a priority slot; absent = unchanged (first FileRequest of a queue entry: no bid); 0 = bid withdrawn
+}
+
+message CreditOffer {
+  bytes  payee = 1;           // 20 B, the uploader's credit address; sent once per stream   credit.md §4.1
+  optional uint64 floor = 2;  // µ per MiB, lowest bid taken; absent = no priority slots
+  uint64 clearing = 3;        // µ per MiB a bid has to reach to get the next priority slot
+  uint32 used = 4;            // priority slots in use
+  uint32 slots = 5;           // priority slots at most                        credit.md §5.1
+  optional uint64 price = 6;  // µ per MiB charged from the next tranche on; with rank = 0 only; absent = unchanged / not told
+  Receipt last = 7;           // the receipt of the newest `day` I hold from `payer`, if any
+  uint64 due = 8;             // cumulative `spent` the uploader needs before it serves the next tranche, in µ; with rank = 0 only   credit.md §3.2
+  bytes  challenge = 9;       // 16 B, random, new per queue entry
+}
+
+message Receipt {             // type 35, downloader → uploader, on the file stream
+  uint32 day = 1;             // credit.md §4.2
+  uint64 kib = 2;
+  uint64 spent = 3;
+  bytes  sig = 4;             // 65 B
+  bytes  proof = 5;           // 65 B, EIP-712 signature over Bid(address payer,address payee,bytes16 challenge)   credit.md §5.2
+}
+
+message CreditRelay {         // type 36, request
+  repeated SignedReceipt receipts = 1;    // at most 32 (initial)               credit.md §4.3
+  repeated SignedHold holds = 2;          // at most 8 (initial)
+}
+
+message SignedHold {          // the arguments of holdFor                      credit.md §4.3, §6.5
+  bytes  payer = 1;           // 20 B
+  bytes  payee = 2;           // 20 B
+  uint64 amount = 3;          // µ
+  uint64 nonce = 4;           // above every nonce this payer used for this payee
+  uint64 deadline = 5;        // Unix time in seconds; the ledger refuses the hold after it
+  bytes  sig = 6;             // 65 B, by the credit key of `payer`
+}
+
+message SignedReceipt {
+  bytes  issuer = 1;          // 20 B                                          credit.md §4.3
+  bytes  holder = 2;          // 20 B
+  uint32 day = 3;
+  uint64 kib = 4;
+  uint64 spent = 5;
+  bytes  sig = 6;
+}
+
+message CreditRelayAnswer {   // type 37, answer
+  bytes  tx = 1;              // 32 B, hash of the settle transaction that was sent; absent if none was; a holdFor is not named   credit.md §4.3
+}
+
+// ---------------------------------------------------------------------------------------
+// Paid subscriptions (subscription.md)
+// ---------------------------------------------------------------------------------------
+
+message Offer {
+  bytes  scope = 1;           // 16 B                                          subscription.md §3
+  uint64 issued = 2;          // Unix time in seconds; a later offer replaces an earlier one; at most 1 h ahead (subscription.md §3)
+  uint64 t0 = 3;              // start of epoch 0, Unix time in seconds; never changes
+  uint32 period = 4;          // epoch length in seconds, 60 to 2,678,400; never changes
+  SignedChain chain = 5;      // the current season                            subscription.md §4.2
+  repeated bytes issuers = 6; // 32 B Ed25519 keys that may sign passes; at most 8
+  string price = 7;           // for display, at most 128 B
+  string pay_url = 8;         // https, at most 1,024 B                        subscription.md §9
+  string pass_url = 9;        // https, at most 1,024 B
+  uint32 free_after = 10;     // epochs until an epoch is released; 0 = never  subscription.md §4.3
+  string terms = 11;          // for display, at most 1,024 B
+  string report_url = 12;     // https, at most 1,024 B; absent = no reports   subscription.md §5.3
+  uint32 devices = 13;        // node IDs one holder key may use at once, 1 to 63; 0 = 3
+}
+
+message Chain {
+  bytes  scope = 1;           // 16 B                                          subscription.md §4.2
+  uint64 base = 2;            // first epoch of the season; at most the epoch of now + 1 h, plus 1 (subscription.md §3)
+  uint32 length = 3;          // 1 to 2^20
+  bytes  anchor = 4;          // 32 B, H("ed3k v1 paid anchor", scope ‖ K(base))
+}
+
+message SignedChain {
+  bytes body = 1;             // a serialised Chain, verified over exactly these bytes   subscription.md §4.2
+  repeated Signature sigs = 2;    // by the publisher, over "ed3k v1 paid season" ‖ body
+}
+
+message SignedOffer {
+  bytes body = 1;             // a serialised Offer, verified over exactly these bytes   subscription.md §3
+  repeated Signature sigs = 2;    // by the publisher, over "ed3k v1 paid offer" ‖ body; at most 4 KiB in all
+}
+
+message EpochKey {
+  uint64 epoch = 1;           // subscription.md §4.1
+  bytes  key = 2;             // 32 B
+}
+
+enum PassRole {
+  PASS_VIEWER = 0;            // gets epoch keys and joins the mesh            subscription.md §5
+  PASS_RELAY = 1;             // joins the mesh and carries data; gets no keys
+}
+
+message Pass {
+  repeated bytes scopes = 1;  // 16 B each, 1 to 16                            subscription.md §5
+  bytes    holder = 2;        // 32 B Ed25519 key of the subscription
+  uint64   until = 3;         // Unix time in seconds
+  PassRole role = 4;
+  uint64   issued = 5;        // Unix time in seconds
+}
+
+message SignedPass {
+  bytes body = 1;             // a serialised Pass, verified over exactly these bytes   subscription.md §5
+  bytes key = 2;              // 32 B signer: the publisher of each scope, or an issuer of its offer
+  repeated Signature sigs = 3;    // over "ed3k v1 paid pass" ‖ body; at most 1 KiB in all
+}
+
+message PassProof {
+  uint64 minute = 1;          // Unix time / 60, rounded down                  subscription.md §5.2
+  bytes  sig = 2;             // 64 B, by holder over "ed3k v1 paid proof" ‖ scope ‖ sender ID ‖ receiver ID ‖ minute(8)
+}
+
+// Body of a POST to Offer.report_url, media type application/x-ed3k-report (subscription.md §5.3).
+message ShareReport {
+  bytes      scope = 1;       // 16 B                                          subscription.md §5.3
+  SignedPass pass = 2;
+  bytes      receiver = 3;    // 16 B node ID of the reporting node
+  repeated Sighting seen = 4; // devices + 1 to 64
+}
+
+message Sighting {
+  bytes     sender = 1;       // 16 B node ID that showed the pass             subscription.md §5.3
+  PassProof proof = 2;
+}
+
+message KeyRequest {          // type 40
+  bytes      scope = 1;       // 16 B                                          subscription.md §6.1
+  SignedPass pass = 2;        // absent: asks for the offer, the released keys and the answerer's pass only
+  PassProof  proof = 3;       // with `pass`                                   subscription.md §5.2
+  uint64     have = 4;        // the newest epoch whose key I hold of the season that epoch belongs to (subscription.md §4.2), plus 1; 0 = none
+  bool       want_offer = 5;
+  uint64     tips_have = 6;   // base of the newest earlier season whose tip I hold, plus 1; 0 = none
+  uint64     offer_issued = 7;  // `issued` of the offer I hold; 0 = none
+  bytes      private_proof = 8; // 16 B, H("ed3k v1 paid private key", k ‖ requester's node ID ‖ answerer's node ID)[0..16); private channel only
+}
+
+enum KeyRefusal {
+  KEY_OK = 0;                 // subscription.md §6.1
+  KEY_NO_PASS = 1;            // no pass, a relay pass, or one that fails or covers nothing new
+  KEY_NOT_HELD = 2;           // no key at or above `have` that the pass covers
+  KEY_UNKNOWN = 3;            // no offer known for this scope
+  KEY_BUSY = 4;               // over the limit for this holder key
+}
+
+message KeyAnswer {           // type 41
+  EpochKey    key = 1;        // the newest key the pass covers                subscription.md §6.1
+  EpochKey    released = 2;   // the newest released key; absent if none
+  SignedOffer offer = 3;      // if asked, or if its `issued` is above `offer_issued`
+  KeyRefusal  refusal = 4;
+  repeated EpochKey    tips = 5;    // tips of earlier seasons, oldest first; at most 256   subscription.md §6.2
+  repeated SignedChain chains = 6;  // the season of `key`, of `released` and of each tip
+  SignedPass  pass = 7;       // to a request without `pass`: my own pass, when I hold a key of the scope
+  PassProof   pass_proof = 8; // with `pass`                                   subscription.md §5.2
+  bytes       private_proof = 9;  // 16 B, H("ed3k v1 paid private answer", k ‖ requester's node ID ‖ answerer's node ID)[0..16); to a valid `private_proof`   subscription.md §6.1
+}
+
+// ---------------------------------------------------------------------------------------
+// Finding a known node (friend.md)
+// ---------------------------------------------------------------------------------------
+
+// Sealed inside Store.sealed / KadAnswer.friends (friend.md §4).
+message FriendRecord {
+  Peer   peer = 1;            // my endpoints, and relays if I am a leaf; `id` empty   friend.md §4
+  uint64 issued = 2;          // Unix time in seconds
+}
+
+// Sealed inside Store.sealed under the request target (friend.md §3).
+message FriendRequest {
+  bytes  key = 1;             // 32 B node key of the asking node              friend.md §3
+  string text = 2;            // at most 96 B
+  uint64 issued = 3;          // Unix time in seconds
+  repeated Signature sigs = 4;    // by the asking node; see friend.md §3 for the signed bytes
+}
+
+// ---------------------------------------------------------------------------------------
+// First contact (bootstrap.md)
+// ---------------------------------------------------------------------------------------
+
+// The node list file is "ed3knod" ‖ 0x01 ‖ NodeFile (bootstrap.md §2).
+message NodeFile {
+  bytes  body = 1;            // a serialised NodeList                         bootstrap.md §2
+  bytes  key = 2;             // 32 B Ed25519 key of the signer
+  repeated Signature sigs = 3;    // over "ed3k v1 nodes" ‖ body
+}
+
+message NodeList {
+  uint64 created = 1;         // Unix time in seconds                          bootstrap.md §2
+  bytes  nodes4 = 2;          // n × 22 B compact nodes (Protocol.md §5.4)
+  bytes  nodes6 = 3;          // n × 34 B compact nodes
+  string comment = 4;
+  bytes  net_tag = 5;         // 16 B: H("ed3k v1 nodes net", net_id)[0..16) of the network the list is for; empty = the public network   bootstrap.md §2
+}
+
+// ---------------------------------------------------------------------------------------
+// Shared filter lists (filter-list.md)
+// ---------------------------------------------------------------------------------------
+
+// The list file is "ed3kflt" ‖ 0x01 ‖ FilterList (filter-list.md §1).
+message FilterList {
+  string title = 1;           // filter-list.md §1
+  string comment = 2;
+  uint64 created = 3;         // Unix time in seconds; 0 = not told
+  repeated Group groups = 4;
+}
+
+message Group {
+  Subject subject = 1;        // filter-list.md §1
+  Verdict verdict = 2;
+  bytes   ids = 3;            // n × 16 B, in ascending order, each once
+  string  reason = 4;         // optional, for the whole group
+}
+
+enum Subject {
+  SUBJECT_NONE = 0;           // filter-list.md §1
+  FILE = 1;                   // root[0..16) of a file (Protocol.md §7.1)
+  ED2K = 2;                   // eD2K hash of a file (Protocol.md §7.4)
+  AUTHOR = 3;                 // node ID of a key that signs records, sets or channels
+}
+
+enum Verdict {
+  VERDICT_NONE = 0;           // filter-list.md §1
+  FAKE = 1;                   // the content is not what the names say
+  HARMFUL = 2;                // malware, or a file that damages a player or an unpacker
+  SPAM = 3;                   // published in bulk to fill search results
+  GOOD = 4;                   // checked by the list's author and found to be what it says
+}

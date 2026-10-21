@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"enode/ed3k/ident"
 	"enode/logging"
 )
 
@@ -100,6 +101,9 @@ type PeerServer struct {
 	// ServerSearch is where the peer says its server-to-server search service is,
 	// from its last description reply. Empty when it advertises none.
 	ServerSearch ServerSearchAdvert
+	// Ed3k is the ed3k:node link of the peer's index node (ST_ED3K), from its last
+	// description reply. Informational: ed3k has no server list, so nothing dials it.
+	Ed3k string
 
 	// OurChallenge is the random_part we used for this peer's phase-2 bootstrap ping. Its
 	// reply is RC4-keyed on exactly this value, so it must survive until the reply
@@ -564,6 +568,46 @@ func (g *GossipHandler) NoteServerSearch(from net.IP, advert ServerSearchAdvert)
 		logging.Infof("gossip: server %s offers server search at %s", p.Addr, advert.URL)
 	}
 	p.ServerSearch = advert
+}
+
+// NoteEd3k records the ed3k index node a peer advertises. A value that is not a
+// valid ed3k:node link is taken as none.
+func (g *GossipHandler) NoteEd3k(from net.IP, link string) {
+	if g == nil || from == nil {
+		return
+	}
+	if link != "" {
+		if _, err := ident.ParseNodeLink(link, false); err != nil || len(link) > 256 {
+			link = ""
+		}
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	p := g.findByIPLocked(from)
+	if p == nil || p.Ed3k == link {
+		return
+	}
+	if link != "" {
+		logging.Infof("gossip: server %s runs an ed3k index node %s", p.Addr, link)
+	}
+	p.Ed3k = link
+}
+
+// Ed3kPeers returns copies of the admitted peers that advertise an ed3k index node.
+func (g *GossipHandler) Ed3kPeers() []PeerServer {
+	if g == nil {
+		return nil
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var out []PeerServer
+	for _, p := range g.peers {
+		if p.Ed3k != "" && g.advertisableLocked(p) {
+			out = append(out, *p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Addr.String() < out[j].Addr.String() })
+	return out
 }
 
 // IsServer reports whether ip is a peer that passed the admission test and is not

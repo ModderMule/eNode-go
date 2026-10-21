@@ -41,6 +41,8 @@ type SessionState struct {
 	ConnectedAt time.Time
 	IPv6Capable bool
 	MetaCapable bool
+	// Ed3kID is the CT_ED3K node ID of the login, nil when the client sent none.
+	Ed3kID []byte
 	// PendingResults is the rest of the last search, for OP_QUERY_MORE_RESULT.
 	PendingResults []storage.File
 
@@ -389,6 +391,9 @@ func (c *tcpClient) exportState() SessionState {
 	st.HeaderBuf = append([]byte(nil), c.headerBuf...)
 	st.ConnectedAt = c.connectedAt
 	st.MetaCapable = c.metaCapable
+	c.infoMu.Lock()
+	st.Ed3kID = append([]byte(nil), c.ed3kID...)
+	c.infoMu.Unlock()
 	st.PendingResults = c.pendingResults
 	st.SoftLimitWarned = c.softLimitWarned
 	st.HardLimitHit = c.hardLimitHit
@@ -407,6 +412,9 @@ func (c *tcpClient) applyState(st SessionState) {
 	c.info = st.Info
 	c.nick, c.software, c.mod = st.Nick, st.Software, st.Mod
 	c.ipv6Capable = st.IPv6Capable
+	if len(st.Ed3kID) == 16 {
+		c.ed3kID = st.Ed3kID
+	}
 	c.infoMu.Unlock()
 	if c.crypt != nil && st.Crypt != nil {
 		c.crypt.importState(st.Crypt)

@@ -32,6 +32,9 @@ type ServerConfig struct {
 	ClientIPv6Status uint8
 	// MetaAPI advertises the client-facing Meta API. A zero value omits its tags.
 	MetaAPI MetaAPIAdvert
+	// Ed3k is the ed3k:node link of the server's ed3k index node, sent as ST_ED3K
+	// (TagEd3k, 0xe3). Empty omits the tag.
+	Ed3k string
 }
 
 // MetaAPIAdvert is what OP_SERVERIDENT tells a client about the Meta API.
@@ -417,6 +420,10 @@ func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
 		if conf.MetaAPI.Fingerprint != "" {
 			tags = append(tags, Tag{Type: TypeString, Code: TagMetaAPIFingerprint, Data: conf.MetaAPI.Fingerprint})
 		}
+	}
+	// The ed3k index node (spec docs/ed2k-tags.md §2). Only when ed3k is on.
+	if conf.Ed3k != "" {
+		tags = append(tags, Tag{Type: TypeString, Code: TagEd3k, Data: conf.Ed3k})
 	}
 	// Per-session reflection tags, appended last so the packet a legacy session
 	// receives stays byte-identical to the pre-reflection server. Both ride the same

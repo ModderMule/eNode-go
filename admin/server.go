@@ -120,6 +120,9 @@ type LiveStats struct {
 	// ServerSearch is the server-to-server search service; nil when it is off.
 	ServerSearch *ServerSearchStats `json:"serverSearch"`
 
+	// Ed3k is the ed3k index node (docs/ed3k-index-node.md); nil when it is off.
+	Ed3k *Ed3kStats `json:"ed3k"`
+
 	// Update is the last successful GitHub release check (updatecheck.go); nil when
 	// the check is off or has not succeeded yet.
 	Update *UpdateInfo `json:"update"`
@@ -176,6 +179,39 @@ type MetaAPIStats struct {
 	AccountsActive   int `json:"accountsActive"`
 	AccountsExpired  int `json:"accountsExpired"`
 	AccountsDisabled int `json:"accountsDisabled"`
+}
+
+// Ed3kStats are the ed3k index node's figures (docs/ed3k-index-node.md).
+type Ed3kStats struct {
+	NodeID string `json:"nodeId"`
+	Link   string `json:"link"`
+	// Network is set when the node runs in a named (test or closed) network.
+	Network bool `json:"network"`
+
+	Connections int    `json:"connections"`
+	Accepted    uint64 `json:"accepted"`
+	Refused     uint64 `json:"refused"`
+	Exchanges   uint64 `json:"exchanges"`
+
+	Searches  int64 `json:"searches"`
+	Stores    int64 `json:"stores"`
+	Busy      int64 `json:"busy"`
+	Malformed int64 `json:"malformed"`
+
+	Sources  int `json:"sources"`
+	Keywords int `json:"keywords"`
+	Notes    int `json:"notes"`
+	Kept     int `json:"kept"`
+
+	RelayLeaves int    `json:"relayLeaves"`
+	Punches     uint64 `json:"punches"`
+	PunchFailed uint64 `json:"punchFailed"`
+
+	ObfsDropped uint64 `json:"obfsDropped"`
+	Probes      uint64 `json:"probes"`
+
+	Bridge       bool   `json:"bridge"`
+	BridgeListed uint64 `json:"bridgeListed"`
 }
 
 // ServerSearchStats are the server-to-server search figures (docs/server-search.md):
