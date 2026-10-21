@@ -475,8 +475,8 @@ as a web row:
 eMuleQt shows a container row with its own icon. Its Download fetches the file,
 checks its SHA-256 against the row's hash, and saves it with the extension the
 content type names (`.dlc`, `.ccf`, `.rsdf`). A magnet-only row keeps the torrent
-icon, and its Download copies the magnet to the clipboard: there is no metafile to
-fetch, and eMuleQt has no torrent engine yet. A **Web (Server)** search turns a
+icon. There is no metafile to fetch, so its Download hands the magnet to the
+Torrents tab; a build without BitTorrent copies it to the clipboard instead. A **Web (Server)** search turns a
 `META_KIND_ED2K` entry into a plain eD2K file, and drops one without a size.
 
 ## Files from other servers

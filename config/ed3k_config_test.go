@@ -12,8 +12,34 @@ func TestEd3kDefaults(t *testing.T) {
 	}
 	t.Logf("input: empty ed3k section output: %+v", c)
 	if c.Enabled || c.Port != 0 || c.KeyFile != filepath.Join(DataDir, "ed3k.key") || c.RequestsPerMinute != 120 ||
-		c.Limits.MaxConnections != 50000 || c.Bridge.Enabled || c.Bridge.MaxPerAnswer != 20 {
+		c.Limits.MaxConnections != 50000 || c.Bridge.Enabled != nil || c.Bridge.MaxPerAnswer != 20 {
 		t.Fatalf("defaults %+v", c)
+	}
+}
+
+// TestEd3kBridgeActive: the bridge is on by default, can be turned off, and never
+// runs while ed3k itself is off.
+func TestEd3kBridgeActive(t *testing.T) {
+	yes, no := true, false
+	cases := []struct {
+		name    string
+		enabled bool
+		bridge  *bool
+		want    bool
+	}{
+		{"ed3k on, bridge absent", true, nil, true},
+		{"ed3k on, bridge true", true, &yes, true},
+		{"ed3k on, bridge false", true, &no, false},
+		{"ed3k off, bridge absent", false, nil, false},
+		{"ed3k off, bridge true", false, &yes, false},
+	}
+	for _, c := range cases {
+		cfg := Ed3kConfig{Enabled: c.enabled, Bridge: Ed3kBridgeConfig{Enabled: c.bridge}}
+		got := cfg.BridgeActive()
+		t.Logf("input: %s output: %v", c.name, got)
+		if got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
 	}
 }
 

@@ -633,9 +633,10 @@ ed3k:
     maxRecords: 50000000
   # List ed3k nodes that also speak eD2K as sources in OP_FOUNDSOURCES. The server
   # connects to each such node's eD2K TCP port first and lists only those that
-  # answer, so this makes outgoing TCP connections. Off by default.
+  # answer, so this makes outgoing TCP connections. On by default; it does nothing
+  # while ed3k.enabled is off.
   bridge:
-    enabled: false
+    enabled: true
     # Most ed3k sources added to one answer.
     maxPerAnswer: 20
     # How long a TCP test result is kept.

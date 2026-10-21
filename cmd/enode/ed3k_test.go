@@ -47,7 +47,6 @@ func TestEd3kBuildAndAdvertise(t *testing.T) {
 	cfg.Ed3k.Enabled = true
 	cfg.Ed3k.Listen = "127.0.0.1"
 	cfg.Ed3k.KeyFile = filepath.Join(t.TempDir(), "ed3k.key")
-	cfg.Ed3k.Bridge.Enabled = true
 	rt, err := buildEd3k(context.Background(), cfg, storage.NewMemoryEngine(), "81.2.3.4",
 		netip.MustParseAddr("2a00:1450::1").AsSlice(), nil)
 	if err != nil {

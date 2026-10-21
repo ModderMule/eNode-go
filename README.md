@@ -194,7 +194,7 @@ ed3k:                        # ed3k index node (see docs/ed3k-index-node.md); of
     recordsPerSite: 200000
     maxRecords: 50000000     # Records in the store; beyond: BUSY
   bridge:
-    enabled: false           # List TCP-tested ed3k nodes as eD2K sources (outgoing TCP connects)
+    enabled: true            # List TCP-tested ed3k nodes as eD2K sources (outgoing TCP connects); needs ed3k.enabled
     maxPerAnswer: 20         # ed3k sources added to one OP_FOUNDSOURCES
     tcpTestMinutes: 30       # How long a TCP test result is kept
 

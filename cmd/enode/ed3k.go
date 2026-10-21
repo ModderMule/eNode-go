@@ -106,9 +106,9 @@ func (rt *ed3kRuntime) advertisement() string {
 }
 
 // wrapSources puts the eD2K bridge in front of the engine the eD2K runtime serves
-// sources from, when ed3k.bridge.enabled is on.
+// sources from, when ed3k.bridge.enabled is on (the default).
 func (rt *ed3kRuntime) wrapSources(engine storage.Engine) storage.Engine {
-	if rt == nil || !rt.cfg.Bridge.Enabled {
+	if rt == nil || !rt.cfg.BridgeActive() {
 		return engine
 	}
 	rt.bridge = &ed3kBridgeEngine{Engine: engine, node: rt.node, max: rt.cfg.Bridge.MaxPerAnswer}
@@ -133,7 +133,7 @@ func (rt *ed3kRuntime) start(ctx context.Context) (func(), error) {
 	if rt.link != "" {
 		logging.Infof("ed3k: advertising %s in OP_SERVERIDENT", rt.link)
 	}
-	if rt.cfg.Bridge.Enabled {
+	if rt.cfg.BridgeActive() {
 		logging.Infof("ed3k: bridge on: ed3k nodes that pass a TCP test are listed as eD2K sources")
 	}
 	return func() { rt.node.Close() }, nil
@@ -150,7 +150,7 @@ func (rt *ed3kRuntime) adminStats() *admin.Ed3kStats {
 		Connections: st.Connections, Accepted: st.Accepted, Refused: st.Refused, Exchanges: st.Exchanges,
 		Searches: st.Index.Searches, Stores: st.Index.Stores, Busy: st.Index.Busy, Malformed: st.Index.Malformed,
 		RelayLeaves: st.RelayLeaves, Punches: st.Punches, PunchFailed: st.PunchFailed,
-		ObfsDropped: st.ObfsDropped, Probes: st.ObfsProbes, Bridge: rt.cfg.Bridge.Enabled, BridgeListed: st.BridgeListed,
+		ObfsDropped: st.ObfsDropped, Probes: st.ObfsProbes, Bridge: rt.cfg.BridgeActive(), BridgeListed: st.BridgeListed,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

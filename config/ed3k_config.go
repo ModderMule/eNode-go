@@ -55,9 +55,11 @@ type Ed3kLimitConfig struct {
 }
 
 // Ed3kBridgeConfig lists ed3k nodes as eD2K sources (spec docs/ed2k-tags.md §6).
-// The server tests each node's eD2K TCP port before listing it.
+// The server tests each node's eD2K TCP port before listing it. It is on by
+// default, but runs only when ed3k.enabled is on too.
 type Ed3kBridgeConfig struct {
-	Enabled bool `yaml:"enabled"`
+	// Enabled is a pointer so an absent key means on.
+	Enabled *bool `yaml:"enabled"`
 	// MaxPerAnswer bounds the ed3k sources added to one OP_FOUNDSOURCES.
 	MaxPerAnswer int `yaml:"maxPerAnswer"`
 	// TCPTestMinutes is how long a TCP test result is kept.
@@ -69,6 +71,10 @@ const (
 	DefaultEd3kKeyFile           = "ed3k.key"
 	DefaultEd3kRequestsPerMinute = 120
 )
+
+// BridgeActive reports whether the bridge runs: on unless bridge.enabled is false, and
+// never while ed3k.enabled is off.
+func (c Ed3kConfig) BridgeActive() bool { return c.Enabled && boolOrDefault(c.Bridge.Enabled, true) }
 
 // Ed3kKeyPath is the resolved location of the ed3k node key.
 func (c Config) Ed3kKeyPath() string { return ResolveDataPath(c.Ed3k.KeyFile) }

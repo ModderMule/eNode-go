@@ -108,7 +108,10 @@ every store `BUSY` once the store is full.
 - **Admin:** the dashboard has an "ed3k index node" section. The client view shows each
   session's `CT_ED3K` node ID.
 
-### eD2K bridge (`ed3k.bridge.enabled`, off by default)
+### eD2K bridge (`ed3k.bridge.enabled`, on by default)
+
+The bridge runs only while `ed3k.enabled` is on; with ed3k off the setting does nothing.
+Set `bridge.enabled: false` to keep the node from making outgoing TCP connects.
 
 The spec's `docs/ed2k-tags.md` §6 allows a server to list some ed3k nodes as eD2K
 sources in `OP_FOUNDSOURCES` (and the OBFU form, and UDP global source answers). A node

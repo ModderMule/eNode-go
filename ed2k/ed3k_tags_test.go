@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"net"
 	"testing"
+
+	"github.com/ModderMule/enodemeta/tags"
 )
 
 const testEd3kLink = "ed3k:node?id=cf617f4479e97358c9d31741900a90ae&ep=81.2.3.4:4661"
@@ -31,11 +33,12 @@ func TestServerIdentAdvertisesEd3k(t *testing.T) {
 	if _, ok := parseServerIdentTags(t, off)["ed3k"]; ok {
 		t.Fatal("ed3k tag present with ed3k off")
 	}
-	// TODO(ed3k): pin TagEd3k against tags.STEd3k and tags.CTEd3k of the enodemeta
-	// contract, as TestServerIdentAdvertisesMetaAPI does, once the submodule is bumped
-	// to the commit that adds them.
-	if TagEd3k != 0xe3 {
-		t.Fatalf("TagEd3k = %#x, the spec fixes 0xe3", TagEd3k)
+	// The enodemeta tags contract fixes both directions at 0xe3.
+	t.Logf("TagEd3k=%#x tags.STEd3k=%#x tags.CTEd3k=%#x", TagEd3k, tags.STEd3k, tags.CTEd3k)
+	for name, v := range map[string]uint8{"STEd3k": tags.STEd3k, "CTEd3k": tags.CTEd3k} {
+		if TagEd3k != v {
+			t.Errorf("TagEd3k = %#x, contract %s = %#x", TagEd3k, name, v)
+		}
 	}
 }
 

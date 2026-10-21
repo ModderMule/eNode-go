@@ -149,7 +149,7 @@ ed3k:                        # ed3k 索引节点（见 docs/ed3k-index-node.md�
     recordsPerSite: 200000
     maxRecords: 50000000     # 存储中的记录总数；超出则 BUSY
   bridge:
-    enabled: false           # 将通过 TCP 测试的 ed3k 节点列为 eD2K 来源（会发起外连 TCP）
+    enabled: true            # 将通过 TCP 测试的 ed3k 节点列为 eD2K 来源（会发起外连 TCP）；需开启 ed3k.enabled
     maxPerAnswer: 20         # 每个 OP_FOUNDSOURCES 最多加入的 ed3k 来源
     tcpTestMinutes: 30       # TCP 测试结果的保留时间
 
