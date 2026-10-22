@@ -438,6 +438,23 @@ func (m *MySQLEngine) ReleaseEd3kSources(ctx context.Context, keptBy string) err
 	})
 }
 
+// ReleaseEd3kSourcesByPrefix ends the keeping of the connections whose names start with prefix.
+func (m *MySQLEngine) ReleaseEd3kSourcesByPrefix(ctx context.Context, prefix string) error {
+	if err := m.ensureDB(); err != nil {
+		return err
+	}
+	return m.execRetry("ed3k release sources", func() error {
+		_, err := m.db.ExecContext(ctx, `UPDATE ed3k_sources SET expires=lifetime_end, kept_by=NULL WHERE kept_by LIKE ?`,
+			likePrefix(prefix))
+		return err
+	})
+}
+
+// likePrefix is a LIKE pattern that matches the strings starting with p.
+func likePrefix(p string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(p) + "%"
+}
+
 // ExpireEd3k deletes what has expired and rotates the paging secret.
 func (m *MySQLEngine) ExpireEd3k(ctx context.Context, now time.Time) (int, error) {
 	if err := m.ensureDB(); err != nil {
@@ -874,15 +891,22 @@ func (m *MySQLEngine) ed3kEachKeyword(ctx context.Context, now time.Time, fn fun
 	}
 }
 
-func (m *MySQLEngine) ed3kKeywordTarget(ctx context.Context, target [16]byte, now time.Time) (int, bool, error) {
+// Ed3kTarget reports a target's file count (KEYWORD) and spill.
+func (m *MySQLEngine) Ed3kTarget(ctx context.Context, kind uint8, target [16]byte, now time.Time) (int, bool, error) {
+	if err := m.ensureDB(); err != nil {
+		return 0, false, err
+	}
 	var files int
 	var fullAt int64
 	err := m.db.QueryRowContext(ctx, `SELECT files, full_at FROM ed3k_targets WHERE kind=? AND target=?`,
-		Ed3kKindKeyword, target[:]).Scan(&files, &fullAt)
+		kind, target[:]).Scan(&files, &fullAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
-	return files, fullAt > 0 && now.Sub(time.UnixMilli(fullAt)) < ed3kFullMemory(Ed3kKindKeyword), err
+	if kind != Ed3kKindKeyword {
+		files = 0
+	}
+	return files, fullAt > 0 && now.Sub(time.UnixMilli(fullAt)) < ed3kFullMemory(kind), err
 }
 
 type rowScanner2 interface{ Scan(dest ...any) error }

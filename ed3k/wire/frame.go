@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 
 	"google.golang.org/protobuf/proto"
@@ -24,10 +25,17 @@ const (
 
 // ErrHeader is a frame header that does not parse: a varint over 10 bytes, a
 // len above 1 MiB, or an exchange that ends inside the header. The connection
-// is closed with PROTOCOL.
+// is closed with PROTOCOL. When the stream failed instead (a read deadline, a
+// reset), the stream's error is wrapped too, and the caller gives the exchange
+// up without closing the connection (§4.1, §5.2).
 var ErrHeader = errors.New("ed3k: frame header does not parse")
 
+// ErrEmpty is an exchange that ended before the first byte of a header: a
+// failed exchange, not a header that does not parse.
+var ErrEmpty = errors.New("ed3k: exchange ends before a frame")
+
 // ErrShort is a body that the exchange ends before; answered Error{MALFORMED}.
+// A stream that failed inside the body is wrapped as for ErrHeader.
 var ErrShort = errors.New("ed3k: exchange ends inside a frame body")
 
 // Frame is one decoded frame: its type and its body, decompressed.
@@ -40,23 +48,33 @@ type Frame struct {
 // errors of Decompress are answered Error{MALFORMED} (ErrNeedDict
 // Error{UNSUPPORTED}).
 func ReadFrame(r io.ByteReader) (Frame, error) {
-	tag, err := readVarint(r)
+	first, err := r.ReadByte()
 	if err != nil {
-		return Frame{}, ErrHeader
+		if errors.Is(err, io.EOF) {
+			return Frame{}, ErrEmpty
+		}
+		return Frame{}, fmt.Errorf("%w: %w", ErrHeader, err)
+	}
+	tag, err := readVarint(&prefixed{first: first, r: r})
+	if err != nil {
+		return Frame{}, headerErr(err)
 	}
 	n, err := readVarint(r)
-	if err != nil || n > MaxBody {
+	if err != nil {
+		return Frame{}, headerErr(err)
+	}
+	if n > MaxBody {
 		return Frame{}, ErrHeader
 	}
 	body := make([]byte, n)
 	if rr, ok := r.(io.Reader); ok {
 		if _, err := io.ReadFull(rr, body); err != nil {
-			return Frame{}, ErrShort
+			return Frame{}, shortErr(err)
 		}
 	} else {
 		for i := range body {
 			if body[i], err = r.ReadByte(); err != nil {
-				return Frame{}, ErrShort
+				return Frame{}, shortErr(err)
 			}
 		}
 	}
@@ -98,6 +116,38 @@ func WriteFrame(w io.Writer, typ uint64, msg proto.Message) error {
 	}
 	_, err = w.Write(b)
 	return err
+}
+
+// headerErr is ErrHeader, wrapping the stream's own error when there is one.
+func headerErr(err error) error {
+	if errors.Is(err, ErrHeader) || errors.Is(err, io.EOF) {
+		return ErrHeader
+	}
+	return fmt.Errorf("%w: %w", ErrHeader, err)
+}
+
+// shortErr is ErrShort, wrapping the stream's own error when the stream failed
+// rather than ended.
+func shortErr(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return ErrShort
+	}
+	return fmt.Errorf("%w: %w", ErrShort, err)
+}
+
+// prefixed hands out one byte already read, then reads from r.
+type prefixed struct {
+	first byte
+	used  bool
+	r     io.ByteReader
+}
+
+func (p *prefixed) ReadByte() (byte, error) {
+	if !p.used {
+		p.used = true
+		return p.first, nil
+	}
+	return p.r.ReadByte()
 }
 
 // readVarint reads a protobuf varint of at most 10 bytes; longer-than-needed

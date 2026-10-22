@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -320,6 +321,22 @@ func (m *MemoryEngine) KeepEd3kSources(_ context.Context, keptBy string, until t
 	return nil
 }
 
+// ReleaseEd3kSourcesByPrefix ends the keeping of the connections whose names start with prefix.
+func (m *MemoryEngine) ReleaseEd3kSourcesByPrefix(_ context.Context, prefix string) error {
+	s := &m.ed3k
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range s.sources {
+		for _, x := range t {
+			if x.KeptBy != "" && strings.HasPrefix(x.KeptBy, prefix) {
+				x.KeptBy = ""
+				x.expires = x.LifetimeEnd
+			}
+		}
+	}
+	return nil
+}
+
 // ReleaseEd3kSources ends the keeping of a closed connection.
 func (m *MemoryEngine) ReleaseEd3kSources(_ context.Context, keptBy string) error {
 	s := &m.ed3k
@@ -601,14 +618,15 @@ func (m *MemoryEngine) ed3kEachKeyword(ctx context.Context, now time.Time, fn fu
 	return nil
 }
 
-func (m *MemoryEngine) ed3kKeywordTarget(_ context.Context, target [16]byte, now time.Time) (int, bool, error) {
+// Ed3kTarget reports a target's file count (KEYWORD) and spill.
+func (m *MemoryEngine) Ed3kTarget(_ context.Context, kind uint8, target [16]byte, now time.Time) (int, bool, error) {
 	s := &m.ed3k
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	files := 0
-	if t := s.keywords[target]; t != nil {
+	if t := s.keywords[target]; kind == Ed3kKindKeyword && t != nil {
 		files = len(t.files)
 	}
-	at, ok := s.fullAt[ed3kTargetKey{Ed3kKindKeyword, target}]
-	return files, ok && now.Sub(at) < ed3kFullMemory(Ed3kKindKeyword), nil
+	at, ok := s.fullAt[ed3kTargetKey{kind, target}]
+	return files, ok && now.Sub(at) < ed3kFullMemory(kind), nil
 }

@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"enode/ed3k/ident"
 	"enode/internal/ratelimit"
 	"enode/logging"
 	"enode/storage"
@@ -154,7 +156,7 @@ type ServerRuntime struct {
 	sessionsByHash map[[16]byte]*tcpClient
 	// sessionsByEd3k indexes the same sessions by the ed3k node ID of their CT_ED3K
 	// login tag, for the ed3k bridge (Ed3kPairing). Under sessionsMu.
-	sessionsByEd3k map[[16]byte]*tcpClient
+	sessionsByEd3k map[[16]byte][]*tcpClient
 	// firewallProbe indirects the IPv4 dial-back so a test can drive both branches
 	// of the login ID decision without a reachable listener, and can assert that
 	// the decision short-circuits before dialling at all. nil selects the real
@@ -379,9 +381,18 @@ func (s *ServerRuntime) registerSession(hash []byte, client *tcpClient) {
 	s.sessionsByHash[key] = client
 	if id, ok := client.ed3kNodeID(); ok {
 		if s.sessionsByEd3k == nil {
-			s.sessionsByEd3k = make(map[[16]byte]*tcpClient)
+			s.sessionsByEd3k = make(map[[16]byte][]*tcpClient)
 		}
-		s.sessionsByEd3k[id] = client
+		// Every live login that claims the node ID is kept, so a forged claim
+		// from elsewhere sits beside the node's own login instead of replacing
+		// it; Ed3kPairing picks by address and hash.
+		list := s.sessionsByEd3k[id]
+		if !slices.Contains(list, client) {
+			if len(list) >= maxEd3kClaims {
+				list = list[1:]
+			}
+			s.sessionsByEd3k[id] = append(list, client)
+		}
 	}
 }
 
@@ -404,29 +415,43 @@ func (s *ServerRuntime) unregisterSession(hash []byte, client *tcpClient) {
 	if s.sessionsByHash[key] == client {
 		delete(s.sessionsByHash, key)
 	}
-	if id, ok := client.ed3kNodeID(); ok && s.sessionsByEd3k[id] == client {
-		delete(s.sessionsByEd3k, id)
+	if id, ok := client.ed3kNodeID(); ok {
+		list := slices.DeleteFunc(s.sessionsByEd3k[id], func(c *tcpClient) bool { return c == client })
+		if len(list) == 0 {
+			delete(s.sessionsByEd3k, id)
+		} else {
+			s.sessionsByEd3k[id] = list
+		}
 	}
 }
 
-// Ed3kPairing returns the eD2K session whose CT_ED3K login tag named this ed3k
-// node ID: its user hash, crypt options and IPv4 address. The tag is the client's
-// claim; the caller decides what to trust (the ed3k bridge requires the session's
-// address to be the ed3k source's).
-func (s *ServerRuntime) Ed3kPairing(nodeID [16]byte) (hash [16]byte, crypt byte, ipv4 net.IP, ok bool) {
+// Ed3kPairing returns the user hash and crypt options of the eD2K session that
+// may be paired with this ed3k node (spec docs/ed2k-tags.md §6): its CT_ED3K
+// login tag named the node ID, it logged in with the user hash derived from that
+// node ID (§14.2), and it comes from ipv4, the address observed on the node's
+// ed3k connection. The tag is not authenticated, hence both checks.
+func (s *ServerRuntime) Ed3kPairing(nodeID [16]byte, ipv4 net.IP) (hash [16]byte, crypt byte, ok bool) {
+	if ipv4 = ipv4.To4(); ipv4 == nil {
+		return hash, 0, false
+	}
+	want := ident.DerivedUserHash(nodeID)
 	s.sessionsMu.RLock()
-	c := s.sessionsByEd3k[nodeID]
+	list := slices.Clone(s.sessionsByEd3k[nodeID])
 	s.sessionsMu.RUnlock()
-	if c == nil {
-		return hash, 0, nil, false
+	for i := len(list) - 1; i >= 0; i-- { // the newest login first
+		c := list[i]
+		if !c.peerIP.To4().Equal(ipv4) {
+			continue
+		}
+		c.infoMu.Lock()
+		match := len(c.info.Hash) == 16 && [16]byte(c.info.Hash) == want
+		crypt = c.info.CryptOptions
+		c.infoMu.Unlock()
+		if match {
+			return want, crypt, true
+		}
 	}
-	c.infoMu.Lock()
-	defer c.infoMu.Unlock()
-	if len(c.info.Hash) != 16 {
-		return hash, 0, nil, false
-	}
-	copy(hash[:], c.info.Hash)
-	return hash, c.info.CryptOptions, c.peerIP.To4(), true
+	return hash, 0, false
 }
 
 // ed3kNodeID is the session's CT_ED3K node ID.
@@ -865,6 +890,10 @@ func newTCPClient(server *ServerRuntime, conn net.Conn, enableCrypt bool) *tcpCl
 }
 
 const defaultTCPKeepAlivePeriod = 2 * time.Minute
+
+// maxEd3kClaims is how many live logins per ed3k node ID the bridge index keeps;
+// the oldest goes first.
+const maxEd3kClaims = 8
 
 // tcpWriteTimeout bounds one write to a client socket. A healthy client drains even
 // a full 255-result search page in well under a second; one that has stopped reading

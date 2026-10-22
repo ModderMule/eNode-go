@@ -81,6 +81,11 @@ func (r *reassembler) add(from netip.AddrPort, body []byte, now time.Time) []byt
 	if m.have < m.total || r.msgs[k] != m {
 		return nil
 	}
+	if m.size == 0 {
+		// Every piece was empty: there is no datagram to hand on (§4.4).
+		r.drop(m)
+		return nil
+	}
 	out := make([]byte, 0, m.size)
 	for _, p := range m.pieces {
 		out = append(out, p...)

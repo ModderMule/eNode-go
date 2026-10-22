@@ -33,7 +33,7 @@ func TestRoutingIDVectors(t *testing.T) {
 		{"21.75.31.124", "5a3cef4479e97358c9d31741900a90ae"},
 	}
 	for _, c := range cases {
-		got := RoutingID(id, netip.MustParseAddr(c.addr))
+		got := RoutingID(id, netip.MustParseAddr(c.addr), false)
 		t.Logf("addr=%s routingID=%x", c.addr, got)
 		if hex.EncodeToString(got[:]) != c.want {
 			t.Errorf("%s: got %x want %s", c.addr, got, c.want)
@@ -53,11 +53,34 @@ func TestRoutingIDVectors(t *testing.T) {
 	for _, row := range rows {
 		var fake NodeID
 		fake[15] = row.r
-		got := RoutingID(fake, netip.MustParseAddr(row.addr))
+		got := RoutingID(fake, netip.MustParseAddr(row.addr), false)
 		top := uint32(got[0])<<13 | uint32(got[1])<<5 | uint32(got[2])>>3
 		t.Logf("addr=%s r=%d top21=%06x", row.addr, row.r, top)
 		if top != row.top {
 			t.Errorf("%s: top %06x want %06x", row.addr, top, row.top)
+		}
+	}
+}
+
+// In a named network a node at a private address has its node ID as routing
+// ID (§6.3); a public address there, or a private one elsewhere, does not.
+func TestRoutingIDNamedNetwork(t *testing.T) {
+	id := NodeIDOf(mustHex(t, samplePub))
+	cases := []struct {
+		addr  string
+		named bool
+		same  bool
+	}{
+		{"192.168.1.20", true, true},
+		{"fd00::5", true, true},
+		{"192.168.1.20", false, false},
+		{"124.31.75.21", true, false},
+	}
+	for _, c := range cases {
+		got := RoutingID(id, netip.MustParseAddr(c.addr), c.named)
+		t.Logf("addr=%s named=%v routingID=%x nodeID=%x", c.addr, c.named, got, id)
+		if (got == [16]byte(id)) != c.same {
+			t.Errorf("%s named=%v: routing ID = node ID is %v, want %v", c.addr, c.named, !c.same, c.same)
 		}
 	}
 }
@@ -131,6 +154,19 @@ func TestAcceptable(t *testing.T) {
 		{"2a00:1450::1", false, true},
 		{"2002::1", false, false},
 		{"224.0.0.1", false, false},
+		// Spec ruling A: IPv6 only inside 2000::/3.
+		{"2600::1", false, true},
+		{"3fff:1::1", false, false},
+		{"::81.2.3.4", false, false},
+		{"1::1", false, false},
+		{"4000::1", false, false},
+		{"fec0::1", false, false},
+		{"5f00::1", false, false},
+		{"ff02::1", false, false},
+		{"fc00::1", false, false},
+		{"fc00::1", true, true},
+		{"fe80::1", true, true},
+		{"::1", true, true},
 	}
 	for _, c := range cases {
 		got := Acceptable(netip.MustParseAddr(c.addr), c.named)
@@ -178,6 +214,7 @@ func TestNodeLink(t *testing.T) {
 		"ed3k:node?id=cf617f4479e97358c9d31741900a90ae&ep=10.0.0.1:4661",
 		"ed3k:node?id=cf617f4479e97358c9d31741900a90ae&ep=81.2.3.4:1&ep=81.2.3.5:1",
 		"ed3k:Node?id=cf617f4479e97358c9d31741900a90ae&ep=81.2.3.4:1",
+		"ed3k:node?id=cf617f4479e97358c9d31741900a90ae&ep=[81.2.3.4]:80",
 	}
 	for _, s := range bad {
 		_, err := ParseNodeLink(s, false)

@@ -407,6 +407,10 @@ ed3k:
   # KadRequests per minute from one address, per record kind and per search or
   # store. Beyond it a search is told BUSY and a store is BUSY for every record.
   requestsPerMinute: 120
+  # Refuse KEYWORD and NOTE records that also carry a record field of an ed3k
+  # extension (on_air, joint, part, gates, alias). false allows them like
+  # fields the node does not know.
+  strictRecordFields: false
   limits:
     # Open connections in all, per address (IPv4 /32, IPv6 /64) and per site
     # (/24, /48), and new connections per address and minute.

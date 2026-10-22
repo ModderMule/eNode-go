@@ -47,6 +47,11 @@ The `ed3k:` section is in every config file. The commented reference is
   per-address limits of an ordinary node, because many of its clients share one
   carrier-grade NAT address (§4.6, §9.4). `recordsPerHost` and `recordsPerSite` are the
   bound over all targets that §11 makes a MUST for an index node.
+- `strictRecordFields` (default `false`): when on, a `KEYWORD` or `NOTE` record that also
+  carries a record field of an extension (`on_air`, `joint`, `part`, `gates`, `alias`) is
+  `REJECTED`. Off, such fields are allowed like fields the node does not know. Whether
+  §10.7's "no other record field that this version defines" covers them is an open spec
+  question.
 - `bridge.*`: see "eD2K bridge" below.
 
 Changing anything in the section needs a restart.
@@ -130,9 +135,11 @@ About the TCP test (condition 4):
 - A node is never listed before its test has passed.
 
 The user hash and the crypt options of a listed source come from the eD2K session whose
-`CT_ED3K` login names the node ID. They are used **only if that session comes from the
-node's own address**, because a login tag is a claim. Otherwise the source goes out
-without a user hash.
+`CT_ED3K` login names the node ID. A login tag is a claim, so they are used **only if that
+login's user hash is the one derived from the node ID (§14.2) and the session comes from the
+IPv4 address observed on the node's ed3k connection**. Otherwise the source goes out without a
+user hash. Every live login that claims a node ID is kept (up to 8, the oldest dropped first),
+so a forged claim from another address does not push the node's own login out.
 
 The other direction, eD2K sources as ed3k records, is impossible: eD2K has no BLAKE3
 root.
@@ -142,15 +149,16 @@ root.
 | Spec | Status |
 |---|---|
 | §4.1 QUIC profile | QUIC v1, ALPN `ed3k/1`, no SNI, RFC 7250 Ed25519 raw keys on both sides (a vendored TLS and quic-go, see `docs/ed3k-tls-quic-forks.md`). No 0-RTT and no session tickets. 64 streams per direction, no uni streams. A client without a key fails in TLS with `certificate_required` (allowed instead of `NO_KEY`). |
-| §4.3–§4.5 obfuscation | Every datagram masked: `salt ‖ mask(magic ‖ kp ‖ pad ‖ body)`, BLAKE3 keyed XOF, partial mask of DATA, the salt re-roll rule. Long-header datagrams are split into 2–4 fragments for the first 2 flights per type. Reassembly bounds as specified. Anti-amplification counts this layer's bytes. PROBEs are dropped (never answered). Path MTU discovery is off and the QUIC size stays 1,200, which an index node may do: it sends no file data (§4.4). |
-| §4.6 budget | Per node ID (10/min, then a 24 h ban), per host (configurable), open per host / site / total, private addresses exempt in a named network. |
-| §5 framing | Frames with the 1 MiB limit and 10-byte varints. Magicless zstd decoded under the profile (exactly one frame, window and output ≤ 1 MiB, no dictionary held) and written under it when it pays. Hello on stream 0 within 30 s, no answers before it. |
+| §4.3–§4.5 obfuscation | Every datagram masked: `salt ‖ mask(magic ‖ kp ‖ pad ‖ body)`, BLAKE3 keyed XOF, partial mask of DATA, the salt re-roll rule. Long-header datagrams are split into 2–4 fragments for the first 2 flights per type, counted per connection (destination connection ID) and never reset. Reassembly bounds as specified; a set of empty pieces is dropped. Anti-amplification counts this layer's bytes, DATA included, until a connection validated the address: when its handshake completes, or when QUIC moves it to a migrated client address (a hook in the QUIC fork). PROBEs are dropped (never answered). Path MTU discovery is off and the QUIC size stays 1,200, which an index node may do: it sends no file data (§4.4). |
+| §4.6 budget | Per node ID (10/min, then a 24 h ban that also closes the node ID's open connections), per host (configurable), open per host / site / total, private addresses exempt in a named network. |
+| §5 framing | Frames with the 1 MiB limit and 10-byte varints. Magicless zstd decoded under the profile (exactly one frame, window and output ≤ 1 MiB, no dictionary held) and written under it when it pays. Hello on stream 0 within 30 s, no answers before it; a malformed one is answered `MALFORMED` and the connection closed once that is acknowledged. A request not whole within 30 s, a reset exchange or one half-closed without a byte fails alone; only a header that does not parse closes the connection. |
 | §6 identity | Node ID, `obf_id`, routing ID (CRC32C), §14.2 derived user hash, `ed3k:node` links. |
-| §10.3 KadRequest | Check order, `want = 0`, paging by `H("ed3k v1 page", secret ‖ …)` with a 24 h secret, ≤ 100 per answer, ≤ 256 records per Store, `also` (≤ 256), the rate limit (store `BUSY` / search `Error{BUSY}`), `load` and `spill`. |
+| §8.2 addresses | Acceptable IPv4 is global unicast minus the listed blocks; acceptable IPv6 lies inside `2000::/3`, outside Teredo, 6to4, `2001:2::/48`, `2001:10::/28`, `2001:db8::/32` and `3fff::/20`. Private addresses only in a named network. |
+| §10.3 KadRequest | Check order, `want = 0`, paging by `H("ed3k v1 page", secret ‖ …)` with a 24 h secret, ≤ 100 per answer, ≤ 256 records per Store, `also` (≤ 256), the rate limit (store `BUSY` / search `Error{BUSY}`), `load` and `spill` in every answer of a stored kind (search, store and contacts-only). |
 | §10.7 signed records | Strict Ed25519 (canonical A and R, neither of small order, S < L, cofactorless), one signature per algorithm, unknown algorithms kept, ≤ 1 KiB measured canonically, expiry window, tokenizer check of the keyword, the "byte-identical ⇒ OLDER without verifying" shortcut (§11 Load). |
 | §10.8 keyword load | The 3-place rule by site and freshness, `signer` restrictions, per-key and per-site file limits, level size. |
-| §11 | Responsible for every target from the start, sources kept while the connection is open (renewed hourly, released at close), the node-wide bound per host and site. |
-| §9.4 / §9.5 | Reservations (one per leaf node ID, per host / site / total), Punch forwarding over the leaf's own connection with observed endpoints and `seen`, a 5 s wait, forward limits (30/min per leaf, 3/min per initiator host and leaf), `NOT_FOUND`, `DENIED` for a forwarded Punch, `MALFORMED` for `seen > 2`. |
+| §11 | Responsible for every target from the start, sources kept while the connection is open (renewed every 15 min by 30 min, released at close, and at start for what an earlier run kept), the node-wide bound per host and site. |
+| §9.4 / §9.5 | Reservations (one per leaf node ID, shared by its connections and ending with the last of them; per host / site / total; `ttl` at most the negotiated idle timeout), Punch forwarding over the leaf's own connection with observed endpoints and `seen`, a 5 s wait, forward limits (30/min per leaf, 3/min per initiator host and leaf), `NOT_FOUND`, `DENIED` for a forwarded Punch, `MALFORMED` for `seen > 2`. |
 | §10.1 tokenizer | NFKC, full case folding, NFKC, Cf removed, the unspaced-script pair rule and the extension rule. Needs Unicode ≥ 16 tables: go.mod is `go 1.27` and x/text ≥ v0.34, and the node refuses to start on older tables. |
 
 Not done:

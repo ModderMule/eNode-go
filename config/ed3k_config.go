@@ -32,9 +32,13 @@ type Ed3kConfig struct {
 	// Nick is sent in Hello; empty sends none.
 	Nick string `yaml:"nick"`
 	// RequestsPerMinute bounds KadRequests per host group, kind and operation.
-	RequestsPerMinute int              `yaml:"requestsPerMinute"`
-	Limits            Ed3kLimitConfig  `yaml:"limits"`
-	Bridge            Ed3kBridgeConfig `yaml:"bridge"`
+	RequestsPerMinute int `yaml:"requestsPerMinute"`
+	// StrictRecordFields refuses KEYWORD and NOTE records that also carry a
+	// record field of an extension (on_air, joint, part, gates, alias). Off by
+	// default: such fields are allowed like fields the node does not know.
+	StrictRecordFields bool             `yaml:"strictRecordFields"`
+	Limits             Ed3kLimitConfig  `yaml:"limits"`
+	Bridge             Ed3kBridgeConfig `yaml:"bridge"`
 }
 
 // Ed3kLimitConfig bounds connections, the relay service and the records held.

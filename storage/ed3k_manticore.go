@@ -167,6 +167,24 @@ func (m *ManticoreEngine) KeepEd3kSources(ctx context.Context, keptBy string, un
 	return inner.KeepEd3kSources(ctx, keptBy, until)
 }
 
+// ReleaseEd3kSourcesByPrefix is the database engine's.
+func (m *ManticoreEngine) ReleaseEd3kSourcesByPrefix(ctx context.Context, prefix string) error {
+	inner, _, err := m.ed3kInner()
+	if err != nil {
+		return err
+	}
+	return inner.ReleaseEd3kSourcesByPrefix(ctx, prefix)
+}
+
+// Ed3kTarget is the database engine's.
+func (m *ManticoreEngine) Ed3kTarget(ctx context.Context, kind uint8, target [16]byte, now time.Time) (int, bool, error) {
+	inner, _, err := m.ed3kInner()
+	if err != nil {
+		return 0, false, err
+	}
+	return inner.Ed3kTarget(ctx, kind, target, now)
+}
+
 // ReleaseEd3kSources is the database engine's.
 func (m *ManticoreEngine) ReleaseEd3kSources(ctx context.Context, keptBy string) error {
 	inner, _, err := m.ed3kInner()
@@ -358,7 +376,7 @@ func (m *ManticoreEngine) ed3kReplace(ctx context.Context, secret []byte, recs [
 
 func (m *ManticoreEngine) ed3kSearch(ctx context.Context, src ed3kMirrorSource, target [16]byte, q Ed3kQuery, offset, limit int, now time.Time) (Ed3kKeywordPage, error) {
 	var p Ed3kKeywordPage
-	files, spill, err := src.ed3kKeywordTarget(ctx, target, now)
+	files, spill, err := src.Ed3kTarget(ctx, Ed3kKindKeyword, target, now)
 	if err != nil {
 		return p, err
 	}

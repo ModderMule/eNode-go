@@ -16,12 +16,11 @@ import (
 )
 
 // TestPackmuleDialsNode starts this index node and a packmule-node (the Rust
-// reference) that bootstraps from it: rustls dials this node's RFC 7250 server
-// through the obfuscating socket, and its Hello and KadRequest are answered.
-// packmule publishes only through Kad ROUTERs and has no index-client option
-// (docs/ed3k-index-node.md), so its --share does not reach a node without ROUTER;
-// the test reports what it published. Opt-in: set ENODE_ED3K_PACKMULE to the
-// packmule-node binary.
+// reference) that uses it as its index node (--index-node, --index-use only):
+// rustls dials this node's RFC 7250 server through the obfuscating socket, its
+// Hello and KadRequests are answered, and the SOURCE and KEYWORD records of its
+// --share are stored here although this node leaves ROUTER unset. Opt-in: set
+// ENODE_ED3K_PACKMULE to the packmule-node binary.
 func TestPackmuleDialsNode(t *testing.T) {
 	bin := os.Getenv("ENODE_ED3K_PACKMULE")
 	if bin == "" {
@@ -49,7 +48,8 @@ func TestPackmuleDialsNode(t *testing.T) {
 	rand.Read(data)
 	os.WriteFile(file, data, 0o644)
 	cmd := exec.Command(bin, "--port", "0", "--bind", "127.0.0.1", "--network", network, "--force-open",
-		"--lan", "off", "--key", filepath.Join(dir, "pm.key"), "--bootstrap", link, "--share", file)
+		"--lan", "off", "--key", filepath.Join(dir, "pm.key"), "--index-node", link, "--index-use", "only",
+		"--share", file)
 	out, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
 	if err := cmd.Start(); err != nil {
@@ -68,7 +68,7 @@ func TestPackmuleDialsNode(t *testing.T) {
 			t.Logf("packmule stdout: %s", sc.Text())
 		}
 	}()
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		st, _ := store.Ed3kStats(context.Background(), time.Now())
 		if n.Stats().Exchanges >= 2 && st.Sources > 0 && st.Keywords > 0 {
@@ -83,6 +83,6 @@ func TestPackmuleDialsNode(t *testing.T) {
 		t.Fatal("packmule did not connect and exchange Hello and a KadRequest")
 	}
 	if st.Sources == 0 || st.Keywords == 0 {
-		t.Logf("packmule published nothing here: it stores through Kad ROUTERs only (known, not a failure)")
+		t.Fatalf("packmule did not publish here: sources=%d keywords=%d", st.Sources, st.Keywords)
 	}
 }

@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"net"
 	"testing"
+	"time"
+
+	"enode/ed3k/ident"
+	"enode/storage"
 
 	"github.com/ModderMule/enodemeta/tags"
 )
@@ -108,4 +112,60 @@ func newTestGossipWithPeer(t *testing.T) *GossipHandler {
 	t.Helper()
 	return NewGossipHandler(GossipConfig{MaxServers: 10, MaxFailures: 5},
 		[]PeerAddr{{IP: net.ParseIP("203.0.113.5"), Port: 4661}})
+}
+
+// TestEd3kPairingClaims: the bridge pairs a node only with a CT_ED3K login that
+// carries the derived user hash and comes from the node's observed IPv4 (spec
+// docs/ed2k-tags.md §6). A forged claim from another address sits beside the
+// real one instead of replacing it.
+func TestEd3kPairingClaims(t *testing.T) {
+	rt := NewServerRuntime(TCPRuntimeConfig{DisconnectTimeout: time.Hour}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
+	nodeID := [16]byte{0x5e, 0xd3}
+	derived := ident.DerivedUserHash(nodeID)
+	login := func(ip string, hash [16]byte, crypt byte) *tcpClient {
+		c := newTCPClient(rt, &recordingConn{}, false)
+		c.peerIP = net.ParseIP(ip)
+		c.infoMu.Lock()
+		c.info.Hash, c.info.CryptOptions = hash[:], crypt
+		c.ed3kID = nodeID[:]
+		c.infoMu.Unlock()
+		rt.registerSession(hash[:], c)
+		return c
+	}
+	real := login("81.2.3.4", derived, 0x07)
+	forged := login("198.51.100.9", derived, 0x01) // a later login claiming the same node ID
+
+	for _, ip := range []string{"81.2.3.4", "198.51.100.9", "203.0.113.1"} {
+		h, crypt, ok := rt.Ed3kPairing(nodeID, net.ParseIP(ip))
+		t.Logf("input: node %x observed at %s; output: hash=%x crypt=%#x ok=%v", nodeID[:2], ip, h[:4], crypt, ok)
+	}
+	if h, crypt, ok := rt.Ed3kPairing(nodeID, net.ParseIP("81.2.3.4")); !ok || h != derived || crypt != 0x07 {
+		t.Fatal("the node's own login was not paired after a forged claim from elsewhere")
+	}
+	if _, _, ok := rt.Ed3kPairing(nodeID, net.ParseIP("203.0.113.1")); ok {
+		t.Fatal("paired with no login at the observed address")
+	}
+
+	rt.unregisterSession(derived[:], forged)
+	_, _, ok := rt.Ed3kPairing(nodeID, net.ParseIP("81.2.3.4"))
+	t.Logf("after the forged login leaves: paired=%v", ok)
+	if !ok {
+		t.Fatal("the forged login's logout dropped the real claim")
+	}
+	rt.unregisterSession(derived[:], real)
+	rt.sessionsMu.RLock()
+	left := len(rt.sessionsByEd3k)
+	rt.sessionsMu.RUnlock()
+	t.Logf("after both leave: %d node IDs indexed", left)
+	if left != 0 {
+		t.Fatal("index entry left behind")
+	}
+
+	other := [16]byte{0xab, 0xcd}
+	login("81.2.3.4", other, 0x07)
+	h, _, ok := rt.Ed3kPairing(nodeID, net.ParseIP("81.2.3.4"))
+	t.Logf("input: login hash %x is not derived from the node ID; output: ok=%v hash=%x", other[:2], ok, h[:2])
+	if ok {
+		t.Fatal("paired a user hash that is not derived from the node ID")
+	}
 }

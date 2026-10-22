@@ -746,7 +746,7 @@ message HopLookup {           // type 30. First frame on a stream, read by the l
 }
 
 message HopLookupAnswer {     // type 31
-  repeated KadAnswer answers = 1;   // those of the closest set (Protocol.md §10.4), closest first   hops.md §4.1
+  repeated KadAnswer answers = 1;   // one per closest-set member that said responsible, closest first; the page of request.offset   hops.md §4.1
 }
 
 message HopStream {           // type 32. First frame of an exchange between two neighbours; followed by raw bytes
@@ -769,7 +769,7 @@ message HopJoin {             // type 34. First frame of an exchange from outsid
 
 message Gates {
   uint64 issued = 1;          // Unix time; the later record replaces the earlier   hops.md §4.3
-  repeated Gate gates = 2;    // at most 4
+  repeated Gate gates = 2;    // 1 to 4
 }
 
 message Gate {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"sync"
 	"time"
 
@@ -470,6 +471,14 @@ func (m *MongoDBEngine) ReleaseEd3kSources(ctx context.Context, keptBy string) e
 	return err
 }
 
+// ReleaseEd3kSourcesByPrefix ends the keeping of the connections whose names start with prefix.
+func (m *MongoDBEngine) ReleaseEd3kSourcesByPrefix(ctx context.Context, prefix string) error {
+	_, err := m.db.Collection(collEd3kSources).UpdateMany(ctx,
+		bson.M{"kept_by": bson.M{"$regex": "^" + regexp.QuoteMeta(prefix)}},
+		bson.A{bson.M{"$set": bson.M{"expires": "$lifetime_end"}}, bson.M{"$unset": "kept_by"}})
+	return err
+}
+
 // ExpireEd3k deletes what has expired and rotates the paging secret.
 func (m *MongoDBEngine) ExpireEd3k(ctx context.Context, now time.Time) (int, error) {
 	nowMs := now.UnixMilli()
@@ -878,16 +887,20 @@ func (m *MongoDBEngine) ed3kEachKeyword(ctx context.Context, now time.Time, fn f
 	return cur.Err()
 }
 
-func (m *MongoDBEngine) ed3kKeywordTarget(ctx context.Context, target [16]byte, now time.Time) (int, bool, error) {
+// Ed3kTarget reports a target's file count (KEYWORD) and spill.
+func (m *MongoDBEngine) Ed3kTarget(ctx context.Context, kind uint8, target [16]byte, now time.Time) (int, bool, error) {
 	var t struct {
 		Files  int   `bson:"files"`
 		FullAt int64 `bson:"full_at"`
 	}
-	err := m.db.Collection(collEd3kTargets).FindOne(ctx, bson.M{"kind": Ed3kKindKeyword, "target": target[:]}).Decode(&t)
+	err := m.db.Collection(collEd3kTargets).FindOne(ctx, bson.M{"kind": kind, "target": target[:]}).Decode(&t)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return 0, false, nil
 	}
-	return t.Files, t.FullAt > 0 && now.Sub(time.UnixMilli(t.FullAt)) < ed3kFullMemory(Ed3kKindKeyword), err
+	if kind != Ed3kKindKeyword {
+		t.Files = 0
+	}
+	return t.Files, t.FullAt > 0 && now.Sub(time.UnixMilli(t.FullAt)) < ed3kFullMemory(kind), err
 }
 
 func (d mongoEd3kKeyword) keyword() Ed3kKeyword {

@@ -7,18 +7,21 @@ import (
 	"time"
 
 	"enode/ed3k"
+	"enode/ed3k/ident"
 	"enode/storage"
 )
 
 // ed3kBridgeEngine adds bridged ed3k nodes to the sources the engine answers
 // (spec docs/ed2k-tags.md §6). The node is paired with the eD2K session of its
-// CT_ED3K login only when that session comes from the node's own address; the
-// user hash and crypt options of the source come from it, else none are sent.
+// CT_ED3K login only when that session logged in with the user hash derived from
+// the node ID (§14.2) and comes from the IPv4 address observed on the node's ed3k
+// connection; the user hash and crypt options of the source come from it, else
+// none are sent.
 type ed3kBridgeEngine struct {
 	storage.Engine
 	node    *ed3k.Node
 	max     int
-	pairing func([16]byte) ([16]byte, byte, net.IP, bool)
+	pairing func(nodeID [16]byte, ipv4 net.IP) (userHash [16]byte, crypt byte, ok bool)
 }
 
 // Unwrap returns the engine underneath, for storage.UnwrapEngine.
@@ -56,7 +59,8 @@ func (e *ed3kBridgeEngine) add(hash []byte, srcs []storage.Source) []storage.Sou
 		}
 		s := storage.Source{ID: id, Port: b.EP4.Port()}
 		if e.pairing != nil {
-			if userHash, crypt, sessIP, ok := e.pairing(b.NodeID); ok && sessIP != nil && sessIP.Equal(net.IP(ip[:])) {
+			userHash, crypt, ok := e.pairing(b.NodeID, net.IP(ip[:]))
+			if ok && userHash == ident.DerivedUserHash(b.NodeID) {
 				s.UserHash, s.CryptOptions = userHash[:], crypt
 			}
 		}

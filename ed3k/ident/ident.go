@@ -44,11 +44,15 @@ func ParseNodeID(s string) (NodeID, error) {
 
 // RoutingID is the IP-bound position of a node in Kad (Protocol.md §6.3). An
 // index node without ROUTER does not need it for itself; it is here for the
-// vectors and for the checks that use contacts.
-func RoutingID(id NodeID, addr netip.Addr) [16]byte {
+// vectors and for the checks that use contacts. In a named network the routing
+// ID of a node at a private address is its node ID.
+func RoutingID(id NodeID, addr netip.Addr, named bool) [16]byte {
+	addr = addr.Unmap()
+	if named && Private(addr) {
+		return id
+	}
 	r := id[15] & 0x07
 	var m []byte
-	addr = addr.Unmap()
 	if addr.Is4() {
 		a := addr.As4()
 		mask := [4]byte{0x03, 0x0f, 0x3f, 0xff}

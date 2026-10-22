@@ -188,6 +188,12 @@ func (s *Stream) Context() context.Context {
 	return s.sendStr.Context()
 }
 
+// Acked is closed once the send-direction is acknowledged in full (ed3k).
+// See [SendStream.Acked].
+func (s *Stream) Acked() <-chan struct{} {
+	return s.sendStr.Acked()
+}
+
 // Close closes the send-direction of the stream.
 // It does not close the receive-direction of the stream.
 func (s *Stream) Close() error {

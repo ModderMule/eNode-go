@@ -43,7 +43,9 @@ const (
 	helloTimeout   = 30 * time.Second // the peer's Hello on stream 0
 	requestTimeout = 30 * time.Second // a request that has not arrived whole is reset
 	sweepEvery     = time.Minute
-	keepEvery      = time.Hour
+	// keepEvery is how often the kept sources of live connections are renewed
+	// (index.Keep pushes them 30 min ahead).
+	keepEvery = 15 * time.Minute
 )
 
 // Config is what a Node needs.
@@ -68,6 +70,9 @@ type Config struct {
 	RequestsPerMinute int
 	// Reject refuses records whose file name or note matches (content filters).
 	Reject func(string) bool
+	// StrictRecordFields refuses KEYWORD and NOTE records that also carry a
+	// record field of an extension (spec question E of the 2026-10-22 audit).
+	StrictRecordFields bool
 }
 
 // Budget bounds the connections a node accepts (§4.6, widened for INDEX).
@@ -118,7 +123,7 @@ type Node struct {
 	ln    *quic.Listener
 
 	mu       sync.Mutex
-	sessions map[*session]struct{}
+	sessions map[*quic.Conn]*session
 	budget   *budget
 	relay    *relay
 	bridge   *bridge
@@ -157,10 +162,10 @@ func New(cfg Config) (*Node, error) {
 		cfg:      cfg,
 		id:       ident.NodeIDOf(cfg.Key.Public().(ed25519.PublicKey)),
 		named:    cfg.Network != "",
-		sessions: map[*session]struct{}{},
+		sessions: map[*quic.Conn]*session{},
 	}
 	n.idx = index.New(index.Config{Store: cfg.Store, Limits: cfg.Limits, Named: n.named,
-		RequestsPerMinute: cfg.RequestsPerMinute, Reject: cfg.Reject})
+		RequestsPerMinute: cfg.RequestsPerMinute, Reject: cfg.Reject, StrictRecordFields: cfg.StrictRecordFields})
 	n.budget = newBudget(cfg.Budget, n.named)
 	n.relay = newRelay(cfg.Relay, n.named)
 	n.bridge = newBridge(cfg.Store)
@@ -190,13 +195,23 @@ func (n *Node) Start(ctx context.Context) error {
 	}
 	_ = udp.SetReadBuffer(4 << 20)
 	_ = udp.SetWriteBuffer(4 << 20)
+	// No connection outlives the process, also not across a handover: what an
+	// earlier run kept for its connections goes at the end of its lifetime (§11).
+	rctx, cancel := context.WithTimeout(ctx, time.Minute)
+	err := n.idx.ReleaseAll(rctx, n.connPrefix())
+	cancel()
+	if err != nil {
+		logging.Warnf("ed3k: releasing the sources kept by an earlier run: %v", err)
+	}
 	n.pc = obfs.NewServer(udp, obfs.NetID(n.cfg.Network), n.id.Obf())
 	tlsConf, err := transport.ServerTLS(n.cfg.Key)
 	if err != nil {
 		n.pc.Close()
 		return err
 	}
-	n.ln, err = quic.Listen(n.pc, tlsConf, transport.QUICConfig(transport.IdleIndex))
+	qc := transport.QUICConfig(transport.IdleIndex)
+	qc.OnPathSwitch = n.onPathSwitch
+	n.ln, err = quic.Listen(n.pc, tlsConf, qc)
 	if err != nil {
 		n.pc.Close()
 		return err
@@ -216,8 +231,8 @@ func (n *Node) Close() error {
 	}
 	n.cancel()
 	n.mu.Lock()
-	for s := range n.sessions {
-		s.c.CloseWithError(transport.CodeClosed, "shutting down")
+	for c := range n.sessions {
+		c.CloseWithError(transport.CodeClosed, "shutting down")
 	}
 	n.mu.Unlock()
 	err := n.ln.Close()
@@ -276,22 +291,28 @@ func (n *Node) admit(c *quic.Conn) {
 		c.CloseWithError(transport.CodeProtocol, "")
 		return
 	}
-	if code, refuse := n.budget.admit(id, remote.Addr(), time.Now()); refuse {
+	code, refuse, banned := n.budget.admit(id, remote.Addr(), time.Now())
+	if banned {
+		n.closeNode(id, code)
+	}
+	if refuse {
 		c.CloseWithError(code, "")
 		n.refused.Add(1)
 		return
 	}
-	s := newSession(n, c, id, pub, remote)
+	s := newSession(n, c, id, pub)
 	n.mu.Lock()
-	n.sessions[s] = struct{}{}
+	n.sessions[c] = s
 	n.mu.Unlock()
+	// The handshake completed, so QUIC validated the client's address.
+	s.track(c.RemoteAddr())
 	n.accepted.Add(1)
 	n.wg.Add(1)
 	go func() {
 		defer n.wg.Done()
 		s.serve()
 		n.mu.Lock()
-		delete(n.sessions, s)
+		delete(n.sessions, c)
 		n.mu.Unlock()
 		n.budget.leave(remote.Addr())
 	}()
@@ -319,7 +340,7 @@ func (n *Node) sweepLoop() {
 		case <-keep.C:
 			n.mu.Lock()
 			var keepers []*session
-			for s := range n.sessions {
+			for _, s := range n.sessions {
 				if s.storedSources.Load() {
 					keepers = append(keepers, s)
 				}
@@ -333,6 +354,37 @@ func (n *Node) sweepLoop() {
 		}
 	}
 }
+
+// closeNode closes every open connection of a node ID that was just banned
+// (§4.6).
+func (n *Node) closeNode(id ident.NodeID, code quic.ApplicationErrorCode) {
+	n.mu.Lock()
+	var conns []*quic.Conn
+	for c, s := range n.sessions {
+		if s.id == id {
+			conns = append(conns, c)
+		}
+	}
+	n.mu.Unlock()
+	for _, c := range conns {
+		c.CloseWithError(code, "banned")
+	}
+}
+
+// onPathSwitch follows a client's migration: QUIC validated the new address,
+// and the obfuscation layer lifts its amplification limit there (§4.4).
+func (n *Node) onPathSwitch(c *quic.Conn, addr net.Addr) {
+	n.mu.Lock()
+	s := n.sessions[c]
+	n.mu.Unlock()
+	if s != nil {
+		s.track(addr)
+	}
+}
+
+// connPrefix starts the name of every connection of this node in the store,
+// so that a later run can release what this one kept.
+func (n *Node) connPrefix() string { return n.id.String()[:8] + "-" }
 
 func addrPort(a net.Addr) (netip.AddrPort, bool) {
 	u, ok := a.(*net.UDPAddr)

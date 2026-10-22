@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -64,10 +65,9 @@ func runEcho(t *testing.T, network string) {
 	}
 	cconn := obfs.NewClient(cudp, netID, sid.Obf())
 	defer cconn.Close()
-	ctls, _ := ClientTLS(cpriv, sid)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	c, err := quic.Dial(ctx, cconn, sudp.LocalAddr(), ctls, QUICConfig(IdleIndex))
+	c, err := Dial(ctx, cconn, sudp.LocalAddr(), cpriv, sid, QUICConfig(IdleIndex))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -101,19 +101,38 @@ func TestWrongPeer(t *testing.T) {
 	stls, _ := ServerTLS(spriv)
 	ln, _ := quic.Listen(sconn, stls, QUICConfig(IdleIndex))
 	defer ln.Close()
-	go ln.Accept(context.Background())
+	closed := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept(context.Background())
+		if err != nil {
+			closed <- err
+			return
+		}
+		<-c.Context().Done()
+		closed <- context.Cause(c.Context())
+	}()
 
 	other := sid
 	other[15] ^= 1 // same obf_id, so the datagrams unmask, but another node ID
 	cudp, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	cconn := obfs.NewClient(cudp, nil, other.Obf())
 	defer cconn.Close()
-	ctls, _ := ClientTLS(cpriv, other)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := quic.Dial(ctx, cconn, sudp.LocalAddr(), ctls, QUICConfig(IdleIndex))
+	_, err := Dial(ctx, cconn, sudp.LocalAddr(), cpriv, other, QUICConfig(IdleIndex))
 	t.Logf("dial with a wrong expected id: %v", err)
-	if err == nil {
-		t.Fatal("handshake with the wrong peer succeeded")
+	if !errors.Is(err, ErrWrongPeer) {
+		t.Fatalf("dial with the wrong peer: %v", err)
+	}
+	// The server sees the close after the handshake, with its code (§4.1).
+	select {
+	case cause := <-closed:
+		var ae *quic.ApplicationError
+		t.Logf("server side closed: %v", cause)
+		if !errors.As(cause, &ae) || ae.ErrorCode != CodeWrongPeer {
+			t.Fatalf("server saw %v, want WRONG_PEER", cause)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("server never saw the close")
 	}
 }

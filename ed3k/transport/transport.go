@@ -5,9 +5,11 @@
 package transport
 
 import (
+	"context"
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"enode/ed3k/ident"
@@ -57,23 +59,72 @@ func ServerTLS(priv ed25519.PrivateKey) (*tls.Config, error) {
 	return cfg, nil
 }
 
-// ClientTLS is the TLS configuration of a dialler that expects the node expect.
-func ClientTLS(priv ed25519.PrivateKey, expect ident.NodeID) (*tls.Config, error) {
+// ClientTLS is the TLS configuration of a dialler. It checks only that the
+// peer has an Ed25519 key: whether it is the node the dialler expects is
+// checked after the handshake (CheckPeer), so that the WRONG_PEER close goes
+// out after the last handshake flight with its code intact (§4.1).
+func ClientTLS(priv ed25519.PrivateKey) (*tls.Config, error) {
 	cfg, err := baseTLS(priv)
 	if err != nil {
 		return nil, err
 	}
 	cfg.VerifyConnection = func(st tls.ConnectionState) error {
-		pub, err := PeerKey(st)
-		if err != nil {
-			return err
-		}
-		if got := ident.NodeIDOf(pub); got != expect {
-			return fmt.Errorf("ed3k: wrong peer %s, expected %s", got, expect)
-		}
-		return nil
+		_, err := PeerKey(st)
+		return err
 	}
 	return cfg, nil
+}
+
+// ErrWrongPeer is a dialled node whose node ID is not the expected one.
+var ErrWrongPeer = errors.New("ed3k: wrong peer")
+
+// CheckPeer compares the node ID of a dialled connection's peer with expect,
+// and closes the connection with WRONG_PEER when they differ (§4.1).
+func CheckPeer(c *quic.Conn, expect ident.NodeID) error {
+	got, err := PeerID(c)
+	if err != nil {
+		closeConfirmed(c, CodeNoKey)
+		return err
+	}
+	if got != expect {
+		closeConfirmed(c, CodeWrongPeer)
+		return fmt.Errorf("%w: %s, expected %s", ErrWrongPeer, got, expect)
+	}
+	return nil
+}
+
+// confirmWait bounds how long a dialler waits for the handshake to be
+// confirmed before it closes anyway.
+const confirmWait = 5 * time.Second
+
+// closeConfirmed closes a dialled connection once its handshake is confirmed:
+// before that, QUIC also sends the close in Handshake packets, where the
+// application code is lost (RFC 9000 §10.2.3, §4.1 of the spec).
+func closeConfirmed(c *quic.Conn, code quic.ApplicationErrorCode) {
+	t := time.NewTimer(confirmWait)
+	defer t.Stop()
+	select {
+	case <-c.HandshakeConfirmed():
+	case <-c.Context().Done():
+	case <-t.C:
+	}
+	c.CloseWithError(code, "")
+}
+
+// Dial connects over pc to the node expect at addr and checks its node ID.
+func Dial(ctx context.Context, pc net.PacketConn, addr net.Addr, priv ed25519.PrivateKey, expect ident.NodeID, qc *quic.Config) (*quic.Conn, error) {
+	tlsConf, err := ClientTLS(priv)
+	if err != nil {
+		return nil, err
+	}
+	c, err := quic.Dial(ctx, pc, addr, tlsConf, qc)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckPeer(c, expect); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // QUICConfig is the QUIC profile; idle is IdleIndex for an index node.

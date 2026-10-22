@@ -190,6 +190,11 @@ type Config struct {
 	EnableStreamResetPartialDelivery bool
 
 	Tracer func(ctx context.Context, isClient bool, connID ConnectionID) qlogwriter.Trace
+
+	// OnPathSwitch is called on the server when a connection moves to a new
+	// client address, after QUIC validated that path (RFC 9000 §9.3), and
+	// before RemoteAddr reports the new address (ed3k).
+	OnPathSwitch func(c *Conn, addr net.Addr)
 }
 
 // ClientInfo contains information about an incoming connection attempt.
@@ -226,4 +231,7 @@ type ConnectionState struct {
 	Version Version
 	// GSO says if generic segmentation offload is used.
 	GSO bool
+	// IdleTimeout is the negotiated idle timeout: the smaller of the two
+	// max_idle_timeout values, 0 before the transport parameters arrived (ed3k).
+	IdleTimeout time.Duration
 }

@@ -79,9 +79,10 @@ func buildEd3k(ctx context.Context, cfg config.Config, engine storage.Engine, ad
 		Budget: ed3k.Budget{MaxConns: c.Limits.MaxConnections, PerHost: c.Limits.ConnectionsPerHost,
 			PerSite: c.Limits.ConnectionsPerSite, NewPerHostMin: c.Limits.NewPerHostPerMinute,
 			NewPerNodeIDMin: ed3k.DefaultBudget.NewPerNodeIDMin},
-		Relay:             ed3k.RelayLimits{Leaves: c.Limits.RelayLeaves, PerHost: c.Limits.RelayPerHost, PerSite: c.Limits.RelayPerSite},
-		RequestsPerMinute: c.RequestsPerMinute,
-		Reject:            reject,
+		Relay:              ed3k.RelayLimits{Leaves: c.Limits.RelayLeaves, PerHost: c.Limits.RelayPerHost, PerSite: c.Limits.RelayPerSite},
+		RequestsPerMinute:  c.RequestsPerMinute,
+		Reject:             reject,
+		StrictRecordFields: c.StrictRecordFields,
 	})
 	if err != nil {
 		udp.Close()

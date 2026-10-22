@@ -21,9 +21,12 @@ const (
 	QUICMaxDatagram = PathLimit - Overhead - 19 // 1200: Initials fit with pad_len ≤ 19
 	// fragAttempts is how many flights of one long-header type go in fragments.
 	fragAttempts = 2
-	// flightGap separates two flights of one type when counting attempts.
-	flightGap = 300 * time.Millisecond
-	// stateIdle drops the per-address state of a silent address.
+	// flightGap separates two flights of one type when counting attempts. The
+	// datagrams of one flight leave in one burst; a retransmission after a PTO
+	// comes later than this and is a flight of its own.
+	flightGap = 20 * time.Millisecond
+	// stateIdle drops the per-address state of a silent address that no
+	// connection holds (Validate).
 	stateIdle = 2 * time.Minute
 	// maxPending bounds the datagrams held back for the amplification budget.
 	maxPending = 16
@@ -100,16 +103,15 @@ func (c *Conn) ReadFrom(p []byte) (int, net.Addr, error) {
 			out = c.frags.add(from, body, now)
 			c.mu.Unlock()
 			if out == nil {
-				c.noteIn(from, n, false, now)
+				c.noteIn(from, n, now)
 				continue
 			}
-			if out[0]&0x80 == 0 {
+			if len(out) == 0 || out[0]&0x80 == 0 {
 				c.Dropped.Add(1)
 				continue
 			}
 		}
-		validated := kind == KindData || hasHandshakePacket(out)
-		c.noteIn(from, n, validated, now)
+		c.noteIn(from, n, now)
 		if len(out) > len(p) {
 			continue
 		}
@@ -124,32 +126,36 @@ func (c *Conn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	if !ok || len(p) == 0 {
 		return 0, net.InvalidAddrError("obfs: not a UDP address")
 	}
-	if p[0]&0x80 == 0 {
+	now := time.Now()
+	long := p[0]&0x80 != 0
+	var dgrams [][]byte
+	c.mu.Lock()
+	ps := c.peer(to, now)
+	if !long {
 		pad := []byte(nil)
 		if len(p) <= 256 {
 			pad = randomBytes(randInt(min(64, PathLimit-Overhead-len(p)+1)))
 		}
-		d := c.send.Seal(make([]byte, 0, Overhead+len(pad)+len(p)), KindData, nil, pad, p)
-		_, err := c.udp.WriteToUDPAddrPort(d, to)
-		return len(p), err
-	}
-	now := time.Now()
-	c.mu.Lock()
-	ps := c.peer(to, now)
-	typ := (p[0] >> 4) & 3
-	if now.Sub(ps.lastFlight[typ]) > flightGap {
-		ps.attempts[typ]++
-	}
-	ps.lastFlight[typ] = now
-	split := ps.attempts[typ] <= fragAttempts && len(p) >= 4
-	var dgrams [][]byte
-	if split {
-		dgrams = c.fragments(ps, p, now)
+		dgrams = [][]byte{c.send.Seal(make([]byte, 0, Overhead+len(pad)+len(p)), KindData, nil, pad, p)}
 	} else {
-		dgrams = [][]byte{c.whole(p, PathLimit)}
+		// Attempts are counted per connection, named by the destination
+		// connection ID of the long header, and are never reset (§4.4).
+		fc := ps.flight(longHeaderDCID(p), now)
+		typ := (p[0] >> 4) & 3
+		if now.Sub(fc.last[typ]) > flightGap {
+			fc.attempts[typ]++
+		}
+		fc.last[typ] = now
+		if fc.attempts[typ] <= fragAttempts && len(p) >= 4 {
+			dgrams = c.fragments(ps, p, now)
+		} else {
+			dgrams = [][]byte{c.whole(p, PathLimit)}
+		}
 	}
-	if c.server && !ps.validated {
-		if !ps.fits(dgrams) {
+	// Until a connection has validated the address, everything this layer puts
+	// on the wire towards it, DATA included, stays within 3 times what arrived.
+	if c.server && !ps.validated() {
+		if long && !ps.fits(dgrams) {
 			// Shrink to the cheapest form before holding anything back.
 			dgrams = [][]byte{c.whole(p, Overhead+len(p))}
 		}
@@ -210,14 +216,67 @@ func SendProbe(udp *net.UDPConn, netID []byte, target ident.ObfID, to netip.Addr
 	return err
 }
 
+// Validate marks addr as validated by a QUIC connection: its handshake
+// completed there, or QUIC moved the connection to it after path validation.
+// Datagrams held back for the amplification budget go out. Every Validate is
+// paired with a Release when the connection leaves the address.
+func (c *Conn) Validate(addr net.Addr) {
+	a, ok := addrPort(addr)
+	if !ok {
+		return
+	}
+	c.mu.Lock()
+	ps := c.peer(a, time.Now())
+	ps.refs++
+	flush := ps.pending
+	ps.pending = nil
+	c.mu.Unlock()
+	for _, d := range flush {
+		c.udp.WriteToUDPAddrPort(d, a)
+	}
+}
+
+// Release undoes one Validate of addr. An address that no connection holds is
+// subject to the amplification budget again.
+func (c *Conn) Release(addr net.Addr) {
+	a, ok := addrPort(addr)
+	if !ok {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ps := c.peers[a]; ps != nil && ps.refs > 0 {
+		ps.refs--
+		ps.lastSeen = time.Now()
+	}
+}
+
 type peerState struct {
-	in, out    uint64
-	validated  bool
-	lastSeen   time.Time
-	attempts   [4]int
-	lastFlight [4]time.Time
-	msgIDs     map[byte]time.Time
-	pending    [][]byte
+	in, out  uint64
+	refs     int // connections that validated this address
+	lastSeen time.Time
+	flights  map[string]*flightCount // by destination connection ID
+	msgIDs   map[byte]time.Time
+	pending  [][]byte
+}
+
+// flightCount counts the flights of one connection by long-header packet type.
+type flightCount struct {
+	attempts [4]int
+	last     [4]time.Time
+	seen     time.Time
+}
+
+func (ps *peerState) validated() bool { return ps.refs > 0 }
+
+func (ps *peerState) flight(dcid string, now time.Time) *flightCount {
+	fc := ps.flights[dcid]
+	if fc == nil {
+		fc = &flightCount{}
+		ps.flights[dcid] = fc
+	}
+	fc.seen = now
+	return fc
 }
 
 func (ps *peerState) fits(dgrams [][]byte) bool {
@@ -243,20 +302,17 @@ func newConn(udp *net.UDPConn, recv, send Keys, server bool) *Conn {
 	return c
 }
 
-// noteIn counts wire bytes from an address, marks it validated, and sends what
-// the budget now allows.
-func (c *Conn) noteIn(from netip.AddrPort, n int, validated bool, now time.Time) {
+// noteIn counts wire bytes from an address and sends what the budget now
+// allows.
+func (c *Conn) noteIn(from netip.AddrPort, n int, now time.Time) {
 	c.mu.Lock()
 	ps := c.peer(from, now)
 	ps.in += uint64(n)
-	if validated {
-		ps.validated = true
-	}
 	var flush [][]byte
-	for len(ps.pending) > 0 && (ps.validated || ps.fits(ps.pending[:1])) {
+	for len(ps.pending) > 0 && (ps.validated() || ps.fits(ps.pending[:1])) {
 		d := ps.pending[0]
 		ps.pending = ps.pending[1:]
-		if !ps.validated {
+		if !ps.validated() {
 			ps.out += uint64(len(d))
 		}
 		flush = append(flush, d)
@@ -270,7 +326,7 @@ func (c *Conn) noteIn(from netip.AddrPort, n int, validated bool, now time.Time)
 func (c *Conn) peer(a netip.AddrPort, now time.Time) *peerState {
 	ps := c.peers[a]
 	if ps == nil {
-		ps = &peerState{msgIDs: map[byte]time.Time{}}
+		ps = &peerState{msgIDs: map[byte]time.Time{}, flights: map[string]*flightCount{}}
 		c.peers[a] = ps
 	}
 	ps.lastSeen = now
@@ -338,8 +394,14 @@ func (c *Conn) sweep() {
 			c.mu.Lock()
 			c.frags.expire(now)
 			for a, ps := range c.peers {
-				if now.Sub(ps.lastSeen) > stateIdle {
+				if ps.refs == 0 && now.Sub(ps.lastSeen) > stateIdle {
 					delete(c.peers, a)
+					continue
+				}
+				for id, fc := range ps.flights {
+					if now.Sub(fc.seen) > stateIdle {
+						delete(ps.flights, id)
+					}
 				}
 			}
 			c.mu.Unlock()
@@ -347,57 +409,17 @@ func (c *Conn) sweep() {
 	}
 }
 
-// hasHandshakePacket walks the coalesced long-header packets of a datagram and
-// reports whether one is a Handshake packet, which validates the sender's
-// address (RFC 9000 §8.1).
-func hasHandshakePacket(d []byte) bool {
-	for len(d) > 0 && d[0]&0x80 != 0 {
-		typ := (d[0] >> 4) & 3
-		if typ == 2 {
-			return true
-		}
-		if typ == 3 || len(d) < 6 { // Retry ends the datagram
-			return false
-		}
-		i := 5
-		for range 2 { // DCID, SCID
-			if i >= len(d) {
-				return false
-			}
-			i += 1 + int(d[i])
-		}
-		if typ == 0 { // Initial: token
-			l, n := quicVarint(d[i:])
-			if n == 0 {
-				return false
-			}
-			i += n + int(l)
-		}
-		if i >= len(d) {
-			return false
-		}
-		l, n := quicVarint(d[i:])
-		if n == 0 || i+n+int(l) > len(d) {
-			return false
-		}
-		d = d[i+n+int(l):]
+// longHeaderDCID is the destination connection ID of a long-header packet, ""
+// when the header is too short to hold one.
+func longHeaderDCID(p []byte) string {
+	if len(p) < 6 {
+		return ""
 	}
-	return false
-}
-
-func quicVarint(b []byte) (uint64, int) {
-	if len(b) == 0 {
-		return 0, 0
+	l := int(p[5])
+	if l > 20 || len(p) < 6+l {
+		return ""
 	}
-	n := 1 << (b[0] >> 6)
-	if len(b) < n {
-		return 0, 0
-	}
-	v := uint64(b[0] & 0x3f)
-	for i := 1; i < n; i++ {
-		v = v<<8 | uint64(b[i])
-	}
-	return v, n
+	return string(p[6 : 6+l])
 }
 
 func addrPort(a net.Addr) (netip.AddrPort, bool) {

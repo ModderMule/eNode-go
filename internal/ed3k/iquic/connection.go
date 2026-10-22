@@ -181,9 +181,10 @@ type Conn struct {
 	closeChan chan struct{}
 	closeErr  atomic.Pointer[closeError]
 
-	ctx                   context.Context
-	ctxCancel             context.CancelCauseFunc
-	handshakeCompleteChan chan struct{}
+	ctx                    context.Context
+	ctxCancel              context.CancelCauseFunc
+	handshakeCompleteChan  chan struct{}
+	handshakeConfirmedChan chan struct{} // ed3k
 
 	undecryptablePackets          []receivedPacketWithChecksum // undecryptable packets, waiting for a change in encryption level
 	undecryptablePacketsToProcess []receivedPacketWithChecksum
@@ -553,6 +554,7 @@ func (c *Conn) preSetup() {
 	c.closeChan = make(chan struct{}, 1)
 	c.sendingScheduled = make(chan struct{}, 1)
 	c.handshakeCompleteChan = make(chan struct{})
+	c.handshakeConfirmedChan = make(chan struct{})
 
 	now := monotime.Now()
 	c.lastPacketReceivedTime = now
@@ -996,6 +998,9 @@ func (c *Conn) handleHandshakeConfirmed(now monotime.Time) error {
 	c.dropEncryptionLevel(protocol.EncryptionInitial, now)
 	c.dropEncryptionLevel(protocol.EncryptionHandshake, now)
 
+	if !c.handshakeConfirmed {
+		close(c.handshakeConfirmedChan)
+	}
 	c.handshakeConfirmed = true
 	c.cryptoStreamHandler.SetHandshakeConfirmed()
 
@@ -1306,6 +1311,9 @@ func (c *Conn) handleShortHeaderPacket(
 	c.mtuDiscoverer.Reset(initialPacketSize, c.maxMTU())
 	if !c.config.DisablePathMTUDiscovery && c.conn.capabilities().DF {
 		c.mtuDiscoverer.Start(p.rcvTime)
+	}
+	if c.config.OnPathSwitch != nil {
+		c.config.OnPathSwitch(c, p.remoteAddr)
 	}
 	c.conn.ChangeRemoteAddr(p.remoteAddr, p.info)
 	return true, nil
@@ -2432,6 +2440,9 @@ func (c *Conn) applyTransportParameters() {
 		c.idleTimeout = min(c.idleTimeout, params.MaxIdleTimeout)
 	}
 	c.keepAliveInterval = min(c.config.KeepAlivePeriod, c.idleTimeout/2)
+	c.connStateMutex.Lock()
+	c.connState.IdleTimeout = c.idleTimeout // ed3k
+	c.connStateMutex.Unlock()
 	c.streamsMap.HandleTransportParameters(params)
 	c.frameParser.SetAckDelayExponent(params.AckDelayExponent)
 	c.connFlowController.UpdateSendWindow(params.InitialMaxData)
@@ -3153,6 +3164,13 @@ func (c *Conn) AddPath(t *Transport) (*Path, error) {
 // however the client's identity is only verified once the handshake completes.
 func (c *Conn) HandshakeComplete() <-chan struct{} {
 	return c.handshakeCompleteChan
+}
+
+// HandshakeConfirmed is closed once the handshake is confirmed (RFC 9001 §4.1.2):
+// on the client when HANDSHAKE_DONE arrives. From then on a CONNECTION_CLOSE
+// goes only in 1-RTT packets and keeps its application error code (ed3k).
+func (c *Conn) HandshakeConfirmed() <-chan struct{} {
+	return c.handshakeConfirmedChan
 }
 
 // QlogTrace returns the qlog trace of the QUIC connection.

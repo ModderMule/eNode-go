@@ -71,6 +71,10 @@ func TestLayoutAndKinds(t *testing.T) {
 		{"also not n×16", &ed3kpb.KadRequest{Target: tgt, Kind: ed3kpb.Kind_SOURCE, Store: &ed3kpb.Store{Source: &ed3kpb.Peer{}, Also: make([]byte, 5)}}, ed3kpb.Error_MALFORMED, false},
 		{"signer of 31 bytes", &ed3kpb.KadRequest{Target: tgt, Kind: ed3kpb.Kind_KEYWORD, Store: &ed3kpb.Store{Signer: make([]byte, 31)}}, ed3kpb.Error_MALFORMED, false},
 		{"store without a record of the kind", &ed3kpb.KadRequest{Target: tgt, Kind: ed3kpb.Kind_KEYWORD, Store: &ed3kpb.Store{Note: &ed3kpb.Signed{}}}, ed3kpb.Error_MALFORMED, false},
+		// signer is MALFORMED only for a kind that uses it (§10.7).
+		{"kind 14, signer of 64 bytes", &ed3kpb.KadRequest{Target: tgt, Kind: 14, Store: &ed3kpb.Store{Signer: make([]byte, 64)}}, -1, false},
+		{"kind NONE, signer of 64 bytes", &ed3kpb.KadRequest{Target: tgt, Kind: ed3kpb.Kind_NONE, Store: &ed3kpb.Store{Signer: make([]byte, 64)}}, -1, false},
+		{"kind HEAD, signer of 64 bytes", &ed3kpb.KadRequest{Target: tgt, Kind: ed3kpb.Kind_HEAD, Store: &ed3kpb.Store{Signer: make([]byte, 64)}}, ed3kpb.Error_MALFORMED, false},
 	}
 	for _, c := range cases {
 		ans, e := handle(t, x, c.req, p)
@@ -236,5 +240,94 @@ func TestRateAndRecordLimit(t *testing.T) {
 	t.Logf("257 records: %d results, last %v", len(ans.Results), ans.Results[256])
 	if len(ans.Results) != 257 || ans.Results[256] != ed3kpb.StoreResult_REJECTED {
 		t.Fatal("record 257")
+	}
+}
+
+// Bug 7: a KEYWORD record stored with level above 15 is REJECTED, never
+// truncated to a byte; levels 1 to 15 are stored like level 0 (§10.8).
+func TestStoreLevel(t *testing.T) {
+	x := newIndex()
+	a := newPub(t, "81.2.3.4:4662")
+	root := make([]byte, 32)
+	for _, level := range []uint32{16, 256, 1} {
+		rand.Read(root)
+		target := token.KeywordTarget(uint8(level), "sleep")
+		body, _ := proto.Marshal(&ed3kpb.Record{Expires: uint64(now.Add(time.Hour).Unix()),
+			File: &ed3kpb.FileInfo{Root: root, Size: 1000, Name: "The Big Sleep.mkv"}})
+		req := &ed3kpb.KadRequest{Target: target[:], Kind: ed3kpb.Kind_KEYWORD, Level: level,
+			Store: &ed3kpb.Store{Files: []*ed3kpb.Signed{sig.Sign(a.priv, ed3kpb.Kind_KEYWORD, target[:], body)}}}
+		ans, e := handle(t, x, req, a.peer)
+		t.Logf("level %d -> results=%v error=%v", level, ans.GetResults(), e)
+		stored := e == nil && len(ans.Results) == 0
+		if stored != (level <= MaxLevel) {
+			t.Errorf("level %d: stored=%v", level, stored)
+		}
+	}
+}
+
+// Bugs 8 and 9: load and spill in every answer of a responsible node: store
+// answers, contacts-only answers, and SOURCE and NOTE searches (§10.8).
+func TestLoadAndSpill(t *testing.T) {
+	x := New(Config{Store: storage.NewMemoryEngine(), Now: func() time.Time { return now },
+		Limits: storage.Ed3kLimits{SourcesPerTarget: 1, KeywordFiles: 4}})
+	a := newPub(t, "81.2.3.4:4662")
+	b := newPub(t, "82.2.3.4:4662")
+	target := make([]byte, 16)
+	rand.Read(target)
+	src := &ed3kpb.KadRequest{Target: target, Kind: ed3kpb.Kind_SOURCE, Store: &ed3kpb.Store{Source: &ed3kpb.Peer{}}}
+	ans, _ := handle(t, x, src, a.peer)
+	t.Logf("source 1: results=%v spill=%v", ans.Results, ans.Spill)
+	if len(ans.Results) != 0 || ans.Spill {
+		t.Fatal("first source")
+	}
+	ans, _ = handle(t, x, src, b.peer)
+	t.Logf("source 2 at a full target: results=%v spill=%v", ans.Results, ans.Spill)
+	if ans.Results[0] != ed3kpb.StoreResult_FULL || !ans.Spill {
+		t.Fatal("FULL store answer without spill")
+	}
+	ans, _ = handle(t, x, &ed3kpb.KadRequest{Target: target, Kind: ed3kpb.Kind_SOURCE, Search: &ed3kpb.Query{}}, a.peer)
+	t.Logf("source search: %d sources, spill=%v", len(ans.Sources), ans.Spill)
+	if !ans.Spill {
+		t.Fatal("SOURCE search without spill")
+	}
+	ans, _ = handle(t, x, &ed3kpb.KadRequest{Target: target, Kind: ed3kpb.Kind_SOURCE}, a.peer)
+	t.Logf("contacts-only SOURCE: responsible=%v spill=%v", ans.Responsible, ans.Spill)
+	if !ans.Responsible || !ans.Spill {
+		t.Fatal("contacts-only answer without spill")
+	}
+
+	req, kw := keywordRecord(t, a, "The Big Sleep.mkv", make([]byte, 32), "sleep", now.Add(time.Hour))
+	ans, _ = handle(t, x, req, a.peer)
+	t.Logf("keyword store (1 file of 4): results=%v load=%d", ans.Results, ans.Load)
+	if ans.Load != 25 {
+		t.Fatalf("keyword store answer load %d, want 25", ans.Load)
+	}
+	ans, _ = handle(t, x, &ed3kpb.KadRequest{Target: kw[:], Kind: ed3kpb.Kind_KEYWORD}, a.peer)
+	t.Logf("contacts-only KEYWORD: responsible=%v load=%d", ans.Responsible, ans.Load)
+	if !ans.Responsible || ans.Load != 25 {
+		t.Fatal("contacts-only KEYWORD answer without load")
+	}
+}
+
+// Bug 10: StrictRecordFields refuses a KEYWORD record that also carries a field
+// of an extension; by default such a record is stored.
+func TestStrictRecordFields(t *testing.T) {
+	a := newPub(t, "81.2.3.4:4662")
+	target := token.KeywordTarget(0, "sleep")
+	root := make([]byte, 32)
+	rand.Read(root)
+	body, _ := proto.Marshal(&ed3kpb.Record{Expires: uint64(now.Add(time.Hour).Unix()),
+		File:  &ed3kpb.FileInfo{Root: root, Size: 1000, Name: "The Big Sleep.mkv"},
+		Alias: &ed3kpb.Alias{}})
+	req := &ed3kpb.KadRequest{Target: target[:], Kind: ed3kpb.Kind_KEYWORD,
+		Store: &ed3kpb.Store{Files: []*ed3kpb.Signed{sig.Sign(a.priv, ed3kpb.Kind_KEYWORD, target[:], body)}}}
+	for _, strict := range []bool{false, true} {
+		x := New(Config{Store: storage.NewMemoryEngine(), Now: func() time.Time { return now }, StrictRecordFields: strict})
+		ans, _ := handle(t, x, req, a.peer)
+		t.Logf("file + alias, strict=%v -> results=%v", strict, ans.Results)
+		rejected := len(ans.Results) == 1 && ans.Results[0] == ed3kpb.StoreResult_REJECTED
+		if rejected != strict {
+			t.Errorf("strict=%v: rejected=%v", strict, rejected)
+		}
 	}
 }

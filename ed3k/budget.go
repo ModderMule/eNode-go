@@ -36,39 +36,40 @@ func newBudget(cfg Budget, named bool) *budget {
 }
 
 // admit counts a completed handshake and reports whether to close it, with the
-// close code.
-func (b *budget) admit(id ident.NodeID, a netip.Addr, now time.Time) (quic.ApplicationErrorCode, bool) {
+// close code. banned is set when this handshake started a ban of id: the
+// caller then closes id's open connections too (§4.6).
+func (b *budget) admit(id ident.NodeID, a netip.Addr, now time.Time) (code quic.ApplicationErrorCode, refuse, banned bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if until, ok := b.banned[id]; ok {
 		if now.Before(until) {
-			return transport.CodeDenied, true
+			return transport.CodeDenied, true, false
 		}
 		delete(b.banned, id)
 	}
 	b.newNode[id] = recent(append(b.newNode[id], now), now)
 	if len(b.newNode[id]) > b.cfg.NewPerNodeIDMin {
 		b.banned[id] = now.Add(banTime)
-		return transport.CodeDenied, true
+		return transport.CodeDenied, true, true
 	}
 	exempt := b.named && ident.Private(a)
 	host, site := ident.HostKey(a, b.named), ident.SiteKey(a)
 	if !exempt {
 		b.newHost[host] = recent(append(b.newHost[host], now), now)
 		if len(b.newHost[host]) > b.cfg.NewPerHostMin {
-			return transport.CodeBusy, true
+			return transport.CodeBusy, true, false
 		}
 		if b.host[host] >= b.cfg.PerHost || b.site[site] >= b.cfg.PerSite {
-			return transport.CodeBusy, true
+			return transport.CodeBusy, true, false
 		}
 	}
 	if b.open >= b.cfg.MaxConns {
-		return transport.CodeBusy, true
+		return transport.CodeBusy, true, false
 	}
 	b.open++
 	b.host[host]++
 	b.site[site]++
-	return 0, false
+	return 0, false, false
 }
 
 // leave counts a closed connection.

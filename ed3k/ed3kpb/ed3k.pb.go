@@ -6109,7 +6109,7 @@ func (x *HopLookup) GetRequest() *KadRequest {
 
 type HopLookupAnswer struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Answers       []*KadAnswer           `protobuf:"bytes,1,rep,name=answers,proto3" json:"answers,omitempty"` // those of the closest set (Protocol.md §10.4), closest first   hops.md §4.1
+	Answers       []*KadAnswer           `protobuf:"bytes,1,rep,name=answers,proto3" json:"answers,omitempty"` // one per closest-set member that said responsible, closest first; the page of request.offset   hops.md §4.1
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6354,7 +6354,7 @@ func (x *HopJoin) GetGate() []byte {
 type Gates struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Issued        uint64                 `protobuf:"varint,1,opt,name=issued,proto3" json:"issued,omitempty"` // Unix time; the later record replaces the earlier   hops.md §4.3
-	Gates         []*Gate                `protobuf:"bytes,2,rep,name=gates,proto3" json:"gates,omitempty"`    // at most 4
+	Gates         []*Gate                `protobuf:"bytes,2,rep,name=gates,proto3" json:"gates,omitempty"`    // 1 to 4
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

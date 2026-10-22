@@ -20,18 +20,20 @@ const (
 	punchWait          = 5 * time.Second // R waits this long for T's answer
 	forwardsPerLeaf    = 30              // per minute
 	forwardsPerInitHst = 3               // per minute and initiator host
-	relayTTL           = 300             // seconds a slot is held without traffic: the idle timeout
+	maxRelayTTL        = 300             // seconds a slot is held without traffic: the idle timeout
 	busyRetry          = 60
 )
 
 // relay holds the reservations of leaves (§9.4): one per leaf node ID, for as
-// long as its connection lasts.
+// long as a connection that made it lasts. A leaf connected over both families
+// (or reconnected before its old connection timed out) shares its one slot
+// across those connections: the slot ends with the last of them.
 type relay struct {
 	cfg   RelayLimits
 	named bool
 
 	mu     sync.Mutex
-	leaves map[ident.NodeID]*session
+	leaves map[ident.NodeID]*reservation
 	host   map[netip.Prefix]int
 	site   map[netip.Prefix]int
 
@@ -39,8 +41,15 @@ type relay struct {
 	perPair *ratelimit.Limiter
 }
 
+// reservation is one leaf's slot. host and site are the groups it was counted
+// in when it was made; they do not follow a migration.
+type reservation struct {
+	holders    []*session // oldest first
+	host, site netip.Prefix
+}
+
 func newRelay(cfg RelayLimits, named bool) *relay {
-	return &relay{cfg: cfg, named: named, leaves: map[ident.NodeID]*session{},
+	return &relay{cfg: cfg, named: named, leaves: map[ident.NodeID]*reservation{},
 		host: map[netip.Prefix]int{}, site: map[netip.Prefix]int{},
 		perLeaf: ratelimit.New(forwardsPerLeaf), perPair: ratelimit.New(forwardsPerInitHst)}
 }
@@ -54,50 +63,69 @@ func (r *relay) count() int {
 // hasRoom decides RELAY in this node's Hello.
 func (r *relay) hasRoom() bool { return r.count() < r.cfg.Leaves }
 
-// reserve takes a slot for s; false when the relay or s's network is full.
-func (r *relay) reserve(s *session) bool {
+// reserve takes a slot for s at address a; false when the relay or a's network
+// is full. A node ID that already holds a slot adds s to it, with no limit to
+// pass, and keeps it whatever s's network: one slot per leaf node ID.
+func (r *relay) reserve(s *session, a netip.Addr) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if cur := r.leaves[s.id]; cur == s {
+	if res := r.leaves[s.id]; res != nil {
+		res.remove(s)
+		res.holders = append(res.holders, s)
 		return true
-	} else if cur != nil {
-		r.dropLocked(cur) // the slot moves to the leaf's newer connection
 	}
-	host, site := ident.HostKey(s.remote.Addr(), r.named), ident.SiteKey(s.remote.Addr())
-	exempt := r.named && ident.Private(s.remote.Addr())
+	host, site := ident.HostKey(a, r.named), ident.SiteKey(a)
+	exempt := r.named && ident.Private(a)
 	if len(r.leaves) >= r.cfg.Leaves || (!exempt && (r.host[host] >= r.cfg.PerHost || r.site[site] >= r.cfg.PerSite)) {
 		return false
 	}
-	r.leaves[s.id] = s
+	r.leaves[s.id] = &reservation{holders: []*session{s}, host: host, site: site}
 	r.host[host]++
 	r.site[site]++
 	return true
 }
 
-// release gives s's slot back, if it holds one.
+// release takes s off its leaf's slot, if it holds it; the slot ends with its
+// last holder.
 func (r *relay) release(s *session) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.leaves[s.id] == s {
-		r.dropLocked(s)
+	res := r.leaves[s.id]
+	if res == nil || !res.remove(s) || len(res.holders) > 0 {
+		return
+	}
+	delete(r.leaves, s.id)
+	if r.host[res.host]--; r.host[res.host] <= 0 {
+		delete(r.host, res.host)
+	}
+	if r.site[res.site]--; r.site[res.site] <= 0 {
+		delete(r.site, res.site)
 	}
 }
 
-func (r *relay) leaf(id ident.NodeID) *session {
+// leaf returns the connections that hold id's slot, newest first.
+func (r *relay) leaf(id ident.NodeID) []*session {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.leaves[id]
+	res := r.leaves[id]
+	if res == nil {
+		return nil
+	}
+	out := make([]*session, len(res.holders))
+	for i, s := range res.holders {
+		out[len(out)-1-i] = s
+	}
+	return out
 }
 
-func (r *relay) dropLocked(s *session) {
-	delete(r.leaves, s.id)
-	host, site := ident.HostKey(s.remote.Addr(), r.named), ident.SiteKey(s.remote.Addr())
-	if r.host[host]--; r.host[host] <= 0 {
-		delete(r.host, host)
+func (res *reservation) remove(s *session) bool {
+	for i, h := range res.holders {
+		if h == s {
+			res.holders = append(res.holders[:i], res.holders[i+1:]...)
+			return true
+		}
 	}
-	if r.site[site]--; r.site[site] <= 0 {
-		delete(r.site, site)
-	}
+	return false
 }
 
 func (s *session) onRelay(st streamWriter, body []byte) {
@@ -111,11 +139,21 @@ func (s *session) onRelay(st streamWriter, body []byte) {
 		wire.WriteFrame(st, wire.TypeRelay, &ed3kpb.Relay{Ttl: 0})
 		return
 	}
-	if !s.n.relay.reserve(s) {
+	if !s.n.relay.reserve(s, s.remoteAddr().Addr()) {
 		s.answerErrorW(st, ed3kpb.Error_BUSY, 30*60)
 		return
 	}
-	wire.WriteFrame(st, wire.TypeRelay, &ed3kpb.Relay{Ttl: relayTTL})
+	wire.WriteFrame(st, wire.TypeRelay, &ed3kpb.Relay{Ttl: s.relayTTL()})
+}
+
+// relayTTL is the ttl of a reservation: the time the slot is kept without
+// traffic, which is the connection's idle timeout, at most 300 s (§9.4).
+func (s *session) relayTTL() uint32 {
+	ttl := uint32(maxRelayTTL)
+	if idle := s.c.ConnectionState().IdleTimeout; idle > 0 {
+		ttl = min(ttl, uint32(idle/time.Second))
+	}
+	return ttl
 }
 
 // onPunch forwards a Punch from an initiator I to a leaf T that holds a
@@ -138,20 +176,35 @@ func (s *session) onPunch(st streamWriter, body []byte) {
 		s.answerErrorW(st, ed3kpb.Error_MALFORMED, 0)
 		return
 	}
-	t := s.n.relay.leaf(ident.NodeID(p.PeerId))
-	if t == nil {
+	leafID := ident.NodeID(p.PeerId)
+	holders := s.n.relay.leaf(leafID)
+	if len(holders) == 0 {
 		s.answerErrorW(st, ed3kpb.Error_NOT_FOUND, 0)
 		return
 	}
-	initHost := ident.HostKey(s.remote.Addr(), s.n.named).String()
-	if !s.n.relay.perLeaf.Allow(t.id.String()) || !s.n.relay.perPair.Allow(initHost+"|"+t.id.String()) {
+	remote := s.remoteAddr()
+	initHost := ident.HostKey(remote.Addr(), s.n.named).String()
+	if !s.n.relay.perLeaf.Allow(leafID.String()) || !s.n.relay.perPair.Allow(initHost+"|"+leafID.String()) {
 		s.answerErrorW(st, ed3kpb.Error_BUSY, busyRetry)
 		return
 	}
 	s.n.punches.Add(1)
-	seen := observe(s.remote, &p.Ep4, &p.Ep6)
+	seen := observe(remote, &p.Ep4, &p.Ep6)
 	fwd := &ed3kpb.Punch{PeerId: s.id[:], Ep4: p.Ep4, Ep6: p.Ep6, Nat: p.Nat, Nonce: p.Nonce, Seen: seen}
-	ans, eAns, err := t.ask(fwd)
+	// The newest connection of the leaf first; an older one when it fails, all
+	// within the 5 s that R waits for T (§9.5).
+	deadline := time.Now().Add(punchWait)
+	var (
+		t    *session
+		ans  *ed3kpb.Punch
+		eAns *ed3kpb.Error
+		err  error
+	)
+	for _, t = range holders {
+		if ans, eAns, err = t.ask(fwd, deadline); err == nil || !time.Now().Before(deadline) {
+			break
+		}
+	}
 	if err != nil {
 		s.n.punchFailed.Add(1)
 		s.answerErrorW(st, ed3kpb.Error_BUSY, busyRetry)
@@ -161,21 +214,20 @@ func (s *session) onPunch(st streamWriter, body []byte) {
 		wire.WriteFrame(st, wire.TypeError, eAns) // T's Error goes back unchanged
 		return
 	}
-	seen = observe(t.remote, &ans.Ep4, &ans.Ep6)
+	seen = observe(t.remoteAddr(), &ans.Ep4, &ans.Ep6)
 	back := &ed3kpb.Punch{PeerId: t.id[:], Ep4: ans.Ep4, Ep6: ans.Ep6, Nat: ans.Nat, Nonce: ans.Nonce, Seen: seen}
 	wire.WriteFrame(st, wire.TypePunch, back)
 }
 
 // ask sends a Punch to this leaf on a new exchange over its connection and reads
-// its answer, waiting at most punchWait.
-func (s *session) ask(p *ed3kpb.Punch) (*ed3kpb.Punch, *ed3kpb.Error, error) {
-	ctx, cancel := context.WithTimeout(s.c.Context(), punchWait)
+// its answer, waiting until deadline at most.
+func (s *session) ask(p *ed3kpb.Punch, deadline time.Time) (*ed3kpb.Punch, *ed3kpb.Error, error) {
+	ctx, cancel := context.WithDeadline(s.c.Context(), deadline)
 	defer cancel()
 	st, err := s.c.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	deadline := time.Now().Add(punchWait)
 	st.SetDeadline(deadline)
 	if err := wire.WriteFrame(st, wire.TypePunch, p); err != nil {
 		st.CancelRead(0)

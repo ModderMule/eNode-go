@@ -2,6 +2,7 @@ package wire
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -46,12 +47,46 @@ func TestHeaderErrors(t *testing.T) {
 		{"ends in header", []byte{0x02}, ErrHeader},
 		{"ends in body", []byte{0x02, 0x05, 1, 2}, ErrShort},
 		{"long varint accepted", []byte{0x82, 0x00, 0x00}, nil},
+		{"FIN with zero bytes", nil, ErrEmpty},
 	}
 	for _, c := range cases {
 		_, err := ReadFrame(NewReader(bytes.NewReader(c.in)))
 		t.Logf("%s: % x -> %v", c.name, c.in, err)
 		if err != c.want {
 			t.Errorf("%s: got %v want %v", c.name, err, c.want)
+		}
+	}
+}
+
+// failing is a stream that yields its bytes and then fails with err.
+type failing struct {
+	b   []byte
+	err error
+}
+
+func (f *failing) Read(p []byte) (int, error) {
+	if len(f.b) == 0 {
+		return 0, f.err
+	}
+	n := copy(p, f.b)
+	f.b = f.b[n:]
+	return n, nil
+}
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string { return "deadline" }
+func (timeoutErr) Timeout() bool { return true }
+
+// A stream that fails before or inside the header (deadline, reset) is not a
+// header that does not parse: the cause is wrapped so the caller can tell.
+func TestHeaderStreamFailure(t *testing.T) {
+	for _, in := range [][]byte{nil, {0x02}} {
+		_, err := ReadFrame(NewReader(&failing{b: in, err: timeoutErr{}}))
+		var te interface{ Timeout() bool }
+		t.Logf("% x then timeout -> %v", in, err)
+		if !errors.Is(err, ErrHeader) || !errors.As(err, &te) {
+			t.Errorf("% x: got %v, want ErrHeader wrapping the timeout", in, err)
 		}
 	}
 }

@@ -93,7 +93,8 @@ func ParseNodeLink(s string, named bool) (NodeLink, error) {
 
 func parseLinkEndpoint(v string) (Endpoint, error) {
 	host, port, ok := strings.Cut(v, "]:")
-	if strings.HasPrefix(v, "[") && ok {
+	bracketed := strings.HasPrefix(v, "[") && ok
+	if bracketed {
 		host = host[1:]
 	} else {
 		i := strings.LastIndexByte(v, ':')
@@ -108,6 +109,10 @@ func parseLinkEndpoint(v string) (Endpoint, error) {
 	a, err := netip.ParseAddr(host)
 	if err != nil || a.Zone() != "" {
 		return Endpoint{}, errors.New("ed3k: bad endpoint address")
+	}
+	if bracketed && a.Is4() {
+		// `[ip6]:port` is for IPv6 only (§13.2).
+		return Endpoint{}, errors.New("ed3k: IPv4 endpoint in brackets")
 	}
 	p, err := strconv.ParseUint(port, 10, 16)
 	if err != nil {

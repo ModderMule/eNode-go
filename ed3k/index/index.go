@@ -46,8 +46,10 @@ const (
 	// DefaultRequestsPerMinute is the request rate per (host group, kind,
 	// search/store) before a store is BUSY and a search Error{BUSY}.
 	DefaultRequestsPerMinute = 120
-	// keepRenew is how far ahead a kept source's expiry is pushed.
-	keepRenew = 2 * time.Hour
+	// keepRenew is how far ahead a kept source's expiry is pushed. The node
+	// renews every 15 min, so a node that dies leaves its kept sources at most
+	// this long past their lifetime.
+	keepRenew = 30 * time.Minute
 )
 
 // Config is what an Index needs.
@@ -61,6 +63,10 @@ type Config struct {
 	// Reject, when set, is asked about every file name; true refuses the record
 	// (content filters).
 	Reject func(name string) bool
+	// StrictRecordFields refuses a KEYWORD or NOTE record that also carries a
+	// record field of an extension (on_air, joint, part, gates, alias). Off,
+	// such fields are allowed like unknown ones.
+	StrictRecordFields bool
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
 }
@@ -124,7 +130,13 @@ func (x *Index) Handle(ctx context.Context, req *ed3kpb.KadRequest, p Peer) (*ed
 	}
 	// 2. search and store.
 	if req.Search == nil && req.Store == nil {
-		return &ed3kpb.KadAnswer{Responsible: Stores(req.Kind)}, nil, nil
+		ans := &ed3kpb.KadAnswer{Responsible: Stores(req.Kind)}
+		if ans.Responsible {
+			if err := x.loadSpill(ctx, req.Kind, req.Target, ans); err != nil {
+				return nil, nil, err
+			}
+		}
+		return ans, nil, nil
 	}
 	// 3. Kind and responsibility.
 	if !Stores(req.Kind) || (req.Kind == ed3kpb.Kind_KEYWORD && req.Search != nil && req.Level > MaxLevel) {
@@ -171,6 +183,33 @@ func (x *Index) Release(ctx context.Context, conn string) error {
 	return x.cfg.Store.ReleaseEd3kSources(ctx, conn)
 }
 
+// ReleaseAll ends the keeping of every connection whose name starts with
+// prefix: at start, for the connections of an earlier run of the node.
+func (x *Index) ReleaseAll(ctx context.Context, prefix string) error {
+	return x.cfg.Store.ReleaseEd3kSourcesByPrefix(ctx, prefix)
+}
+
+// loadSpill sets load and spill in an answer of this responsible node (§10.8):
+// load for KEYWORD only, spill for every kind it stores.
+func (x *Index) loadSpill(ctx context.Context, kind ed3kpb.Kind, target []byte, ans *ed3kpb.KadAnswer) error {
+	var t [16]byte
+	copy(t[:], target)
+	count, spill, err := x.cfg.Store.Ed3kTarget(ctx, uint8(kind), t, x.cfg.Now())
+	if err != nil {
+		return err
+	}
+	if kind == ed3kpb.Kind_KEYWORD {
+		ans.Load = load(count, x.cfg.Limits.KeywordFiles)
+	}
+	ans.Spill = spill
+	return nil
+}
+
+// load is the keyword load of §10.3: the files held in percent of the limit.
+func load(files, limit int) uint32 {
+	return uint32(min(100, files*100/limit))
+}
+
 // layout applies the size and layout rules of §0 and §10.3.
 func (x *Index) layout(req *ed3kpb.KadRequest) *ed3kpb.Error {
 	malformed := &ed3kpb.Error{Code: ed3kpb.Error_MALFORMED}
@@ -187,9 +226,7 @@ func (x *Index) layout(req *ed3kpb.KadRequest) *ed3kpb.Error {
 		if req.Kind == ed3kpb.Kind_SOURCE && len(s.Also)%16 != 0 {
 			return malformed
 		}
-		signedKind := req.Kind != ed3kpb.Kind_SOURCE && req.Kind != ed3kpb.Kind_LIVE &&
-			req.Kind != ed3kpb.Kind_SUB && req.Kind != ed3kpb.Kind_FRIEND
-		if signedKind && len(s.Signer) != 0 && len(s.Signer) != ed25519.PublicKeySize {
+		if usesSigner(req.Kind) && len(s.Signer) != 0 && len(s.Signer) != ed25519.PublicKeySize {
 			return malformed
 		}
 	}
@@ -229,7 +266,7 @@ func (x *Index) search(ctx context.Context, req *ed3kpb.KadRequest, target [16]b
 		}
 		ans.Keys = keys.list
 		ans.More = page.More
-		ans.Load = uint32(min(100, page.Files*100/x.cfg.Limits.KeywordFiles))
+		ans.Load = load(page.Files, x.cfg.Limits.KeywordFiles)
 		ans.Spill = page.Spill
 	case ed3kpb.Kind_NOTE:
 		notes, more, err := x.cfg.Store.SearchEd3kNotes(ctx, target, offset, MaxPerAnswer, now)
@@ -244,6 +281,11 @@ func (x *Index) search(ctx context.Context, req *ed3kpb.KadRequest, target [16]b
 		}
 		ans.Keys = keys.list
 		ans.More = more
+	}
+	if req.Kind != ed3kpb.Kind_KEYWORD {
+		if err := x.loadSpill(ctx, req.Kind, req.Target, ans); err != nil {
+			return nil, nil, err
+		}
 	}
 	return ans, nil, nil
 }
@@ -285,7 +327,8 @@ func (x *Index) store(ctx context.Context, req *ed3kpb.KadRequest, target [16]by
 		}
 	}
 	for _, f := range s.Files {
-		if req.Kind != ed3kpb.Kind_KEYWORD || n >= MaxStoreRecs || !allowed {
+		// A level above 15 is REJECTED, never truncated (§10.8 Levels).
+		if req.Kind != ed3kpb.Kind_KEYWORD || req.Level > MaxLevel || n >= MaxStoreRecs || !allowed {
 			put(reject)
 			continue
 		}
@@ -323,6 +366,10 @@ func (x *Index) store(ctx context.Context, req *ed3kpb.KadRequest, target [16]by
 			ans.Results = results
 			break
 		}
+	}
+	// After storing, so that a FULL of this request shows in spill.
+	if err := x.loadSpill(ctx, req.Kind, req.Target, ans); err != nil {
+		return nil, nil, err
 	}
 	return ans, nil, nil
 }
@@ -397,7 +444,8 @@ func (x *Index) storeKeyword(ctx context.Context, s *ed3kpb.Signed, target [16]b
 	viaSigner bool, host, site string, now time.Time) ed3kpb.StoreResult {
 	reject := ed3kpb.StoreResult_REJECTED
 	rec, ok := x.parseRecord(s, SignedLifetime, now)
-	if !ok || rec.File == nil || rec.Note != nil || rec.Head != nil || rec.Member != nil || rec.Sealed != nil {
+	if !ok || rec.File == nil || rec.Note != nil || rec.Head != nil || rec.Member != nil || rec.Sealed != nil ||
+		(x.cfg.StrictRecordFields && hasExtensionField(rec)) {
 		return reject
 	}
 	f := rec.File
@@ -429,7 +477,8 @@ func (x *Index) storeKeyword(ctx context.Context, s *ed3kpb.Signed, target [16]b
 func (x *Index) storeNote(ctx context.Context, s *ed3kpb.Signed, target [16]byte, key []byte, host, site string, now time.Time) ed3kpb.StoreResult {
 	reject := ed3kpb.StoreResult_REJECTED
 	rec, ok := x.parseRecord(s, SignedLifetime, now)
-	if !ok || rec.Note == nil || rec.File != nil || rec.Head != nil || rec.Member != nil || rec.Sealed != nil {
+	if !ok || rec.Note == nil || rec.File != nil || rec.Head != nil || rec.Member != nil || rec.Sealed != nil ||
+		(x.cfg.StrictRecordFields && hasExtensionField(rec)) {
 		return reject
 	}
 	if rec.Note.Rating > 5 || len(rec.Note.Text) > MaxNoteText || !utf8.ValidString(rec.Note.Text) {
@@ -512,6 +561,24 @@ func hasRecordOf(kind ed3kpb.Kind, s *ed3kpb.Store) bool {
 		return len(s.Files) > 0
 	case ed3kpb.Kind_NOTE:
 		return s.Note != nil
+	}
+	return false
+}
+
+// hasExtensionField reports whether a record carries a field of an extension
+// that is neither KEYWORD's nor NOTE's: on_air, joint, part, gates, alias.
+func hasExtensionField(r *ed3kpb.Record) bool {
+	return r.OnAir != nil || r.Joint != nil || r.Part != nil || r.Gates != nil || r.Alias != nil
+}
+
+// usesSigner reports whether a Store of kind is checked under `signer`: the
+// signed kinds of §10.7. For SOURCE, the kinds stored like it, NONE and kinds
+// this node does not know, `signer` is ignored whatever its length.
+func usesSigner(kind ed3kpb.Kind) bool {
+	switch kind {
+	case ed3kpb.Kind_KEYWORD, ed3kpb.Kind_NOTE, ed3kpb.Kind_HEAD, ed3kpb.Kind_MEMBER, ed3kpb.Kind_HIDDEN,
+		ed3kpb.Kind_PART, ed3kpb.Kind_ANON, ed3kpb.Kind_GATE, ed3kpb.Kind_ALIAS:
+		return true
 	}
 	return false
 }

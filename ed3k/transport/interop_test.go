@@ -17,7 +17,6 @@ import (
 	"enode/ed3k/ident"
 	"enode/ed3k/obfs"
 	"enode/ed3k/wire"
-	quic "enode/internal/ed3k/iquic"
 )
 
 // TestPackmuleHello dials the Rust reference node (packmule-node) through the
@@ -55,10 +54,9 @@ func TestPackmuleHello(t *testing.T) {
 	udp, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	pc := obfs.NewClient(udp, obfs.NetID(network), link.ID.Obf())
 	defer pc.Close()
-	tlsConf, _ := ClientTLS(cpriv, link.ID)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	c, err := quic.Dial(ctx, pc, net.UDPAddrFromAddrPort(link.EP4), tlsConf, QUICConfig(IdleIndex))
+	c, err := Dial(ctx, pc, net.UDPAddrFromAddrPort(link.EP4), cpriv, link.ID, QUICConfig(IdleIndex))
 	if err != nil {
 		t.Fatalf("dial packmule: %v", err)
 	}

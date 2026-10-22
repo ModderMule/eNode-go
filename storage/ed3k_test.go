@@ -35,9 +35,17 @@ func TestDecideKeywordPlaces(t *testing.T) {
 		{"rule 2: same site", Ed3kKeyword{PubKey: k(9), Site: "c", Expires: at.Add(time.Hour)}, Ed3kStored, 3},
 		{"rule 3: least fresh", Ed3kKeyword{PubKey: k(9), Site: "d", Expires: at.Add(time.Hour)}, Ed3kStored, 1},
 		{"rule 3 with signer", Ed3kKeyword{PubKey: k(9), Site: "d", Expires: at.Add(time.Hour), ViaSigner: true}, Ed3kRejected, 0},
+		// A renewal from a new site counts for that site over all targets
+		// (ip-diversity §2.4), as for SOURCE and NOTE.
+		{"rule 1 from a full site", Ed3kKeyword{PubKey: k(2), Site: "full", Expires: at.Add(2 * time.Hour)}, Ed3kRejected, 0},
+		{"rule 1 from its own full site", Ed3kKeyword{PubKey: k(2), Site: "b", Expires: at.Add(2 * time.Hour)}, Ed3kStored, 2},
 	}
 	for _, c := range cases {
-		d := decideKeyword(ed3kKeywordView{Held: held, Files: 1}, c.r, lim)
+		v := ed3kKeywordView{Held: held, Files: 1}
+		if c.r.Site == "full" || c.name == "rule 1 from its own full site" {
+			v.SiteTotal = lim.RecordsPerSite
+		}
+		d := decideKeyword(v, c.r, lim)
 		got := byte(0)
 		if d.Replace != nil {
 			got = d.Replace[0]
@@ -170,6 +178,55 @@ func testEd3kStore(t *testing.T, s Ed3kStore) {
 		t.Logf("released source after its lifetime: %d found", len(page))
 		if len(page) != 0 {
 			t.Fatal("released source outlived its lifetime")
+		}
+	})
+
+	t.Run("release by prefix", func(t *testing.T) {
+		tag := fmt.Sprint(now.UnixNano())
+		mine := testSource(rnd16(), rnd16(), "p-host-1", "p-site-1", now)
+		mine.LifetimeEnd, mine.KeptBy = now.Add(time.Hour), "p_"+tag+"-conn1"
+		// "_" would match any byte in an unescaped LIKE pattern.
+		near := testSource(rnd16(), rnd16(), "p-host-2", "p-site-2", now)
+		near.LifetimeEnd, near.KeptBy = now.Add(time.Hour), "pX"+tag+"-conn2"
+		for _, r := range []Ed3kSource{mine, near} {
+			if res, err := s.StoreEd3kSource(ctx, r, lim, now); res != Ed3kStored || err != nil {
+				t.Fatalf("store %s: %v %v", r.KeptBy, res, err)
+			}
+			s.KeepEd3kSources(ctx, r.KeptBy, now.Add(3*time.Hour))
+		}
+		if err := s.ReleaseEd3kSourcesByPrefix(ctx, "p_"+tag+"-"); err != nil {
+			t.Fatal(err)
+		}
+		later := now.Add(2 * time.Hour)
+		s.ExpireEd3k(ctx, later)
+		a, _, _ := s.SearchEd3kSources(ctx, mine.Target, 0, 10, later)
+		b, _, _ := s.SearchEd3kSources(ctx, near.Target, 0, 10, later)
+		t.Logf("after releasing prefix p_%s-: released source %d found, other prefix %d found", tag, len(a), len(b))
+		if len(a) != 0 || len(b) != 1 {
+			t.Fatal("release by prefix")
+		}
+	})
+
+	t.Run("target spill", func(t *testing.T) {
+		target := rnd16()
+		for i := range 4 {
+			s.StoreEd3kSource(ctx, testSource(target, rnd16(), fmt.Sprintf("f-host-%d", i), fmt.Sprintf("f-site-%d", i), now), lim, now)
+		}
+		_, spill, err := s.Ed3kTarget(ctx, Ed3kKindSource, target, now)
+		t.Logf("source target at its limit, before FULL: spill=%v err=%v", spill, err)
+		if err != nil || spill {
+			t.Fatal("spill before FULL")
+		}
+		res, _ := s.StoreEd3kSource(ctx, testSource(target, rnd16(), "f-host-9", "f-site-9", now), lim, now)
+		_, spill, _ = s.Ed3kTarget(ctx, Ed3kKindSource, target, now)
+		_, after, _ := s.Ed3kTarget(ctx, Ed3kKindSource, target, now.Add(5*time.Hour+time.Minute))
+		t.Logf("fifth source -> %v; spill=%v, 5 h later spill=%v", res, spill, after)
+		if res != Ed3kFull || !spill || after {
+			t.Fatal("SOURCE spill does not follow FULL for the lifetime of the kind")
+		}
+		_, other, _ := s.Ed3kTarget(ctx, Ed3kKindKeyword, target, now)
+		if other {
+			t.Fatal("spill of a SOURCE target shows for KEYWORD")
 		}
 	})
 

@@ -27,3 +27,188 @@ diff -ruN a/internal/handshake/cipher_suite_fips140.go b/internal/handshake/ciph
  
  func aeadAESGCMTLS13FIPS140(key, nonceMask []byte) cipher.AEAD {
  	return &tls13AESGCMAEADFIPS140{aead: cryptoTLSAEAD_AESGCMTLS13(key, nonceMask)}
+diff -ruN a/config.go b/config.go
+--- a/config.go
++++ b/config.go
+@@ -128,5 +128,6 @@
+ 		EnableStreamResetPartialDelivery: config.EnableStreamResetPartialDelivery,
+ 		Allow0RTT:                        config.Allow0RTT,
+ 		Tracer:                           config.Tracer,
++		OnPathSwitch:                     config.OnPathSwitch,
+ 	}
+ }
+diff -ruN a/connection.go b/connection.go
+--- a/connection.go
++++ b/connection.go
+@@ -181,9 +181,10 @@
+ 	closeChan chan struct{}
+ 	closeErr  atomic.Pointer[closeError]
+ 
+-	ctx                   context.Context
+-	ctxCancel             context.CancelCauseFunc
+-	handshakeCompleteChan chan struct{}
++	ctx                    context.Context
++	ctxCancel              context.CancelCauseFunc
++	handshakeCompleteChan  chan struct{}
++	handshakeConfirmedChan chan struct{} // ed3k
+ 
+ 	undecryptablePackets          []receivedPacketWithChecksum // undecryptable packets, waiting for a change in encryption level
+ 	undecryptablePacketsToProcess []receivedPacketWithChecksum
+@@ -553,6 +554,7 @@
+ 	c.closeChan = make(chan struct{}, 1)
+ 	c.sendingScheduled = make(chan struct{}, 1)
+ 	c.handshakeCompleteChan = make(chan struct{})
++	c.handshakeConfirmedChan = make(chan struct{})
+ 
+ 	now := monotime.Now()
+ 	c.lastPacketReceivedTime = now
+@@ -996,6 +998,9 @@
+ 	c.dropEncryptionLevel(protocol.EncryptionInitial, now)
+ 	c.dropEncryptionLevel(protocol.EncryptionHandshake, now)
+ 
++	if !c.handshakeConfirmed {
++		close(c.handshakeConfirmedChan)
++	}
+ 	c.handshakeConfirmed = true
+ 	c.cryptoStreamHandler.SetHandshakeConfirmed()
+ 
+@@ -1306,6 +1311,9 @@
+ 	c.mtuDiscoverer.Reset(initialPacketSize, c.maxMTU())
+ 	if !c.config.DisablePathMTUDiscovery && c.conn.capabilities().DF {
+ 		c.mtuDiscoverer.Start(p.rcvTime)
++	}
++	if c.config.OnPathSwitch != nil {
++		c.config.OnPathSwitch(c, p.remoteAddr)
+ 	}
+ 	c.conn.ChangeRemoteAddr(p.remoteAddr, p.info)
+ 	return true, nil
+@@ -2432,6 +2440,9 @@
+ 		c.idleTimeout = min(c.idleTimeout, params.MaxIdleTimeout)
+ 	}
+ 	c.keepAliveInterval = min(c.config.KeepAlivePeriod, c.idleTimeout/2)
++	c.connStateMutex.Lock()
++	c.connState.IdleTimeout = c.idleTimeout // ed3k
++	c.connStateMutex.Unlock()
+ 	c.streamsMap.HandleTransportParameters(params)
+ 	c.frameParser.SetAckDelayExponent(params.AckDelayExponent)
+ 	c.connFlowController.UpdateSendWindow(params.InitialMaxData)
+@@ -3155,6 +3166,13 @@
+ 	return c.handshakeCompleteChan
+ }
+ 
++// HandshakeConfirmed is closed once the handshake is confirmed (RFC 9001 §4.1.2):
++// on the client when HANDSHAKE_DONE arrives. From then on a CONNECTION_CLOSE
++// goes only in 1-RTT packets and keeps its application error code (ed3k).
++func (c *Conn) HandshakeConfirmed() <-chan struct{} {
++	return c.handshakeConfirmedChan
++}
++
+ // QlogTrace returns the qlog trace of the QUIC connection.
+ // It is nil if qlog is not enabled.
+ func (c *Conn) QlogTrace() qlogwriter.Trace {
+diff -ruN a/interface.go b/interface.go
+--- a/interface.go
++++ b/interface.go
+@@ -190,6 +190,11 @@
+ 	EnableStreamResetPartialDelivery bool
+ 
+ 	Tracer func(ctx context.Context, isClient bool, connID ConnectionID) qlogwriter.Trace
++
++	// OnPathSwitch is called on the server when a connection moves to a new
++	// client address, after QUIC validated that path (RFC 9000 §9.3), and
++	// before RemoteAddr reports the new address (ed3k).
++	OnPathSwitch func(c *Conn, addr net.Addr)
+ }
+ 
+ // ClientInfo contains information about an incoming connection attempt.
+@@ -226,4 +231,7 @@
+ 	Version Version
+ 	// GSO says if generic segmentation offload is used.
+ 	GSO bool
++	// IdleTimeout is the negotiated idle timeout: the smaller of the two
++	// max_idle_timeout values, 0 before the transport parameters arrived (ed3k).
++	IdleTimeout time.Duration
+ }
+diff -ruN a/send_stream.go b/send_stream.go
+--- a/send_stream.go
++++ b/send_stream.go
+@@ -70,7 +70,8 @@
+ 	// This can happen because the application called CancelWrite,
+ 	// or because Write returned the error (for remote cancellations).
+ 	cancellationFlagged bool
+-	completed           bool // set when this stream no longer needs to be scheduled
++	completed           bool          // set when this stream no longer needs to be scheduled
++	acked               chan struct{} // ed3k: closed when completed is set
+ 
+ 	priorityValue atomic.Uint64
+ 
+@@ -100,6 +101,7 @@
+ 		flowController:        flowController,
+ 		writeChan:             make(chan struct{}, 1),
+ 		writeOnce:             make(chan struct{}, 1), // cap: 1, to protect against concurrent use of Write
++		acked:                 make(chan struct{}),
+ 		supportsResetStreamAt: supportsResetStreamAt,
+ 	}
+ 	s.priorityValue.Store(encodeStreamPriority(defaultUrgency, true, 0))
+@@ -545,6 +547,18 @@
+ 	s.dataForWriting = s.dataForWriting[maxBytes:]
+ 	if s.canBufferStreamFrame() {
+ 		s.signalWrite()
++	}
++}
++
++// Acked is closed once the stream needs nothing more from the connection: its
++// FIN and every byte before it were acknowledged, or it was reset (ed3k).
++func (s *SendStream) Acked() <-chan struct{} { return s.acked }
++
++// markCompleted sets completed and closes Acked (ed3k).
++func (s *SendStream) markCompleted() {
++	if !s.completed {
++		s.completed = true
++		close(s.acked)
+ 	}
+ }
+ 
+@@ -561,7 +575,7 @@
+ 	}
+ 	// The stream is completed if we sent the FIN.
+ 	if s.finSent {
+-		s.completed = true
++		s.markCompleted()
+ 		return true
+ 	}
+ 	// The stream is also completed if:
+@@ -570,7 +584,7 @@
+ 	// 		* the application consumed the error via Write, or
+ 	//		* the application called Close
+ 	if s.resetErr != nil && (s.cancellationFlagged || s.finishedWriting) {
+-		s.completed = true
++		s.markCompleted()
+ 		return true
+ 	}
+ 	return false
+@@ -852,7 +866,7 @@
+ // The peer will NOT be informed about this: the stream is closed without sending a FIN or RST.
+ func (s *SendStream) closeForShutdown(err error) {
+ 	s.mutex.Lock()
+-	s.completed = true
++	s.markCompleted()
+ 	if s.shutdownErr == nil && !s.finishedWriting {
+ 		s.shutdownErr = err
+ 		s.returnFramesToPool()
+diff -ruN a/stream.go b/stream.go
+--- a/stream.go
++++ b/stream.go
+@@ -186,6 +186,12 @@
+ // See [SendStream.Context] for more details.
+ func (s *Stream) Context() context.Context {
+ 	return s.sendStr.Context()
++}
++
++// Acked is closed once the send-direction is acknowledged in full (ed3k).
++// See [SendStream.Acked].
++func (s *Stream) Acked() <-chan struct{} {
++	return s.sendStr.Acked()
+ }
+ 
+ // Close closes the send-direction of the stream.

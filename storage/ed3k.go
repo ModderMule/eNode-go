@@ -226,6 +226,13 @@ type Ed3kStore interface {
 	// ReleaseEd3kSources ends the keeping of a closed connection: its records
 	// go at the end of their lifetime.
 	ReleaseEd3kSources(ctx context.Context, keptBy string) error
+	// ReleaseEd3kSourcesByPrefix ends the keeping of every connection whose
+	// name starts with prefix: the node's connections of an earlier run.
+	ReleaseEd3kSourcesByPrefix(ctx context.Context, prefix string) error
+	// Ed3kTarget reports, for a target of kind, how many files it holds (KEYWORD
+	// only, 0 for other kinds) and whether it answered FULL within the record
+	// lifetime of the kind (§10.8 spill).
+	Ed3kTarget(ctx context.Context, kind uint8, target [16]byte, now time.Time) (int, bool, error)
 	// ExpireEd3k deletes what has expired, and rotates the paging secret every
 	// 24 h.
 	ExpireEd3k(ctx context.Context, now time.Time) (int, error)
@@ -309,8 +316,10 @@ func decideKeyword(v ed3kKeywordView, r Ed3kKeyword, lim Ed3kLimits) ed3kKeyword
 		if !r.Expires.After(own.Expires) {
 			return ed3kKeywordDecision{Result: Ed3kOlder}
 		}
-		// Rule 1: the publisher's own place, whatever site it comes from.
-		if own.Site != r.Site && !siteHasFile && v.SiteFiles >= lim.KeywordPerSite {
+		// Rule 1: the publisher's own place, whatever site it comes from. A
+		// renewal from a new site counts for that site like a new record
+		// (ip-diversity §2.4), against its limits per target and over all.
+		if own.Site != r.Site && (v.SiteTotal >= lim.RecordsPerSite || (!siteHasFile && v.SiteFiles >= lim.KeywordPerSite)) {
 			return reject
 		}
 		if own.Host != r.Host && v.HostTotal >= lim.RecordsPerHost {
@@ -511,13 +520,13 @@ func ed3kFullMemory(kind uint8) time.Duration {
 }
 
 // ed3kMirrorSource is what the Manticore mirror reads from the database engine it
-// wraps: the paging secret, the kept records of one file, every live record, and
-// a target's file count and spill.
+// wraps: the paging secret, the kept records of one file and every live record;
+// a target's file count and spill come from Ed3kTarget.
 type ed3kMirrorSource interface {
 	ed3kPageSecret(ctx context.Context, now time.Time) ([]byte, error)
 	ed3kFileKeywords(ctx context.Context, target [16]byte, root [32]byte) ([]Ed3kKeyword, error)
 	ed3kEachKeyword(ctx context.Context, now time.Time, fn func(Ed3kKeyword) error) error
-	ed3kKeywordTarget(ctx context.Context, target [16]byte, now time.Time) (int, bool, error)
+	Ed3kTarget(ctx context.Context, kind uint8, target [16]byte, now time.Time) (int, bool, error)
 }
 
 var (

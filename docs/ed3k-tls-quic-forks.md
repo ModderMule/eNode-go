@@ -67,6 +67,18 @@ That patch replaces the `go:linkname` into `crypto/tls.aeadAESGCMTLS13`, which q
 uses only in FIPS 140 mode, with a function that refuses FIPS mode. The fork has no FIPS
 mode.
 
+### Hooks
+
+The patch also adds four small hooks that the index node and its dialling tools need and
+quic-go does not expose. Each is marked `ed3k` in the code:
+
+| Hook | Where | Used for |
+|---|---|---|
+| `ConnectionState.IdleTimeout` | set in `applyTransportParameters` under `connStateMutex` | the relay's `ttl`, at most the negotiated idle timeout (§9.4) |
+| `Config.OnPathSwitch func(c *Conn, addr net.Addr)` | called just before the server's `ChangeRemoteAddr`, after QUIC validated the new path | the obfuscation layer's amplification limit follows a migrated client (§4.4) |
+| `SendStream.Acked()` / `Stream.Acked()` | a channel closed where the send stream becomes completed (FIN and all data acknowledged, or reset) | closing after a malformed `Hello` once its `Error` is acknowledged (§5.5) |
+| `Conn.HandshakeConfirmed()` | a channel closed in `handleHandshakeConfirmed` (on the client: `HANDSHAKE_DONE` arrived) | a dialler closes with `WRONG_PEER` only then, so the close travels in 1-RTT packets with its code (§4.1, RFC 9000 §10.2.3) |
+
 ## Updating
 
 After a Go or quic-go upgrade, from the repository root:

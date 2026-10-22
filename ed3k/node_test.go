@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"net"
 	"net/netip"
 	"testing"
@@ -50,15 +51,20 @@ type testClient struct {
 func dial(t *testing.T, n *Node) *testClient {
 	t.Helper()
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	return dialWith(t, n, priv, transport.IdleIndex)
+}
+
+// dialWith connects with a given key and max_idle_timeout.
+func dialWith(t *testing.T, n *Node, priv ed25519.PrivateKey, idle time.Duration) *testClient {
+	t.Helper()
 	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	pc := obfs.NewClient(udp, obfs.NetID(testNet), n.ID().Obf())
-	tlsConf, _ := transport.ClientTLS(priv, n.ID())
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	c, err := quic.Dial(ctx, pc, n.LocalAddr(), tlsConf, transport.QUICConfig(transport.IdleIndex))
+	c, err := transport.Dial(ctx, pc, n.LocalAddr(), priv, n.ID(), transport.QUICConfig(idle))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -237,5 +243,170 @@ func TestNodeRelayPunch(t *testing.T) {
 	r = decode(t, leaf.exchange(wire.TypeRelay, &ed3kpb.Relay{Reserve: false}), wire.TypeRelay, &ed3kpb.Relay{})
 	if r.Ttl != 0 || n.Stats().RelayLeaves != 0 {
 		t.Fatal("release")
+	}
+}
+
+// closeCode waits for the connection to end and returns the application close
+// code the node sent, or -1.
+func (tc *testClient) closeCode(wait time.Duration) int64 {
+	select {
+	case <-tc.c.Context().Done():
+	case <-time.After(wait):
+		return -1
+	}
+	var ae *quic.ApplicationError
+	if errors.As(context.Cause(tc.c.Context()), &ae) {
+		return int64(ae.ErrorCode)
+	}
+	return -2
+}
+
+// alive reports whether a request on a new exchange is still answered.
+func (tc *testClient) alive() bool {
+	select {
+	case <-tc.c.Context().Done():
+		return false
+	default:
+	}
+	f := tc.exchange(wire.TypeReachTest, &ed3kpb.ReachTest{Nonce: 1})
+	return f.Type == wire.TypeReachTest
+}
+
+// Bug 3: an exchange that is half-closed without a byte, or reset by the peer,
+// fails alone; only a header that ends inside it closes the connection (§5.1,
+// §5.2).
+func TestNodeExchangeFailures(t *testing.T) {
+	n := startNode(t)
+	c := dial(t, n)
+	c.hello(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	st, _ := c.c.OpenStreamSync(ctx)
+	st.Close() // FIN with zero bytes
+	time.Sleep(200 * time.Millisecond)
+	ok := c.alive()
+	t.Logf("exchange FIN'd with zero bytes -> connection alive: %v", ok)
+	if !ok {
+		t.Fatal("a zero-byte exchange closed the connection")
+	}
+
+	st, _ = c.c.OpenStreamSync(ctx)
+	st.Write([]byte{0x06}) // the first header byte of a KadRequest
+	st.CancelWrite(0)
+	time.Sleep(200 * time.Millisecond)
+	ok = c.alive()
+	t.Logf("exchange reset inside the header -> connection alive: %v", ok)
+	if !ok {
+		t.Fatal("a reset exchange closed the connection")
+	}
+
+	st, _ = c.c.OpenStreamSync(ctx)
+	st.Write([]byte{0x06, 0x85}) // len varint cut off
+	st.Close()
+	code := c.closeCode(5 * time.Second)
+	t.Logf("exchange that ends inside the header -> close code %d", code)
+	if code != int64(transport.CodeProtocol) {
+		t.Fatalf("close code %d, want PROTOCOL", code)
+	}
+}
+
+// Bug 14: a malformed Hello is answered MALFORMED, and the connection is
+// closed with PROTOCOL once that is acknowledged, not after a fixed delay.
+func TestNodeMalformedHello(t *testing.T) {
+	n := startNode(t)
+	c := dial(t, n)
+	start := time.Now()
+	f := c.exchange(wire.TypeHello, &ed3kpb.Hello{Agent: string(make([]byte, 65))})
+	e := decode(t, f, wire.TypeError, &ed3kpb.Error{})
+	code := c.closeCode(10 * time.Second)
+	t.Logf("Hello with a 65-byte agent -> %v, then close code %d after %v", e.Code, code, time.Since(start))
+	if e.Code != ed3kpb.Error_MALFORMED || code != int64(transport.CodeProtocol) {
+		t.Fatal("malformed Hello")
+	}
+}
+
+// Bug 4: the connection that starts a ban closes the node ID's open
+// connections too (§4.6).
+func TestNodeBanClosesOpenConnections(t *testing.T) {
+	n := startNode(t)
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	var open []*testClient
+	for range DefaultBudget.NewPerNodeIDMin {
+		c := dialWith(t, n, priv, transport.IdleIndex)
+		c.hello(1)
+		open = append(open, c)
+	}
+	dialWith(t, n, priv, transport.IdleIndex) // the 11th in a minute: banned
+	code := open[0].closeCode(5 * time.Second)
+	t.Logf("after the ban, the first open connection closed with %d; node: %+v", code, n.Stats())
+	if code != int64(transport.CodeDenied) {
+		t.Fatalf("open connection of a banned node ID: close code %d", code)
+	}
+}
+
+// Bug 6 (and question B): a leaf with two connections shares one slot; the
+// slot survives the close of one, and Punches reach the other.
+func TestNodeRelaySharedSlot(t *testing.T) {
+	n := startNode(t)
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	first := dialWith(t, n, priv, transport.IdleIndex)
+	first.hello(2)
+	second := dialWith(t, n, priv, transport.IdleIndex)
+	second.hello(2)
+	for _, c := range []*testClient{first, second} {
+		r := decode(t, c.exchange(wire.TypeRelay, &ed3kpb.Relay{Reserve: true}), wire.TypeRelay, &ed3kpb.Relay{})
+		if r.Ttl == 0 {
+			t.Fatal("no reservation")
+		}
+	}
+	t.Logf("two connections of one leaf reserved: %d slot(s)", n.Stats().RelayLeaves)
+	if n.Stats().RelayLeaves != 1 {
+		t.Fatal("one leaf took two slots")
+	}
+	second.c.CloseWithError(0, "")
+	deadline := time.Now().Add(5 * time.Second)
+	for n.Stats().Connections > 1 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Logf("newest connection closed: %d connection(s), %d slot(s)", n.Stats().Connections, n.Stats().RelayLeaves)
+	if n.Stats().RelayLeaves != 1 {
+		t.Fatal("the slot ended with one of its two connections")
+	}
+	go func() {
+		st, err := first.c.AcceptStream(context.Background())
+		if err != nil {
+			return
+		}
+		f, err := wire.ReadFrame(wire.NewReader(st))
+		if err != nil {
+			return
+		}
+		var p ed3kpb.Punch
+		proto.Unmarshal(f.Body, &p)
+		wire.WriteFrame(st, wire.TypePunch, &ed3kpb.Punch{PeerId: p.PeerId, Nat: 2})
+		st.Close()
+	}()
+	init := dial(t, n)
+	init.hello(2)
+	f := init.exchange(wire.TypePunch, &ed3kpb.Punch{PeerId: first.id[:], Nonce: 9})
+	t.Logf("Punch to the leaf -> frame type %d", f.Type)
+	if f.Type != wire.TypePunch {
+		t.Fatal("Punch did not reach the remaining connection")
+	}
+}
+
+// Bug 15: ttl is at most the negotiated idle timeout (§9.4).
+func TestNodeRelayTTL(t *testing.T) {
+	n := startNode(t)
+	for _, idle := range []time.Duration{transport.IdleDefault, transport.IdleIndex} {
+		_, priv, _ := ed25519.GenerateKey(rand.Reader)
+		c := dialWith(t, n, priv, idle)
+		c.hello(2)
+		r := decode(t, c.exchange(wire.TypeRelay, &ed3kpb.Relay{Reserve: true}), wire.TypeRelay, &ed3kpb.Relay{})
+		t.Logf("client max_idle_timeout %v -> ttl %d", idle, r.Ttl)
+		if r.Ttl != uint32(idle/time.Second) {
+			t.Errorf("idle %v: ttl %d", idle, r.Ttl)
+		}
 	}
 }

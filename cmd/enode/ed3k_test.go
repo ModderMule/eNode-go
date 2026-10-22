@@ -12,6 +12,7 @@ import (
 
 	"enode/config"
 	"enode/ed3k"
+	"enode/ed3k/ident"
 	"enode/storage"
 )
 
@@ -113,10 +114,14 @@ func TestEd3kBridgePairing(t *testing.T) {
 	publish(reachable, open)
 	publish(unreachable, closed)
 
-	userHash := [16]byte{0xab, 0xcd}
+	userHash := ident.DerivedUserHash(reachable)
 	pairIP := net.ParseIP("127.0.0.1")
+	// A stand-in for ServerRuntime.Ed3kPairing: the CT_ED3K session of reachable
+	// comes from pairIP with userHash.
 	e := &ed3kBridgeEngine{Engine: store, node: node, max: 5,
-		pairing: func(n [16]byte) ([16]byte, byte, net.IP, bool) { return userHash, 0x07, pairIP, n == reachable }}
+		pairing: func(n [16]byte, ip net.IP) ([16]byte, byte, bool) {
+			return userHash, 0x07, n == reachable && ip.Equal(pairIP)
+		}}
 
 	first := e.GetSourcesByHash(ed2kHash[:])
 	t.Logf("first request (TCP tests start): %d sources", len(first))
@@ -135,6 +140,13 @@ func TestEd3kBridgePairing(t *testing.T) {
 	if len(got) != 1 || got[0].Port != open.Port() || string(got[0].UserHash) != string(userHash[:]) || got[0].CryptOptions != 0x07 {
 		t.Fatalf("bridged sources %+v", got)
 	}
+	userHash = [16]byte{0xab, 0xcd} // a login hash not derived from the node ID
+	got = e.GetSourcesByHash(ed2kHash[:])
+	t.Logf("pairing with a non-derived user hash %x: %+v", userHash, got)
+	if len(got) != 1 || got[0].UserHash != nil {
+		t.Fatal("a user hash not derived from the node ID was sent")
+	}
+	userHash = ident.DerivedUserHash(reachable)
 	pairIP = net.ParseIP("10.9.9.9") // the CT_ED3K session comes from elsewhere
 	got = e.GetSourcesByHash(ed2kHash[:])
 	t.Logf("pairing from another address: %+v", got)

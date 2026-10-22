@@ -70,7 +70,8 @@ type SendStream struct {
 	// This can happen because the application called CancelWrite,
 	// or because Write returned the error (for remote cancellations).
 	cancellationFlagged bool
-	completed           bool // set when this stream no longer needs to be scheduled
+	completed           bool          // set when this stream no longer needs to be scheduled
+	acked               chan struct{} // ed3k: closed when completed is set
 
 	priorityValue atomic.Uint64
 
@@ -100,6 +101,7 @@ func newSendStream(
 		flowController:        flowController,
 		writeChan:             make(chan struct{}, 1),
 		writeOnce:             make(chan struct{}, 1), // cap: 1, to protect against concurrent use of Write
+		acked:                 make(chan struct{}),
 		supportsResetStreamAt: supportsResetStreamAt,
 	}
 	s.priorityValue.Store(encodeStreamPriority(defaultUrgency, true, 0))
@@ -548,6 +550,18 @@ func (s *SendStream) getDataForWriting(f *wire.StreamFrame, maxBytes protocol.By
 	}
 }
 
+// Acked is closed once the stream needs nothing more from the connection: its
+// FIN and every byte before it were acknowledged, or it was reset (ed3k).
+func (s *SendStream) Acked() <-chan struct{} { return s.acked }
+
+// markCompleted sets completed and closes Acked (ed3k).
+func (s *SendStream) markCompleted() {
+	if !s.completed {
+		s.completed = true
+		close(s.acked)
+	}
+}
+
 func (s *SendStream) isNewlyCompleted() bool {
 	if s.completed {
 		return false
@@ -561,7 +575,7 @@ func (s *SendStream) isNewlyCompleted() bool {
 	}
 	// The stream is completed if we sent the FIN.
 	if s.finSent {
-		s.completed = true
+		s.markCompleted()
 		return true
 	}
 	// The stream is also completed if:
@@ -570,7 +584,7 @@ func (s *SendStream) isNewlyCompleted() bool {
 	// 		* the application consumed the error via Write, or
 	//		* the application called Close
 	if s.resetErr != nil && (s.cancellationFlagged || s.finishedWriting) {
-		s.completed = true
+		s.markCompleted()
 		return true
 	}
 	return false
@@ -852,7 +866,7 @@ func (s *SendStream) SetWriteDeadline(t time.Time) error {
 // The peer will NOT be informed about this: the stream is closed without sending a FIN or RST.
 func (s *SendStream) closeForShutdown(err error) {
 	s.mutex.Lock()
-	s.completed = true
+	s.markCompleted()
 	if s.shutdownErr == nil && !s.finishedWriting {
 		s.shutdownErr = err
 		s.returnFramesToPool()
