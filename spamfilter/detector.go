@@ -76,6 +76,11 @@ type Detector struct {
 	exempt func(hash []byte) bool
 	// log is the verdict log, or nil.
 	log *verdictLog
+	// logged is the score each file was last written to the log with. It outlives the
+	// detection, so a file that expires and comes back is not logged again.
+	logged map[string]int
+	// scoring off makes Observe a no-op: nothing is scored, counted or listed.
+	scoring bool
 
 	assessed atomic.Uint64
 	bands    [BandSpam + 1]atomic.Uint64
@@ -86,8 +91,22 @@ func New() *Detector {
 	return &Detector{
 		files:      make(map[string]*FileDetection),
 		publishers: make(map[string]*PublisherDetection),
+		logged:     make(map[string]int),
 		now:        time.Now,
+		scoring:    true,
 	}
+}
+
+// SetScoring turns the scoring of offers on or off; it is on in a new detector. Off,
+// the list stays empty and the operator's buttons still work. Call it before the
+// detector is used.
+func (d *Detector) SetScoring(on bool) {
+	d.scoring = on
+}
+
+// Scoring reports whether offers are scored.
+func (d *Detector) Scoring() bool {
+	return d != nil && d.scoring
 }
 
 // SetExempt names the files that are scored but never listed or logged, the operator
@@ -97,14 +116,24 @@ func (d *Detector) SetExempt(exempt func(hash []byte) bool) {
 }
 
 // SetLog makes the detector append what it lists, and what the operator decides, to a
-// file of JSON lines (see LogEntry). Call it before the detector is used.
-func (d *Detector) SetLog(path string) error {
-	log, err := openVerdictLog(path)
+// file of JSON lines (see LogEntry), bounded as opts says. Call it before the detector
+// is used.
+func (d *Detector) SetLog(path string, opts logging.RotateOptions) error {
+	log, err := openVerdictLog(path, opts)
 	if err != nil {
 		return err
 	}
 	d.log = log
 	return nil
+}
+
+// ReopenLog closes the verdict log file; the next entry opens its path again, so a file
+// moved away by an external logrotate is replaced by a new one.
+func (d *Detector) ReopenLog() error {
+	if d == nil {
+		return nil
+	}
+	return d.log.reopen()
 }
 
 // Close closes the verdict log.
@@ -118,7 +147,7 @@ func (d *Detector) Close() {
 // The files are scored with the reasons the share has earned including this offer, so
 // the offer that gives a share away is itself marked.
 func (d *Detector) Observe(s *Session, pub Publisher, records []Record) {
-	if d == nil || s == nil || len(records) == 0 {
+	if d == nil || !d.scoring || s == nil || len(records) == 0 {
 		return
 	}
 	for _, r := range records {
@@ -255,12 +284,14 @@ func (d *Detector) noteFileLocked(r Record, v Verdict, pub Publisher, now time.T
 	// The highest score stays: a later offer from an ordinary share does not clear
 	// what a spam share said about the file.
 	if v.Score >= det.Verdict.Score {
-		// Written when a file is first listed and whenever its score rises, so the
-		// log has the verdict the list shows.
-		if v.Score > det.Verdict.Score {
+		// Written when a file is first listed and whenever its score rises above
+		// what was logged, so the log has the verdict the list shows.
+		if v.Score > det.Verdict.Score && v.Score > d.logged[key] {
+			d.noteLoggedLocked(key, v.Score)
 			d.log.write(now, LogEntry{
 				Type: "file", Hash: key, Name: r.Name, Size: r.Size,
 				Score: v.Score, Band: v.Band.String(), Reasons: v.Reasons,
+				FileType: r.Type, LengthSec: r.LengthSec, BitrateKbps: r.BitrateKbps, Codec: r.Codec,
 				UserHash: hex.EncodeToString(pub.UserHash), Address: pub.Address,
 			})
 		}
@@ -268,6 +299,15 @@ func (d *Detector) noteFileLocked(r Record, v Verdict, pub Publisher, now time.T
 	}
 	det.Offers++
 	det.LastSeen = now
+}
+
+// noteLoggedLocked remembers the score a file was logged with. The set is bounded like
+// the list; when full it starts over, which at worst logs a file once more.
+func (d *Detector) noteLoggedLocked(key string, score int) {
+	if _, ok := d.logged[key]; !ok && len(d.logged) >= maxFileDetections {
+		clear(d.logged)
+	}
+	d.logged[key] = score
 }
 
 func (d *Detector) notePublisherLocked(s *Session, pub Publisher, reasons []ReasonPoints, now time.Time) {

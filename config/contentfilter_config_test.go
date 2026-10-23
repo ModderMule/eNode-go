@@ -29,8 +29,8 @@ func TestContentFilterDefaults(t *testing.T) {
 		t.Errorf("reload=%d threshold=%d banMinutes=%d, want 30/3/1440", f.ReloadMinutesOrDefault(), f.BanThresholdOrDefault(), f.BanMinutes)
 	}
 	t.Logf("output: spam=%+v localLists=%+v", f.Spam, f.LocalLists)
-	if f.Spam.Enabled || f.LocalLists.Enabled {
-		t.Error("filter.spam and filter.localLists must default to off")
+	if f.Spam.Enabled || f.Spam.EnableScore || f.Spam.EnableLog || f.LocalLists.Enabled {
+		t.Error("filter.spam, its switches and filter.localLists must default to off")
 	}
 	for name, got := range map[string]string{
 		"filter.spam.logFile":             f.Spam.LogFile,
@@ -53,6 +53,14 @@ func TestContentFilterDefaults(t *testing.T) {
 		!strings.HasSuffix(f.Update.FilterURL, "/files/hash_filter.txt") ||
 		!strings.HasSuffix(f.Update.WhitelistURL, "/files/whitelist_hashes.txt") {
 		t.Errorf("update URLs = %q %q %q", f.Update.BanlistURL, f.Update.FilterURL, f.Update.WhitelistURL)
+	}
+}
+
+func TestSpamSwitchesParse(t *testing.T) {
+	cfg := writeConfig(t, "address: 127.0.0.1\nfilter:\n  spam:\n    enabled: true\n    enableScore: true\n    enableLog: false\n")
+	t.Logf("input: spam enabled, enableScore true, enableLog false; output: spam=%+v", cfg.Filter.Spam)
+	if s := cfg.Filter.Spam; !s.Enabled || !s.EnableScore || s.EnableLog {
+		t.Errorf("spam = %+v, want enabled and scoring on, the log off", s)
 	}
 }
 

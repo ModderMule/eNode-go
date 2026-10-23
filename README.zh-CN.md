@@ -95,6 +95,11 @@ servers: []                  # OP_SERVERLIST 中通告的其他服务器（不�
 noAssert: false              # 兼容历史行为的断言开关（默认关闭）
 logLevel: "debug"            # 日志级别：debug|info|warn|error
 logFile: "logs/enode.log"    # 日志文件路径
+logRotate:                   # logFile 的大小上限；SIGHUP 重新打开日志文件
+  maxSizeMB: 500             # 上限（MB）；-1 = 不限制（交给外部 logrotate）
+  enabled: true              # true：轮转为 enode-<时间>.log；false：原地清空文件
+  maxBackups: 1              # 保留的轮转文件数
+  compress: false            # 用 gzip 压缩轮转文件
 
 supportCrypt: true           # 是否启用协议混淆支持
 requestCrypt: true           # 是否请求客户端使用混淆

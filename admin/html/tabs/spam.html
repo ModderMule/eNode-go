@@ -20,8 +20,10 @@
     return b;
   }
   function render(s){
-    document.getElementById('spSummary').textContent = num(s.assessed) + ' offered files scored since the start: '
-      + num(s.caution) + ' caution, ' + num(s.suspect) + ' suspect, ' + num(s.spam) + ' spam.';
+    document.getElementById('spSummary').textContent = s.scoring
+      ? num(s.assessed) + ' offered files scored since the start: '
+        + num(s.caution) + ' caution, ' + num(s.suspect) + ' suspect, ' + num(s.spam) + ' spam.'
+      : 'Scoring is off (filter.spam.enableScore): offered files are not scored, so nothing is listed.';
     fillTable('spPubRows', s.publishers, function(p){
       var ban = '';
       if(bans && p.address){

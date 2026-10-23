@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"enode/logging"
 )
 
 func testHash(b byte) []byte {
@@ -42,10 +45,19 @@ func TestAssessRecordReasons(t *testing.T) {
 		{"program claimed as video", Record{Name: "Movie.1080p.exe", Size: 3 << 20, Type: "Video"}, []Reason{ReasonClaimedTypeMismatch}, 15},
 		{"video claimed as program", Record{Name: "Movie.avi", Size: 700 << 20, Type: "Pro"}, []Reason{ReasonClaimedTypeMismatch}, 15},
 		{"archive claimed as archive", Record{Name: "album.zip", Size: 80 << 20, Type: "Arc"}, nil, 0},
-		{"big video of ten seconds", Record{Name: "Movie.avi", Size: 700 << 20, LengthSec: 10}, []Reason{ReasonImplausibleMediaLength}, 15},
-		{"audio at 9000 kbit/s", Record{Name: "song.mp3", Size: 5 << 20, BitrateKbps: 9000}, []Reason{ReasonImplausibleMediaBitrate}, 15},
+		{"big video of ten seconds", Record{Name: "Movie.avi", Size: 700 << 20, LengthSec: 10}, []Reason{ReasonImplausibleMediaLength}, 10},
+		{"audio at 9000 kbit/s", Record{Name: "song.mp3", Size: 5 << 20, BitrateKbps: 9000}, []Reason{ReasonImplausibleMediaBitrate}, 10},
 		{"size ten times what length x bitrate gives", Record{Name: "Movie.avi", Size: 7000 << 20, LengthSec: 5400, BitrateKbps: 1087},
-			[]Reason{ReasonMediaSizeMismatch}, 15},
+			[]Reason{ReasonMediaSizeMismatch}, 10},
+		// The live log's usual case: an old XviD AVI whose bitrate tag is in the wrong
+		// unit earns two reasons from the one tag, and that alone stays clean.
+		{"avi with a bitrate tag of 5", Record{Name: "Peppa.Pig.1x20.DVDmux.XviD.iTA.ENG.avi", Size: 46_954_004, LengthSec: 300, BitrateKbps: 5},
+			[]Reason{ReasonImplausibleMediaBitrate, ReasonMediaSizeMismatch}, 20},
+		{"avi with a bitrate tag in bit/s", Record{Name: "Show 1x01 [HDRip][Spanish].avi", Size: 690 << 20, LengthSec: 2700, BitrateKbps: 1_000_000},
+			[]Reason{ReasonImplausibleMediaBitrate, ReasonMediaSizeMismatch}, 20},
+		{"all three media reasons", Record{Name: "Movie.avi", Size: 700 << 20, LengthSec: 10, BitrateKbps: 5},
+			[]Reason{ReasonImplausibleMediaLength, ReasonImplausibleMediaBitrate, ReasonMediaSizeMismatch}, 30},
+		{"bad signal word", Record{Name: "Movie.2024.FAKE.avi", Size: 700 << 20}, []Reason{ReasonBadSignalName}, 25},
 		{"long audiobook the size pays for", Record{Name: "book.mp3", Size: 780 << 20, Type: "Audio", LengthSec: 27 * 3600, BitrateKbps: 64}, nil, 0},
 	}
 	for _, tc := range cases {
@@ -87,6 +99,35 @@ func TestAssessBandsAndPublisherReasons(t *testing.T) {
 		t.Logf("input: %s output: score=%d band=%s reasons=%v", tc.name, v.Score, v.Band, v.Reasons)
 		if v.Score != tc.wantScore || v.Band != tc.wantBand {
 			t.Errorf("%s: score=%d band=%s, want %d %s", tc.name, v.Score, v.Band, tc.wantScore, tc.wantBand)
+		}
+	}
+}
+
+// TestBadSignalName pins eMuleQt's default rules: whole words after folding, and the
+// two masquerade patterns.
+func TestBadSignalName(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"Movie.2024.1080p.FAKE.mkv", true},
+		{"Fäke release.avi", true},
+		{"Album [Wrong_File].zip", true},
+		{"archive (password protected).rar", true},
+		{"movie.MP4.exe", true},
+		{"clip.avi.scr", true},
+		{"Trojan.War.1997.avi", true},
+		{"Fakers.2004.avi", false},
+		{"Password Recovery Tool 3.0.zip", false},
+		{"movie.mp4", false},
+		{"movie.exe.mp4", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		got := matchesBadSignal(tc.name)
+		t.Logf("input: %q output: %t", tc.name, got)
+		if got != tc.want {
+			t.Errorf("matchesBadSignal(%q) = %t, want %t", tc.name, got, tc.want)
 		}
 	}
 }
@@ -229,6 +270,53 @@ func TestDetectorNilAndEmpty(t *testing.T) {
 	}
 }
 
+// TestDetectorScoringOff: with scoring off nothing is scored or listed, and a decision
+// still works without a log.
+func TestDetectorScoringOff(t *testing.T) {
+	d := New()
+	d.SetScoring(false)
+	d.Observe(&Session{}, Publisher{Address: "203.0.113.7"}, []Record{{Hash: testHash(1), Name: "Movie.1080p.exe", Size: 3 << 20, Type: "Video"}})
+	d.Decide(testHash(1), "filter")
+	t.Logf("input: a type mismatch offered with scoring off output: scoring=%t stats=%+v files=%d", d.Scoring(), d.Stats(), len(d.Files(0)))
+	if d.Scoring() || d.Stats() != (Stats{}) || len(d.Files(0)) != 0 {
+		t.Errorf("scoring=%t stats=%+v files=%d, want nothing scored or listed", d.Scoring(), d.Stats(), len(d.Files(0)))
+	}
+	if !New().Scoring() {
+		t.Error("a new detector must score")
+	}
+}
+
+// TestVerdictLogOncePerFile: a file whose detection expired is not logged again when it
+// comes back with the same score, and the line carries the tags it was scored on.
+func TestVerdictLogOncePerFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "verdicts.jsonl")
+	d := New()
+	if err := d.SetLog(path, logging.RotateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	now := time.Unix(1_700_000_000, 0)
+	d.now = func() time.Time { return now }
+	r := Record{Hash: testHash(3), Name: "Movie.avi", Size: 700 << 20, Type: "Video", LengthSec: 10, BitrateKbps: 5, Codec: "xvid"}
+
+	d.Observe(&Session{}, Publisher{Address: "203.0.113.7"}, []Record{r})
+	now = now.Add(detectionTTL + 2*time.Minute)
+	d.Observe(&Session{}, Publisher{Address: "198.51.100.1"}, []Record{{Hash: testHash(4), Name: "a.txt", Size: 5}})
+	_, listed := d.File(r.Hash)
+	d.Observe(&Session{}, Publisher{Address: "203.0.113.7"}, []Record{r})
+	_, relisted := d.File(r.Hash)
+
+	entries := readLog(t, path)
+	t.Logf("input: one file offered, expired (listed=%t), offered again (listed=%t) output: %d lines %+v", listed, relisted, len(entries), entries)
+	if listed || !relisted || len(entries) != 1 {
+		t.Fatalf("listed=%t relisted=%t lines=%d, want the file expired, listed again and logged once", listed, relisted, len(entries))
+	}
+	e := entries[0]
+	if e.FileType != "Video" || e.LengthSec != 10 || e.BitrateKbps != 5 || e.Codec != "xvid" || e.Score != 30 {
+		t.Errorf("entry = %+v, want the tags it was scored on and score 30", e)
+	}
+}
+
 func readLog(t *testing.T, path string) []LogEntry {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -252,7 +340,7 @@ func readLog(t *testing.T, path string) []LogEntry {
 func TestVerdictLogAndDecisions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "logs", "verdicts.jsonl")
 	d := New()
-	if err := d.SetLog(path); err != nil {
+	if err := d.SetLog(path, logging.RotateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	defer d.Close()
@@ -302,23 +390,58 @@ func TestVerdictLogAndDecisions(t *testing.T) {
 	}
 }
 
-// TestVerdictLogRotates: a full log is moved aside once and writing goes on.
+// TestVerdictLogRotates: at the limit the log is rotated to one backup, by default,
+// and writing goes on in a new file.
 func TestVerdictLogRotates(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "verdicts.jsonl")
-	log, err := openVerdictLog(path)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "verdicts.jsonl")
+	log, err := openVerdictLog(path, logging.RotateOptions{MaxSizeMB: 1, Rotate: true, MaxBackups: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer log.close()
-	log.max = 400
-	for i := 0; i < 10; i++ {
+	const entries = 25000 // about 3 MB of lines, so more than one rotation
+	for i := 0; i < entries; i++ {
 		log.write(time.Unix(1_700_000_000, 0), LogEntry{Type: "file", Hash: fmt.Sprintf("%032d", i), Name: "some name long enough to fill the log"})
 	}
-	current, old := readLog(t, path), readLog(t, path+".1")
+	current := readLog(t, path)
 	info, _ := os.Stat(path)
-	t.Logf("input: 10 entries, limit 400 bytes output: current=%d lines (%d bytes) previous=%d lines last=%s",
-		len(current), info.Size(), len(old), current[len(current)-1].Hash)
-	if info.Size() > 400 || len(old) == 0 || current[len(current)-1].Hash != fmt.Sprintf("%032d", 9) {
-		t.Errorf("size=%d previous=%d last=%s, want a bounded log that still ends with the last entry", info.Size(), len(old), current[len(current)-1].Hash)
+	backups, _ := filepath.Glob(filepath.Join(dir, "verdicts-*.jsonl"))
+	t.Logf("input: %d entries, limit 1 MB, 1 backup output: current=%d lines (%d bytes) backups=%v last=%s",
+		entries, len(current), info.Size(), backups, current[len(current)-1].Hash)
+	if info.Size() > 1<<20 || current[len(current)-1].Hash != fmt.Sprintf("%032d", entries-1) {
+		t.Errorf("size=%d last=%s, want a bounded log that still ends with the last entry", info.Size(), current[len(current)-1].Hash)
+	}
+	// lumberjack removes the extra backups in the background.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(backups) != 1 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		backups, _ = filepath.Glob(filepath.Join(dir, "verdicts-*.jsonl"))
+	}
+	if len(backups) != 1 {
+		t.Errorf("backups = %v, want exactly one", backups)
+	}
+}
+
+// TestVerdictLogTruncates: with rotation off, the log is emptied at the limit and no
+// second file is made.
+func TestVerdictLogTruncates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "verdicts.jsonl")
+	log, err := openVerdictLog(path, logging.RotateOptions{MaxSizeMB: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.close()
+	const entries = 12000 // about 1.4 MB of lines
+	for i := 0; i < entries; i++ {
+		log.write(time.Unix(1_700_000_000, 0), LogEntry{Type: "file", Hash: fmt.Sprintf("%032d", i), Name: "some name long enough to fill the log"})
+	}
+	raw, _ := os.ReadFile(path)
+	files, _ := os.ReadDir(dir)
+	first, _, _ := strings.Cut(string(raw), "\n")
+	t.Logf("input: %d entries, limit 1 MB, rotation off output: %d bytes, %d files, first line %q", entries, len(raw), len(files), first)
+	if len(raw) > 1<<20 || len(files) != 1 || first != `{"type":"truncated"}` {
+		t.Errorf("size=%d files=%d first=%q, want one bounded file starting with the JSON marker", len(raw), len(files), first)
 	}
 }

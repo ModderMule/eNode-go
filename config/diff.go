@@ -23,6 +23,7 @@ var reloadableKeys = []string{
 	"messageLogin",
 	"logLevel",
 	"logFile",
+	"logRotate",
 	"servers",
 	"tcp.connectionTimeout",
 	"tcp.disconnectTimeout",
@@ -79,6 +80,7 @@ func OverlayReloadable(base, next Config) Config {
 	out.MessageLogin = next.MessageLogin
 	out.LogLevel = next.LogLevel
 	out.LogFile = next.LogFile
+	out.LogRotate = next.LogRotate
 	out.Servers = next.Servers
 	out.TCP.ConnectionTimeout = next.TCP.ConnectionTimeout
 	out.TCP.DisconnectTimeout = next.TCP.DisconnectTimeout

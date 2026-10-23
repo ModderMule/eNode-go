@@ -102,7 +102,7 @@ func run(ctx context.Context, configPath string) error {
 	// probe used to run first and exit via the stdlib logger on failure, and
 	// -daemon wires stderr to /dev/null — so a daemonized server that could not
 	// reach the internet died with no diagnostic anywhere.
-	if err := logging.SetOutputFile(cfg.LogFile); err != nil {
+	if err := logging.SetOutput(cfg.LogFile, cfg.LogRotate.Options()); err != nil {
 		return fmt.Errorf("config logFile invalid: %w", err)
 	}
 	if err := logging.SetLevelFromString(cfg.LogLevel); err != nil {
@@ -331,8 +331,11 @@ func run(ctx context.Context, configPath string) error {
 		spamDetector = spamfilter.New()
 		// A whitelisted file is one the operator has looked at: it is not listed again.
 		spamDetector.SetExempt(contentFilter.Whitelisted)
-		if err := spamDetector.SetLog(cfg.SpamLogPath()); err != nil {
-			logging.Errorf("spam detection: verdict log %s not opened, verdicts are listed only: %v", cfg.SpamLogPath(), err)
+		spamDetector.SetScoring(cfg.Filter.Spam.EnableScore)
+		if cfg.Filter.Spam.EnableLog {
+			if err := spamDetector.SetLog(cfg.SpamLogPath(), cfg.Filter.Spam.LogRotate.Options()); err != nil {
+				logging.Errorf("spam detection: verdict log %s not opened, verdicts are listed only: %v", cfg.SpamLogPath(), err)
+			}
 		}
 		runtime.SetSpamObserver(spamObserver{detector: spamDetector})
 	}
@@ -711,9 +714,10 @@ func run(ctx context.Context, configPath string) error {
 	} else {
 		sdNotify("READY=1")
 	}
-	// SIGUSR2 is handled before the pid file names this process: whoever finds the
-	// pid may signal it at once, and unhandled, the signal terminates the process.
+	// SIGUSR2 and SIGHUP are handled before the pid file names this process: whoever
+	// finds the pid may signal it at once, and unhandled, a signal terminates the process.
 	watchHandoff(ctx, deps)
+	watchReopen(ctx, spamDetector.ReopenLog)
 	if err := writePIDFile(deps.pidFile); err != nil {
 		logging.Warnf("pid file %s not written: %v", deps.pidFile, err)
 	}

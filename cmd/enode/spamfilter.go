@@ -22,7 +22,7 @@ func (o spamObserver) ObserveOffer(session any, userHash []byte, ip net.IP, file
 	for i, f := range files {
 		records[i] = spamfilter.Record{
 			Hash: f.Hash, Name: f.Name, Size: f.Size, Type: f.Type,
-			LengthSec: f.Runtime, BitrateKbps: f.Bitrate,
+			LengthSec: f.Runtime, BitrateKbps: f.Bitrate, Codec: f.Codec,
 		}
 	}
 	pub := spamfilter.Publisher{UserHash: userHash}

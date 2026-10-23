@@ -319,7 +319,7 @@ func (v *adminViews) Bots() []admin.BotRow {
 
 func (v *adminViews) Spam() admin.SpamView {
 	st := v.spam.Stats()
-	view := admin.SpamView{Assessed: st.Assessed, Caution: st.Caution, Suspect: st.Suspect, Spam: st.Spam}
+	view := admin.SpamView{Scoring: v.spam.Scoring(), Assessed: st.Assessed, Caution: st.Caution, Suspect: st.Suspect, Spam: st.Spam}
 	for _, f := range v.spam.Files(spamFileRows) {
 		view.Files = append(view.Files, admin.SpamFileRow{
 			Hash: f.Hash, Name: f.Name, Size: f.Size,

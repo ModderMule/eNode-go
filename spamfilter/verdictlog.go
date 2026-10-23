@@ -2,22 +2,16 @@ package spamfilter
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"enode/logging"
 )
 
-// maxVerdictLogBytes is the size at which the verdict log is moved aside to
-// "<file>.1", replacing the previous one, so the log holds between one and two times
-// this much.
-const maxVerdictLogBytes = 64 << 20
-
 // LogEntry is one line of the verdict log, a JSON object. Type says which fields are
 // set: "file" for a scored file, "publisher" for a flagged session, and "decision" for
-// what the operator did with a file.
+// what the operator did with a file. A line of Type "truncated" starts a file emptied at
+// its size limit, filter.spam.logRotate.enabled being false.
 type LogEntry struct {
 	Time string `json:"time"`
 	Type string `json:"type"`
@@ -29,6 +23,13 @@ type LogEntry struct {
 	Band    string         `json:"band,omitempty"`
 	Reasons []ReasonPoints `json:"reasons,omitempty"`
 
+	// FileType, LengthSec, BitrateKbps and Codec are the tags the publisher sent with a
+	// file, the input of the media reasons.
+	FileType    string `json:"fileType,omitempty"`
+	LengthSec   uint32 `json:"lengthSec,omitempty"`
+	BitrateKbps uint32 `json:"bitrateKbps,omitempty"`
+	Codec       string `json:"codec,omitempty"`
+
 	// UserHash and Address are the publisher: of the offer for a file, of the session
 	// for a publisher. Files is how many files that session had offered.
 	UserHash string `json:"userHash,omitempty"`
@@ -39,39 +40,27 @@ type LogEntry struct {
 	Decision string `json:"decision,omitempty"`
 }
 
-// verdictLog appends LogEntry lines to a file. A nil *verdictLog writes nothing.
+// verdictLog appends LogEntry lines to a file, bounded by filter.spam.logRotate. A nil
+// *verdictLog writes nothing.
 type verdictLog struct {
 	mu     sync.Mutex
 	path   string
-	file   *os.File
-	size   int64
-	max    int64
+	w      logging.ReopenWriter
 	failed bool
 }
 
-func openVerdictLog(path string) (*verdictLog, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+func openVerdictLog(path string, opts logging.RotateOptions) (*verdictLog, error) {
+	// A file emptied at the limit stays JSON lines.
+	opts.Marker = `{"type":"truncated"}` + "\n"
+	w, err := logging.NewSizeLimitedWriter(path, opts)
+	if err != nil {
 		return nil, err
 	}
-	l := &verdictLog{path: path, max: maxVerdictLogBytes}
-	if err := l.open(); err != nil {
+	// Opened now rather than on the first entry, so a bad path fails here.
+	if _, err := w.Write(nil); err != nil {
 		return nil, err
 	}
-	return l, nil
-}
-
-func (l *verdictLog) open() error {
-	file, err := os.OpenFile(l.path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	info, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return err
-	}
-	l.file, l.size = file, info.Size()
-	return nil
+	return &verdictLog{path: path, w: w}, nil
 }
 
 // write appends one entry. A failure is logged once and the entry lost: the verdict
@@ -88,31 +77,26 @@ func (l *verdictLog) write(now time.Time, e LogEntry) {
 	line = append(line, '\n')
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.file == nil {
+	if l.w == nil {
 		return
 	}
-	if l.size+int64(len(line)) > l.max {
-		err = l.rotate()
-	}
-	if err == nil {
-		var n int
-		n, err = l.file.Write(line)
-		l.size += int64(n)
-	}
-	if err != nil && !l.failed {
+	if _, err = l.w.Write(line); err != nil && !l.failed {
 		l.failed = true
 		logging.Errorf("spam detection: verdict log %s not written: %v", l.path, err)
 	}
 }
 
-// rotate moves the full log aside and starts a new one.
-func (l *verdictLog) rotate() error {
-	_ = l.file.Close()
-	l.file = nil
-	if err := os.Rename(l.path, l.path+".1"); err != nil {
-		return err
+// reopen closes the file; the next entry opens its path again.
+func (l *verdictLog) reopen() error {
+	if l == nil {
+		return nil
 	}
-	return l.open()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.w == nil {
+		return nil
+	}
+	return l.w.Reopen()
 }
 
 func (l *verdictLog) close() {
@@ -121,8 +105,8 @@ func (l *verdictLog) close() {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.file != nil {
-		_ = l.file.Close()
-		l.file = nil
+	if l.w != nil {
+		_ = l.w.Close()
+		l.w = nil
 	}
 }

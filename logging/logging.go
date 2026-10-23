@@ -3,7 +3,6 @@ package logging
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,7 +27,7 @@ var sugar = logger.Sugar()
 var tableLogger = newTableLogger()
 var tableSugar = tableLogger.Sugar()
 var outputMu sync.Mutex
-var logFileHandle *os.File
+var logWriter ReopenWriter
 
 func ParseLevel(value string) (Level, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
@@ -59,31 +58,48 @@ func SetLevelFromString(value string) error {
 	return nil
 }
 
+// SetOutputFile sends the log to path with no size limit, as well as stdout. An empty
+// path logs to stdout only.
 func SetOutputFile(path string) error {
+	return SetOutput(path, RotateOptions{MaxSizeMB: -1})
+}
+
+// SetOutput sends the log to path, bounded as opts says, as well as stdout. An empty
+// path logs to stdout only. The previous file is closed.
+func SetOutput(path string, opts RotateOptions) error {
 	outputMu.Lock()
 	defer outputMu.Unlock()
 
-	if logFileHandle != nil {
-		_ = logFileHandle.Close()
-		logFileHandle = nil
-	}
-
+	var next ReopenWriter
 	if strings.TrimSpace(path) != "" {
-		dir := filepath.Dir(path)
-		if dir != "." && dir != "" {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return err
-			}
-		}
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		w, err := NewSizeLimitedWriter(path, opts)
 		if err != nil {
 			return err
 		}
-		logFileHandle = f
+		// Opened now rather than on the first line, so a bad path fails here.
+		if _, err := w.Write(nil); err != nil {
+			return err
+		}
+		next = w
 	}
+	if logWriter != nil {
+		_ = logWriter.Close()
+	}
+	logWriter = next
 
 	rebuildLoggers()
 	return nil
+}
+
+// Reopen closes the log file; the next line opens its path again. After an external
+// logrotate moved the file away, logging continues in a new file at the same path.
+func Reopen() error {
+	outputMu.Lock()
+	defer outputMu.Unlock()
+	if logWriter == nil {
+		return nil
+	}
+	return logWriter.Reopen()
 }
 
 func enabled(level Level) bool {
@@ -157,10 +173,10 @@ func newTableLoggerWithSyncer(ws zapcore.WriteSyncer) *zap.Logger {
 
 func currentSyncer() zapcore.WriteSyncer {
 	stdout := zapcore.AddSync(os.Stdout)
-	if logFileHandle == nil {
+	if logWriter == nil {
 		return stdout
 	}
-	return zapcore.NewMultiWriteSyncer(stdout, zapcore.AddSync(logFileHandle))
+	return zapcore.NewMultiWriteSyncer(stdout, zapcore.AddSync(logWriter))
 }
 
 func rebuildLoggers() {

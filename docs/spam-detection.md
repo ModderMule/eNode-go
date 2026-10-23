@@ -6,8 +6,12 @@ operator reads the list and decides, with a button per file that puts its hash o
 (see [Acting on the list](#acting-on-the-list)).
 
 The list is the **Spam** tab of the [admin dashboard](admin-status-dashboard.md)
-(`GET /api/spam`). A file is logged once when it first scores 50 or more, and a session
-once when its share is flagged.
+(`GET /api/spam`). A file goes to the server log once when it first scores 50 or more,
+and a session once when its share is flagged; the [verdict log](#verdict-log) has every
+listed file.
+
+Scoring and the verdict log each have their own switch (`filter.spam.enableScore` and
+`filter.spam.enableLog`, see [Configuration](#configuration)).
 
 The scale and the reason names are those of eMuleQt's fake file detector, so a verdict
 reads the same on the server and in the client. The server sees less of a single file
@@ -27,12 +31,23 @@ From what the publisher says about the one file.
 | Reason | Rule | Points |
 |---|---|---|
 | `claimed_type_mismatch` | the type tag says audio or video and the extension is a program or archive, or the reverse | 15 |
-| `implausible_media_length` | a video of 50 MiB or more that runs under a minute, or an audio file of 1 MiB or more under two seconds; or a length over 12 h (video) or 24 h (audio) that the size cannot pay for | 15 |
-| `implausible_media_bitrate` | a video bitrate below 40 or above 500,000 kbit/s, an audio bitrate below 16 or above 2,000 kbit/s | 15 |
-| `media_size_mismatch` | the size is more than three times, or less than a third of, what length × bitrate gives | 15 |
+| `implausible_media_length` | a video of 50 MiB or more that runs under a minute, or an audio file of 1 MiB or more under two seconds; or a length over 12 h (video) or 24 h (audio) that the size cannot pay for | 10 |
+| `implausible_media_bitrate` | a video bitrate below 40 or above 500,000 kbit/s, an audio bitrate below 16 or above 2,000 kbit/s | 10 |
+| `media_size_mismatch` | the size is more than three times, or less than a third of, what length × bitrate gives | 10 |
+| `bad_signal_name` | the name holds the word `fake`, `corrupt`, `wrong file`, `password protected`, `virus`, `trojan` or `malware` (whole words, case and accents ignored), or ends in `.mp4.exe` or `.avi.scr` | 25 |
 
 The media rules apply to a file that is audio or video by its type tag or its extension,
-and only to the tags the publisher sent.
+and only to the tags the publisher sent. Rules and points are those of eMuleQt's
+`FakeFileDetector` (`assessMedia`, `FakeFileRules::defaults`).
+
+The media reasons are weak on purpose. Some clients send the bitrate tag of an old AVI or
+WMV in another unit, which earns `implausible_media_bitrate` and `media_size_mismatch`
+from the one tag: 20 points, still clean. In the first ten days of a live log the media
+reasons, then at 15 points each, put about 2,300 ordinary releases in caution and found
+nothing else.
+
+Words that put a file on a blocklist are `filter.keywords`' job, not this one's: a name
+the content filter refuses is never scored.
 
 ## Publisher reasons
 
@@ -96,14 +111,21 @@ tab's own endpoint.
 
 | `type` | Written when | Fields |
 |---|---|---|
-| `file` | a file is first listed, and again whenever its score rises | `hash`, `name`, `size`, `score`, `band`, `reasons`, and the `userHash` and `address` of the offer |
+| `file` | a file is first listed, and again whenever its score rises above what was logged | `hash`, `name`, `size`, `score`, `band`, `reasons`, the tags it was scored on (`fileType`, `lengthSec`, `bitrateKbps`, `codec`, each left out when not sent), and the `userHash` and `address` of the offer |
 | `publisher` | a session's share is flagged | `userHash`, `address`, `files`, `reasons` |
 | `decision` | a button above is pressed | `hash`, `decision` (the list), and the `name`, `score`, `band` and `reasons` the file was listed with |
 
 Every line has a `time`. Unlike the list, the log outlasts 24 hours and a restart, so the
 decisions can be held against the scores later: a reason that is mostly answered with
-"It is fine" scores too high. At 64 MiB the log is moved to `<logFile>.1`, replacing the
-previous one.
+"It is fine" scores too high. A file whose detection expired and that comes back with the
+same score is not logged again.
+
+`filter.spam.logRotate` bounds the file, with the same keys and defaults as the top-level
+`logRotate`. At `maxSizeMB` (500) the log is renamed to `spam_verdicts-<time>.jsonl` and a
+new one started, keeping `maxBackups` (1) old files, gzipped with `compress`. With
+`enabled: false` the file is emptied in place instead, and its first line is
+`{"type":"truncated"}`. `maxSizeMB: -1` removes the limit. SIGHUP reopens the file, for an
+external logrotate. Changing it needs a restart.
 
 A ban from the publisher's button is not written to the log; it is in `filter.banFile`.
 
@@ -118,13 +140,27 @@ filter:
     whitelistFile: "data/local_whitelist.txt"
   spam:
     enabled: true
+    enableScore: true
+    enableLog: true
     logFile: "data/spam_verdicts.jsonl"
+    logRotate:
+      maxSizeMB: 500
+      enabled: true
+      maxBackups: 1
+      compress: false
 ```
 
-Both are off by default. With `spam.enabled: false` nothing is scored and the Spam tab is
-not shown; with `localLists.enabled: false` the tab has no buttons. `localLists` turns the
-content filter on by itself, so the Bans tab is then available too. The keys are read at
-startup.
+All are off by default.
+
+| Key | Off means |
+|---|---|
+| `spam.enabled` | no detector: nothing is scored and the Spam tab is not shown |
+| `spam.enableScore` | the tab is shown, with its buttons, but offers are not scored and nothing is listed; the tab says scoring is off |
+| `spam.enableLog` | nothing is written to `logFile`, operator decisions included |
+| `localLists.enabled` | the tab has no buttons |
+
+`localLists` turns the content filter on by itself, so the Bans tab is then available
+too. The keys are read at startup.
 
 ## Cost and limits
 

@@ -267,6 +267,9 @@ type BotRow struct {
 // SpamView is what the spam detector has scored. It observes: nothing listed here was
 // refused.
 type SpamView struct {
+	// Scoring is false when filter.spam.enableScore is off: then nothing is scored
+	// and the lists are empty for that reason alone.
+	Scoring bool `json:"scoring"`
 	// Assessed is how many offered files were scored since the start, and Caution,
 	// Suspect and Spam how many of them fell into each band.
 	Assessed   uint64             `json:"assessed"`

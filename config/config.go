@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"enode/contentfilter"
+	"enode/logging"
 	"enode/storage"
 	"enode/tests"
 	"gopkg.in/yaml.v3"
@@ -41,6 +42,8 @@ type Config struct {
 	NoAssert bool   `yaml:"noAssert"`
 	LogLevel string `yaml:"logLevel"`
 	LogFile  string `yaml:"logFile"`
+	// LogRotate bounds the size of LogFile.
+	LogRotate LogRotateConfig `yaml:"logRotate"`
 	// PIDFile is where the server writes its process id once it serves, and where
 	// update.sh finds the process to hand over to a new binary. Resolved like the
 	// other data paths. See docs/server-handoff.md.
@@ -449,10 +452,18 @@ type FilterConfig struct {
 // SpamConfig is filter.spam. It only observes: a scored file or publisher is listed in
 // the admin UI and logged, and nothing is refused. See docs/spam-detection.md.
 type SpamConfig struct {
+	// Enabled creates the detector and the admin Spam tab with its list buttons.
 	Enabled bool `yaml:"enabled"`
+	// EnableScore scores the offered files and the sessions' shares. Off, the Spam tab
+	// lists nothing.
+	EnableScore bool `yaml:"enableScore"`
+	// EnableLog appends each listed verdict and each operator decision to LogFile.
+	EnableLog bool `yaml:"enableLog"`
 	// LogFile is where each listed verdict and each operator decision is appended as
 	// a line of JSON, to tune the thresholds against later.
 	LogFile string `yaml:"logFile"`
+	// LogRotate bounds the size of LogFile.
+	LogRotate LogRotateConfig `yaml:"logRotate"`
 }
 
 // LocalListsConfig is filter.localLists: the operator's own additions to the three
@@ -747,6 +758,38 @@ const (
 	// HandoffMemoryOff refuses the handover while the memory engine is in use.
 	HandoffMemoryOff = "off"
 )
+
+// LogRotateConfig is logRotate: the size limit of a log file and what happens at it.
+// At MaxSizeMB (default 500) the file is rotated to "<name>-<time><ext>", keeping
+// MaxBackups (default 1) old files, gzipped with Compress. With Enabled false the file
+// is emptied in place instead, so only one file exists. MaxSizeMB -1 removes the limit.
+type LogRotateConfig struct {
+	MaxSizeMB  int   `yaml:"maxSizeMB"`
+	Enabled    *bool `yaml:"enabled"`
+	MaxBackups int   `yaml:"maxBackups"`
+	Compress   bool  `yaml:"compress"`
+}
+
+// EnabledOrDefault reports whether the file is rotated at the limit, defaulting to true.
+func (c LogRotateConfig) EnabledOrDefault() bool { return boolOrDefault(c.Enabled, true) }
+
+// Options is c as the logging package takes it, with the defaults filled in.
+func (c LogRotateConfig) Options() logging.RotateOptions {
+	size := c.MaxSizeMB
+	if size == 0 {
+		size = logging.DefaultMaxSizeMB
+	}
+	backups := c.MaxBackups
+	if backups < 1 {
+		backups = 1
+	}
+	return logging.RotateOptions{
+		MaxSizeMB:  size,
+		Rotate:     c.EnabledOrDefault(),
+		MaxBackups: backups,
+		Compress:   c.Compress,
+	}
+}
 
 // HandoffConfig tunes the handover to a new process. See docs/server-handoff.md.
 type HandoffConfig struct {

@@ -38,6 +38,15 @@ servers: []
 noAssert: false
 logLevel: "debug"
 logFile: "logs/enode.log"
+# Size limit of logFile. At maxSizeMB the file is renamed to enode-<time>.log and a new
+# one started, keeping maxBackups old files (gzipped with compress). With enabled: false
+# the file is emptied in place instead, so only one file exists. maxSizeMB: -1 removes
+# the limit (for an external logrotate). SIGHUP reopens the log files.
+logRotate:
+  maxSizeMB: 500
+  enabled: true
+  maxBackups: 1
+  compress: false
 # The running server's process id, written once it serves. update.sh reads it to
 # hand the running server over to the new binary (SIGUSR2) instead of restarting
 # it, so no client is disconnected. See docs/server-handoff.md.
@@ -261,10 +270,21 @@ filter:
   # every session on what its share looks like. It only observes: the admin dashboard
   # lists the verdicts and nothing is refused. See docs/spam-detection.md.
   spam:
+    # The detector and the admin Spam tab with its list buttons.
     enabled: false
+    # Score offered files and sessions' shares. Off, the Spam tab lists nothing.
+    enableScore: false
+    # Write the verdict log below. Off, nothing is logged, operator decisions included.
+    enableLog: false
     # Every listed verdict, and every decision taken in the Spam tab, as a line of JSON.
-    # Moved aside to <logFile>.1 at 64 MiB.
     logFile: "data/spam_verdicts.jsonl"
+    # Same as the top-level logRotate. Backups are spam_verdicts-<time>.jsonl; a file
+    # emptied with enabled: false starts with {"type":"truncated"}. Needs a restart.
+    logRotate:
+      maxSizeMB: 500
+      enabled: true
+      maxBackups: 1
+      compress: false
   # Pull the enabled lists from an ed2k-server update service. Also run once by hand
   # with `enode -update-filters`. Every download must carry a valid Ed25519 signature
   # and may not shrink a list below minKeepRatio of the installed one.

@@ -452,15 +452,16 @@ func warnStatsBoost(cfg config.Config) {
 // applyLogging switches the log file and level when they changed. A failure restores
 // the old log file, so a bad value leaves logging as it was.
 func applyLogging(old, cfg config.Config) error {
-	if cfg.LogFile != old.LogFile {
-		if err := logging.SetOutputFile(cfg.LogFile); err != nil {
+	fileChanged := cfg.LogFile != old.LogFile || cfg.LogRotate.Options() != old.LogRotate.Options()
+	if fileChanged {
+		if err := logging.SetOutput(cfg.LogFile, cfg.LogRotate.Options()); err != nil {
 			return fmt.Errorf("config logFile invalid: %w", err)
 		}
 	}
 	if cfg.LogLevel != old.LogLevel {
 		if err := logging.SetLevelFromString(cfg.LogLevel); err != nil {
-			if cfg.LogFile != old.LogFile {
-				_ = logging.SetOutputFile(old.LogFile)
+			if fileChanged {
+				_ = logging.SetOutput(old.LogFile, old.LogRotate.Options())
 			}
 			return fmt.Errorf("config logLevel invalid: %w", err)
 		}

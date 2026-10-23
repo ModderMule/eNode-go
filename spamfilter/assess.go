@@ -26,18 +26,20 @@ const (
 	ReasonImplausibleMediaLength  Reason = "implausible_media_length"
 	ReasonImplausibleMediaBitrate Reason = "implausible_media_bitrate"
 	ReasonMediaSizeMismatch       Reason = "media_size_mismatch"
+	ReasonBadSignalName           Reason = "bad_signal_name"
 	// ReasonPublisherBait and ReasonPublisherTemplate are about the session the file
 	// came in, and are added to every file it offers from then on.
 	ReasonPublisherBait     Reason = "publisher_bait_programs"
 	ReasonPublisherTemplate Reason = "publisher_name_template"
 )
 
-// Points per reason.
+// Points per reason. The file reasons score what eMuleQt's FakeFileDetector gives them.
 const (
 	pointsClaimedTypeMismatch = 15
-	pointsMediaLength         = 15
-	pointsMediaBitrate        = 15
-	pointsMediaSizeMismatch   = 15
+	pointsMediaLength         = 10
+	pointsMediaBitrate        = 10
+	pointsMediaSizeMismatch   = 10
+	pointsBadSignalName       = 25
 	pointsPublisher           = 30
 
 	maxScore = 100
@@ -70,6 +72,7 @@ type Record struct {
 	Type        string
 	LengthSec   uint32
 	BitrateKbps uint32
+	Codec       string
 }
 
 // ReasonPoints is one reason and what it added to the score.
@@ -108,6 +111,7 @@ func Assess(r Record, publisher []ReasonPoints) Verdict {
 		v.add(ReasonClaimedTypeMismatch, pointsClaimedTypeMismatch)
 	}
 	assessMedia(r, &v)
+	assessNames(r, &v)
 	for _, p := range publisher {
 		v.add(p.Reason, p.Points)
 	}

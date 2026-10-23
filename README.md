@@ -140,6 +140,11 @@ servers: []                  # Peer servers advertised in OP_SERVERLIST; empty i
 noAssert: false              # Compatibility assert switch (normally false)
 logLevel: "debug"            # Log level: debug|info|warn|error
 logFile: "logs/enode.log"    # Log file path
+logRotate:                   # Size limit of logFile; SIGHUP reopens the log files
+  maxSizeMB: 500             # Limit in MB; -1 = no limit (external logrotate)
+  enabled: true              # true: rotate to enode-<time>.log; false: empty the file in place
+  maxBackups: 1              # Rotated files kept
+  compress: false            # gzip rotated files
 
 supportCrypt: true           # Enable protocol obfuscation support
 requestCrypt: true           # Request obfuscation from clients

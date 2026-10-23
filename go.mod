@@ -20,6 +20,7 @@ require (
 	golang.org/x/sys v0.33.0
 	golang.org/x/text v0.43.0
 	google.golang.org/protobuf v1.36.12
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
 	lukechampine.com/blake3 v1.4.1
 )
