@@ -127,7 +127,8 @@ abort it releases them.
 - **A half-received packet:** a partial header, or a header with part of its payload.
 - **Identity:** login state, `ClientInfo` (ID, StoreID, hash, ports, IPv6), LowID flag,
   nick, software, mod, connect time, IPv6 and meta capabilities.
-- **Session-local state:** the pending search page for `OP_QUERY_MORE_RESULT`, the
+- **Session-local state:** the pending search page for `OP_QUERY_MORE_RESULT` (with a
+  fresh `tcp.moreResults.ttlSeconds` deadline in the successor), the
   soft-limit warning latch, and the hard-limit, login-gate and ban-list latches with
   their hit sets.
 

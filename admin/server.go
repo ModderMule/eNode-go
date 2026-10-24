@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"strconv"
 	"sync"
 	"time"
@@ -31,6 +32,8 @@ type Config struct {
 	// needs. Empty means such a client sees the status page only (see auth.go).
 	Username string
 	Password string
+	// Pprof serves Go's profiler under /debug/pprof/, as sensitive as the admin views.
+	Pprof bool
 }
 
 // StaticInfo holds the server facts that do not change while the process runs.
@@ -378,6 +381,9 @@ func New(cfg Config, static StaticInfo, snapshot func() LiveStats) *Server {
 	mux.HandleFunc("POST /api/accounts/{id}/{action}", s.guard(true, s.handleAccountAction))
 	mux.HandleFunc("POST /api/reload-config", s.guard(true, s.handleReloadConfig))
 	s.registerViews(mux)
+	if cfg.Pprof {
+		s.registerPprof(mux)
+	}
 	mux.HandleFunc("/", s.guard(false, s.handleIndex))
 	s.http = &http.Server{
 		Handler: mux,
@@ -444,4 +450,16 @@ func (s *Server) pageData() pageData {
 		data.Features = views.Features()
 	}
 	return data
+}
+
+// registerPprof adds Go's profiler: heap, goroutine and the other named profiles under
+// /debug/pprof/, plus CPU profile and trace. Sensitive routes, like the admin views: a
+// heap dump holds whatever is in memory. GET only, so the guard's write check never
+// applies. The admin server sets no write timeout, so a 30 s CPU profile completes.
+func (s *Server) registerPprof(mux *http.ServeMux) {
+	mux.HandleFunc("GET /debug/pprof/", s.guard(true, pprof.Index))
+	mux.HandleFunc("GET /debug/pprof/cmdline", s.guard(true, pprof.Cmdline))
+	mux.HandleFunc("GET /debug/pprof/profile", s.guard(true, pprof.Profile))
+	mux.HandleFunc("GET /debug/pprof/symbol", s.guard(true, pprof.Symbol))
+	mux.HandleFunc("GET /debug/pprof/trace", s.guard(true, pprof.Trace))
 }

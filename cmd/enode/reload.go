@@ -336,6 +336,8 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		SoftFileLimit:     cfg.Files.SoftLimitOrDefault(),
 		HardFileLimit:     cfg.Files.HardLimitOrDefault(),
 		CounterCacheTTL:   time.Duration(cfg.Storage.CountCacheSecondsOrDefault()) * time.Second,
+		MoreResultsMax:    moreResultsMax(cfg.TCP.MoreResults),
+		MoreResultsTTL:    cfg.TCP.MoreResults.TTLOrDefault(),
 	}
 	udp := ed2k.UDPRuntimeConfig{
 		Name:        cfg.Name,
@@ -491,4 +493,13 @@ func missingServers(have, want []config.ServerEntry) []config.ServerEntry {
 		}
 	}
 	return out
+}
+
+// moreResultsMax maps tcp.moreResults.maxRows to the runtime, where zero means the
+// default and paging off is negative.
+func moreResultsMax(c config.MoreResultsConfig) int {
+	if rows := c.MaxRowsOrDefault(); rows > 0 {
+		return rows
+	}
+	return -1
 }

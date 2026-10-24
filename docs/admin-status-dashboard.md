@@ -53,6 +53,7 @@ server additionally logs a warning that off-box clients can see the status page.
 | `/api/accounts/{id}` | GET | One account with its registration steps and payments.    |
 | `/api/accounts/{id}/{action}` | POST | `disable`, `enable`, `adjust` (`{"days": ±N}`), `skip-step` (`{"step": "payment"}`). Returns the updated account. |
 | `/api/reload-config` | POST | Re-reads the config file and applies what can change without a restart. Returns `{"applied": [...], "restartRequired": [...]}`, both lists of config key paths. |
+| `/debug/pprof/…` | GET | Go's profiler (only with `admin.pprof`, on by default); see [Profiling](#profiling). |
 
 The tabs beyond Status have their own endpoints, listed under [Tabs](#tabs).
 
@@ -330,6 +331,24 @@ or to a logged-in operator.
 - State-changing requests must carry `X-Enode-Admin: 1` and, when the browser sends an
   `Origin`, come from the dashboard's own origin. A cross-site page cannot set that
   header, so even the login-free loopback case is safe from CSRF.
+
+## Profiling
+
+With `admin.pprof: true` (the default) the dashboard serves Go's profiler under
+`/debug/pprof/`: the index, the named profiles (`heap`, `allocs`, `goroutine`, `block`,
+`mutex`, `threadcreate`), `profile` (CPU, `?seconds=30`), `trace`, `cmdline` and
+`symbol`. They follow the access rules above for every tab but Status: loopback always,
+other clients only with `admin.username`/`admin.password`. A heap dump can hold
+anything that was in memory, keys and passwords included. The key needs a restart.
+
+On a server whose dashboard is bound to loopback, profile it over SSH:
+
+```bash
+ssh root@server 'curl -s http://127.0.0.1:4560/debug/pprof/heap' > heap.pb.gz
+go tool pprof -top -sample_index=inuse_space heap.pb.gz   # what holds memory now
+go tool pprof -http=:8080 heap.pb.gz                       # flame graph in the browser
+ssh root@server 'curl -s "http://127.0.0.1:4560/debug/pprof/goroutine?debug=1"' | head -50
+```
 
 ## Quick check
 

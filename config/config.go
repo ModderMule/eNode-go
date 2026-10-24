@@ -150,6 +150,42 @@ type TCPConfig struct {
 	AllowLowIDs         bool   `yaml:"allowLowIDs"`
 	MinLowID            uint32 `yaml:"minLowID"`
 	MaxLowID            uint32 `yaml:"maxLowID"`
+	// MoreResults bounds the search results a session keeps for OP_QUERY_MORE_RESULT.
+	MoreResults MoreResultsConfig `yaml:"moreResults"`
+}
+
+// MoreResultsConfig bounds the tail of a search a session keeps after its first page,
+// which eMule's "More" button asks for with an empty OP_QUERY_MORE_RESULT. Every session
+// that searched holds these rows, so they are the largest per-session cost on a busy
+// server. Pointers so an explicit 0 differs from absent.
+type MoreResultsConfig struct {
+	// MaxRows is how many rows are kept after the first page; 0 turns paging off.
+	// Capped at storage.MaxSearchResults - storage.MaxSearchPage.
+	MaxRows *int `yaml:"maxRows"`
+	// TTLSeconds is how long kept rows wait for "More". An idle session's rows are
+	// dropped by its status ticker, so they can live up to one status interval longer.
+	TTLSeconds *int `yaml:"ttlSeconds"`
+}
+
+// Defaults of tcp.moreResults: two more pages, for five minutes.
+const (
+	DefaultMoreResultsMaxRows    = 2 * storage.MaxSearchPage
+	DefaultMoreResultsTTLSeconds = 300
+)
+
+// MaxRowsOrDefault resolves tcp.moreResults.maxRows, clamped to what a search can return.
+func (c MoreResultsConfig) MaxRowsOrDefault() int {
+	rows := intOrDefault(c.MaxRows, DefaultMoreResultsMaxRows)
+	return min(max(rows, 0), storage.MaxSearchResults-storage.MaxSearchPage)
+}
+
+// TTLOrDefault resolves tcp.moreResults.ttlSeconds; a value of 0 or less is the default.
+func (c MoreResultsConfig) TTLOrDefault() time.Duration {
+	secs := intOrDefault(c.TTLSeconds, DefaultMoreResultsTTLSeconds)
+	if secs <= 0 {
+		secs = DefaultMoreResultsTTLSeconds
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // DefaultMaxConnectionsPerIP leaves room for a household or office behind one NAT,
@@ -347,6 +383,9 @@ type AdminConfig struct {
 	// CheckUpdates lets the server look up the latest published release on GitHub once
 	// a day so the dashboard can link to a newer version. Defaults on.
 	CheckUpdates *bool `yaml:"checkUpdates"`
+	// Pprof serves Go's profiler under /debug/pprof/ as a sensitive route: always to
+	// loopback, off-box only with username/password. Defaults on.
+	Pprof *bool `yaml:"pprof"`
 }
 
 // EnabledOrDefault reports whether the admin dashboard is served, defaulting to true.
@@ -354,6 +393,9 @@ func (c AdminConfig) EnabledOrDefault() bool { return boolOrDefault(c.Enabled, t
 
 // CheckUpdatesOrDefault reports whether the daily release check runs, defaulting to true.
 func (c AdminConfig) CheckUpdatesOrDefault() bool { return boolOrDefault(c.CheckUpdates, true) }
+
+// PprofOrDefault reports whether /debug/pprof/ is served, defaulting to true.
+func (c AdminConfig) PprofOrDefault() bool { return boolOrDefault(c.Pprof, true) }
 
 // GossipConfig controls server-to-server peer exchange — the Lugdunum
 // OP_SERVER_LIST_REQ/RES handshake. When enabled the server registers itself with

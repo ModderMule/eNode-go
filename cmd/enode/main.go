@@ -462,7 +462,7 @@ func run(ctx context.Context, configPath string) error {
 			defer updateChecker.Start(ctx)()
 		}
 		adminSrv = admin.New(
-			admin.Config{BindIP: cfg.Admin.BindIP, Port: cfg.Admin.Port, Username: cfg.Admin.Username, Password: cfg.Admin.Password},
+			admin.Config{BindIP: cfg.Admin.BindIP, Port: cfg.Admin.Port, Username: cfg.Admin.Username, Password: cfg.Admin.Password, Pprof: cfg.Admin.PprofOrDefault()},
 			buildAdminStatic(cfg, derived),
 			func() admin.LiveStats {
 				clients, files := runtime.Counts()

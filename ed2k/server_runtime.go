@@ -81,6 +81,12 @@ type TCPRuntimeConfig struct {
 	// client is held to the numbers it was given. See docs/server-client-communication.md.
 	SoftFileLimit int
 	HardFileLimit int
+	// MoreResultsMax is how many rows of a search a session keeps after the first page
+	// for OP_QUERY_MORE_RESULT; zero is defaultMoreResultsMax, negative turns paging off.
+	// MoreResultsTTL is how long they are kept; zero is defaultMoreResultsTTL. See
+	// config tcp.moreResults.
+	MoreResultsMax int
+	MoreResultsTTL time.Duration
 }
 
 type UDPRuntimeConfig struct {
@@ -198,9 +204,7 @@ func (s *ServerRuntime) ipv6Enabled() bool      { return s.tcp().IPv6 }
 func (s *ServerRuntime) publishV6Sources() bool { return s.tcp().PublishV6Sources }
 
 func NewServerRuntime(tcp TCPRuntimeConfig, udp UDPRuntimeConfig, store storage.Engine) *ServerRuntime {
-	if tcp.ServerStatusInterval <= 0 {
-		tcp.ServerStatusInterval = defaultServerStatusInterval
-	}
+	tcp.setDefaults()
 	s := &ServerRuntime{
 		Storage:  store,
 		LowIDs:   NewLowIDClients(tcp.AllowLowIDs, tcp.MinLowID, tcp.MaxLowID),
@@ -220,9 +224,7 @@ func NewServerRuntime(tcp TCPRuntimeConfig, udp UDPRuntimeConfig, store storage.
 // to the objects that hold them. The LowID range is consumed only at construction and
 // is not affected.
 func (s *ServerRuntime) ApplyRuntimeConfig(tcp TCPRuntimeConfig, udp UDPRuntimeConfig) {
-	if tcp.ServerStatusInterval <= 0 {
-		tcp.ServerStatusInterval = defaultServerStatusInterval
-	}
+	tcp.setDefaults()
 	s.tcpCfg.Store(&tcp)
 	s.udpCfg.Store(&udp)
 	s.counters.setTTL(tcp.CounterCacheTTL)
@@ -747,15 +749,17 @@ type tcpClient struct {
 	connectedAt time.Time
 
 	// pendingResults holds the tail of a search whose first page has been sent, so
-	// OP_QUERY_MORE_RESULT can deliver the rest. Only this connection's own goroutine
-	// touches them — search and the More request both arrive on this socket — so no lock
-	// is needed, unlike the fields above which the status ticker and peer callbacks read.
+	// OP_QUERY_MORE_RESULT can deliver the rest. Search and the More request both arrive
+	// on this socket, but the status ticker drops expired rows from its own goroutine,
+	// hence the atomic pointer.
 	//
 	// Held rather than re-queried because eMule's More request carries no payload at all
 	// (srchybrid/SearchResultsWnd.cpp:1282): there is nothing to re-run the query from.
-	// Bounded by storage.MaxSearchResults, so the memory a session can pin this way is
-	// bounded too.
-	pendingResults []storage.File
+	// Every session that searched holds these rows, which made them the largest
+	// per-session cost on a busy server, so they are capped at MoreResultsMax rows, kept
+	// in a copy of their own (not a slice pinning the whole result), and dropped after
+	// MoreResultsTTL.
+	pendingResults atomic.Pointer[pendingSearch]
 
 	// headerBuf holds the start of a packet header that arrived without the rest of
 	// its six bytes. TCP owes us no alignment between reads and packet boundaries, so
@@ -916,6 +920,13 @@ const (
 var errHelloHashMismatch = errors.New("hello answer from another user hash")
 
 const defaultServerStatusInterval = 5 * time.Minute
+
+// Defaults of the "More" retention, matching config tcp.moreResults: two more pages,
+// kept for five minutes.
+const (
+	defaultMoreResultsMax = 2 * storage.MaxSearchPage
+	defaultMoreResultsTTL = 5 * time.Minute
+)
 
 func enableTCPKeepAlive(conn net.Conn, period time.Duration) {
 	tcp, ok := conn.(*net.TCPConn)
@@ -1541,6 +1552,7 @@ func (c *tcpClient) startPeriodicServerStatus() {
 				if c.isLogged() && c.server.parking.Load() == nil {
 					c.sendServerStatus()
 				}
+				c.dropExpiredResults(time.Now())
 			case <-stop:
 				return
 			}
@@ -1826,29 +1838,39 @@ func (c *tcpClient) handleSearchRequest(data *Buffer) {
 // A request with nothing pending gets an empty result page rather than silence. Silence
 // would leave the client's search UI waiting on its local timer, which is the same
 // failure the zero-result reply above exists to avoid.
+//
+// Rows past MoreResultsTTL count as nothing pending: the client gets the empty final page.
 func (c *tcpClient) handleQueryMoreResult() {
-	if len(c.pendingResults) == 0 {
+	c.dropExpiredResults(time.Now())
+	kept := c.pendingResults.Load()
+	if kept == nil || len(kept.rows) == 0 {
 		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_QUERY_MORE_RESULT pending=0", c.remoteHost)
 		c.sendSearchResult(nil, false)
 		return
 	}
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_QUERY_MORE_RESULT pending=%d",
-		c.remoteHost, len(c.pendingResults))
+		c.remoteHost, len(kept.rows))
 	// Filtered again: the pages were cut when the search ran, and a list can have
-	// gained a hash since.
-	c.sendSearchPage(c.server.withholdFiles(c.pendingResults))
+	// gained a hash since. The deadline stays the one of the search.
+	c.sendSearchPageUntil(c.server.withholdFiles(kept.rows), kept.expires)
 }
 
-// sendSearchPage sends the first storage.MaxSearchPage of files, keeps the remainder for
-// OP_QUERY_MORE_RESULT, and sets the more-results flag accordingly.
+// sendSearchPage sends the first page of a new search's files; see sendSearchPageUntil.
 func (c *tcpClient) sendSearchPage(files []storage.File) {
+	c.sendSearchPageUntil(files, time.Now().Add(c.server.tcp().MoreResultsTTL))
+}
+
+// sendSearchPageUntil sends the first storage.MaxSearchPage of files, keeps at most
+// MoreResultsMax of the remainder for OP_QUERY_MORE_RESULT until expires, and sets the
+// more-results flag accordingly.
+func (c *tcpClient) sendSearchPageUntil(files []storage.File, expires time.Time) {
 	page, rest := files, []storage.File(nil)
 	if len(files) > storage.MaxSearchPage {
 		page, rest = files[:storage.MaxSearchPage], files[storage.MaxSearchPage:]
 	}
 	// Assigned before the send so a write error cannot leave a stale page pending.
-	c.pendingResults = rest
-	c.sendSearchResult(page, len(rest) > 0)
+	c.keepPendingResults(rest, expires)
+	c.sendSearchResult(page, len(c.pendingRows()) > 0)
 }
 
 func (c *tcpClient) handleCallbackRequest(data *Buffer) {
@@ -3388,4 +3410,50 @@ func (s *ServerRuntime) udpSecret() []byte {
 		return s.udp().UDPSecret
 	}
 	return LegacyUDPSecret(s.udp().UDPServerKey)
+}
+
+// pendingSearch is the tail of a search kept for OP_QUERY_MORE_RESULT, and when it lapses.
+type pendingSearch struct {
+	rows    []storage.File
+	expires time.Time
+}
+
+// setDefaults fills the zero values that mean "use the default".
+func (t *TCPRuntimeConfig) setDefaults() {
+	if t.ServerStatusInterval <= 0 {
+		t.ServerStatusInterval = defaultServerStatusInterval
+	}
+	if t.MoreResultsMax == 0 {
+		t.MoreResultsMax = defaultMoreResultsMax
+	}
+	if t.MoreResultsTTL <= 0 {
+		t.MoreResultsTTL = defaultMoreResultsTTL
+	}
+}
+
+// keepPendingResults keeps rows for OP_QUERY_MORE_RESULT until expires, capped at
+// MoreResultsMax and copied so they do not pin the array of the whole result.
+func (c *tcpClient) keepPendingResults(rows []storage.File, expires time.Time) {
+	rows = rows[:min(len(rows), max(c.server.tcp().MoreResultsMax, 0))]
+	if len(rows) == 0 {
+		c.pendingResults.Store(nil)
+		return
+	}
+	c.pendingResults.Store(&pendingSearch{rows: slices.Clone(rows), expires: expires})
+}
+
+// pendingRows returns the rows kept for OP_QUERY_MORE_RESULT, nil with none.
+func (c *tcpClient) pendingRows() []storage.File {
+	if p := c.pendingResults.Load(); p != nil {
+		return p.rows
+	}
+	return nil
+}
+
+// dropExpiredResults drops the kept rows once their deadline has passed. Called by the
+// session's status ticker, so an idle session frees them too, and by the More handler.
+func (c *tcpClient) dropExpiredResults(now time.Time) {
+	if p := c.pendingResults.Load(); p != nil && !now.Before(p.expires) {
+		c.pendingResults.CompareAndSwap(p, nil)
+	}
 }

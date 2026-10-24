@@ -90,3 +90,25 @@ func TestAdminCredentialsTogether(t *testing.T) {
 		}
 	}
 }
+
+// TestAdminPprofOrDefault: an omitted pprof key serves the profiler; an explicit false
+// removes the /debug/pprof/ routes.
+func TestAdminPprofOrDefault(t *testing.T) {
+	f, tr := false, true
+	cases := []struct {
+		name string
+		in   *bool
+		want bool
+	}{
+		{"absent defaults on", nil, true},
+		{"explicit false honoured", &f, false},
+		{"explicit true honoured", &tr, true},
+	}
+	for _, c := range cases {
+		got := AdminConfig{Pprof: c.in}.PprofOrDefault()
+		t.Logf("case=%q pprof=%v -> PprofOrDefault=%v", c.name, c.in, got)
+		if got != c.want {
+			t.Errorf("%s: PprofOrDefault()=%v, want %v", c.name, got, c.want)
+		}
+	}
+}

@@ -29,6 +29,7 @@ var reloadableKeys = []string{
 	"tcp.disconnectTimeout",
 	"tcp.loginTimeout",
 	"tcp.maxConnectionsPerIP",
+	"tcp.moreResults",
 	"udp.getSources",
 	"udp.getFiles",
 	"udp.rateLimitPerIPPerMinute",
@@ -86,6 +87,7 @@ func OverlayReloadable(base, next Config) Config {
 	out.TCP.DisconnectTimeout = next.TCP.DisconnectTimeout
 	out.TCP.LoginTimeout = next.TCP.LoginTimeout
 	out.TCP.MaxConnectionsPerIP = next.TCP.MaxConnectionsPerIP
+	out.TCP.MoreResults = next.TCP.MoreResults
 	out.UDP.GetSources = next.UDP.GetSources
 	out.UDP.GetFiles = next.UDP.GetFiles
 	out.UDP.RateLimitPerIPPerMinute = next.UDP.RateLimitPerIPPerMinute

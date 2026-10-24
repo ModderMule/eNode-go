@@ -208,9 +208,9 @@ func TestSearchWithholdsFilteredRows(t *testing.T) {
 	client.handleED2K(OpSearchRequest, searchFor(t, "paging-"))
 	page1 := decodeSearchRecords(t, conn.takeWritten())
 	t.Logf("input: %d files, one on the filter list and one named with a keyword; output: page1=%d pending=%d",
-		total, len(page1), len(client.pendingResults))
-	if len(page1)+len(client.pendingResults) != total-2 {
-		t.Fatalf("served %d rows, want %d", len(page1)+len(client.pendingResults), total-2)
+		total, len(page1), len(client.pendingRows()))
+	if len(page1)+len(client.pendingRows()) != total-2 {
+		t.Fatalf("served %d rows, want %d", len(page1)+len(client.pendingRows()), total-2)
 	}
 	for _, r := range page1 {
 		if bytes.Equal(r.Hash, rowHash(3)) || recordName(r) == "paging-0007.bin" {
@@ -219,9 +219,9 @@ func TestSearchWithholdsFilteredRows(t *testing.T) {
 	}
 
 	// A hash listed after the pages were cut must not ride out on the next page.
-	late := append([]byte(nil), client.pendingResults[0].Hash...)
+	late := append([]byte(nil), client.pendingRows()[0].Hash...)
 	filter.filtered[string(late)] = true
-	pending := len(client.pendingResults)
+	pending := len(client.pendingRows())
 	client.handleED2K(OpQueryMoreResult, NewBuffer(0))
 	page2 := decodeSearchRecords(t, conn.takeWritten())
 	t.Logf("input: %x listed between pages; output: page2=%d of %d pending", late[:2], len(page2), pending)

@@ -394,7 +394,7 @@ func (c *tcpClient) exportState() SessionState {
 	c.infoMu.Lock()
 	st.Ed3kID = append([]byte(nil), c.ed3kID...)
 	c.infoMu.Unlock()
-	st.PendingResults = c.pendingResults
+	st.PendingResults = c.pendingRows()
 	st.SoftLimitWarned = c.softLimitWarned
 	st.HardLimitHit = c.hardLimitHit
 	st.BanlistDropped = c.banlistDropped
@@ -431,7 +431,8 @@ func (c *tcpClient) applyState(st SessionState) {
 		c.connectedAt = st.ConnectedAt
 	}
 	c.metaCapable = st.MetaCapable
-	c.pendingResults = st.PendingResults
+	// The deadline is not handed over; the new process grants a fresh one.
+	c.keepPendingResults(st.PendingResults, time.Now().Add(c.server.tcp().MoreResultsTTL))
 	c.softLimitWarned = st.SoftLimitWarned
 	c.hardLimitHit = st.HardLimitHit
 	c.banlistDropped = st.BanlistDropped

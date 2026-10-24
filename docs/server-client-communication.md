@@ -25,7 +25,7 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_GETSOURCES` | `0x19` | Client -> Server | Request sources for a file. |
 | `OP_GETSOURCES_OBFU` | `0x23` | Client -> Server | Obfuscated source request variant. |
 | `OP_SEARCHREQUEST` | `0x16` | Client -> Server | Search query request. |
-| `OP_QUERY_MORE_RESULT` | `0x21` | Client -> Server | Next page of the last search. Empty payload — the client's "More" button sends only the opcode (`srchybrid/SearchResultsWnd.cpp:1282`), so the remaining results are held per connection. |
+| `OP_QUERY_MORE_RESULT` | `0x21` | Client -> Server | Next page of the last search. Empty payload — the client's "More" button sends only the opcode (`srchybrid/SearchResultsWnd.cpp:1282`), so the remaining results are held per connection: at most `tcp.moreResults.maxRows` rows (default 510, two pages; 0 = no paging) for `tcp.moreResults.ttlSeconds` (default 300; an idle session's rows are dropped by its 5-minute status ticker, so up to 5 minutes later). A More after that gets an empty final page. |
 | `OP_DISCONNECT` | `0x18` | Client -> Server | Client is leaving. Releases the session, its LowID and its storage row at once, instead of waiting for the read loop to see a FIN — or, for a socket that dies without one, for `disconnectTimeout`. |
 | `OP_CALLBACKREQUEST` | `0x1c` | Client -> Server | Ask server to callback a LowID client. |
 | `OP_SERVERMESSAGE` | `0x38` | Server -> Client | Human-readable server message. |

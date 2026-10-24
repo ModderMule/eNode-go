@@ -85,6 +85,13 @@ tcp:
   allowLowIDs: true
   minLowID: 1
   maxLowID: 16777215
+  # Search results kept for eMule's "More" button (OP_QUERY_MORE_RESULT), after the
+  # first page of 255. Every session that searched holds them, so they are the largest
+  # per-session memory cost. maxRows 0 turns paging off (max 745); ttlSeconds is how
+  # long they wait, plus up to one 5-minute status interval for an idle session.
+  moreResults:
+    maxRows: 510
+    ttlSeconds: 300
 
 udp:
   port: 5559
@@ -719,6 +726,10 @@ admin:
   # github.com/ModderMule/eNode-go/releases/latest) and link to it on the dashboard
   # when it is newer than this build. false = never contact GitHub.
   checkUpdates: true
+  # Serve Go's profiler at /debug/pprof/ (heap, goroutine, profile, trace). Loopback
+  # always gets in, other clients only with username/password. A heap dump can hold
+  # secrets from memory. Example: curl -o heap.pb.gz http://127.0.0.1:4560/debug/pprof/heap
+  pprof: true
 
 storage:
   engine: memory

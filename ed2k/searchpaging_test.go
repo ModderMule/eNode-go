@@ -225,7 +225,7 @@ func TestSearchPagingDeliversEveryResult(t *testing.T) {
 	count1, more1, trailing1 := decodeSearchResult(t, page1)
 	t.Logf("input: %d matching files, page size %d", total, storage.MaxSearchPage)
 	t.Logf("output page 1: count=%d moreByte=0x%02x trailing=%d pending=%d",
-		count1, more1, trailing1, len(client.pendingResults))
+		count1, more1, trailing1, len(client.pendingRows()))
 	if count1 != storage.MaxSearchPage {
 		t.Fatalf("page 1 carried %d results, want the full page of %d", count1, storage.MaxSearchPage)
 	}
@@ -237,15 +237,15 @@ func TestSearchPagingDeliversEveryResult(t *testing.T) {
 	page2 := conn.takeWritten()
 	count2, more2, _ := decodeSearchResult(t, page2)
 	t.Logf("output page 2: count=%d moreByte=0x%02x pending=%d",
-		count2, more2, len(client.pendingResults))
+		count2, more2, len(client.pendingRows()))
 	if int(count1+count2) != total {
 		t.Fatalf("pages carried %d+%d=%d results, want all %d", count1, count2, count1+count2, total)
 	}
 	if more2 != 0 {
 		t.Fatal("the final page must clear the more-results byte")
 	}
-	if len(client.pendingResults) != 0 {
-		t.Fatalf("%d results still pending after the last page", len(client.pendingResults))
+	if len(client.pendingRows()) != 0 {
+		t.Fatalf("%d results still pending after the last page", len(client.pendingRows()))
 	}
 }
 
@@ -256,14 +256,14 @@ func TestSearchWithinOnePageSetsNoMoreFlag(t *testing.T) {
 	client.handleED2K(OpSearchRequest, searchFor(t, "paging-"))
 	count, more, _ := decodeSearchResult(t, conn.takeWritten())
 	t.Logf("input: 10 matching files; output: count=%d moreByte=0x%02x pending=%d",
-		count, more, len(client.pendingResults))
+		count, more, len(client.pendingRows()))
 	if count != 10 {
 		t.Fatalf("count = %d, want 10", count)
 	}
 	if more != 0 {
 		t.Fatal("a result set that fits in one page must not set the more-results byte")
 	}
-	if len(client.pendingResults) != 0 {
+	if len(client.pendingRows()) != 0 {
 		t.Fatal("nothing should be pending")
 	}
 }
@@ -294,12 +294,12 @@ func TestNewSearchReplacesPendingPage(t *testing.T) {
 
 	client.handleED2K(OpSearchRequest, searchFor(t, "paging-"))
 	_ = conn.takeWritten()
-	first := len(client.pendingResults)
+	first := len(client.pendingRows())
 
 	// A second, narrower search that fits in one page.
 	client.handleED2K(OpSearchRequest, searchFor(t, "paging-0001"))
 	_ = conn.takeWritten()
-	second := len(client.pendingResults)
+	second := len(client.pendingRows())
 
 	t.Logf("input: a broad search then a narrow one")
 	t.Logf("output: pending after broad=%d, after narrow=%d", first, second)
