@@ -456,10 +456,11 @@ func (s *Server) pageData() pageData {
 // /debug/pprof/, plus CPU profile and trace. Sensitive routes, like the admin views: a
 // heap dump holds whatever is in memory. GET only, so the guard's write check never
 // applies. The admin server sets no write timeout, so a 30 s CPU profile completes.
+// A browser opening a binary profile gets a page with a download link instead.
 func (s *Server) registerPprof(mux *http.ServeMux) {
-	mux.HandleFunc("GET /debug/pprof/", s.guard(true, pprof.Index))
+	mux.HandleFunc("GET /debug/pprof/", s.guard(true, pprofDownloadPage(pprof.Index)))
 	mux.HandleFunc("GET /debug/pprof/cmdline", s.guard(true, pprof.Cmdline))
-	mux.HandleFunc("GET /debug/pprof/profile", s.guard(true, pprof.Profile))
+	mux.HandleFunc("GET /debug/pprof/profile", s.guard(true, pprofDownloadPage(pprof.Profile)))
 	mux.HandleFunc("GET /debug/pprof/symbol", s.guard(true, pprof.Symbol))
-	mux.HandleFunc("GET /debug/pprof/trace", s.guard(true, pprof.Trace))
+	mux.HandleFunc("GET /debug/pprof/trace", s.guard(true, pprofDownloadPage(pprof.Trace)))
 }

@@ -323,6 +323,13 @@ type NATConfig struct {
 	// this server. See docs/ipv6-client-implementation-spec.md §9.
 	ServerIndependent      *bool `yaml:"serverIndependent"`
 	RegistrationTTLSeconds int   `yaml:"registrationTTLSeconds"`
+	// LugdunumCallback enables Lugdunum eserver's LowID-to-LowID NAT callback on this
+	// server: TCP/UDP flag 0x1000, odd LowIDs for clients that set login bit 0x1000,
+	// the 24-byte OP_IDCHANGE, and the UDP 0xA6 request answered with a UDP 0xA7 or
+	// TCP 0x37 notice. Independent of Enabled (that is the PR_NAT port), but needs
+	// supportCrypt, since the request is only accepted obfuscated. *bool so an absent
+	// key defaults on. See docs/lugdunum-nat-callback.local.md.
+	LugdunumCallback *bool `yaml:"lugdunumCallback"`
 }
 
 // IPv6OrDefault reports whether IPv6 hole-punching is enabled, defaulting to true
@@ -332,6 +339,10 @@ func (c NATConfig) IPv6OrDefault() bool { return boolOrDefault(c.IPv6, true) }
 // ServerIndependentOrDefault reports whether server-independent (cross-server /
 // serverless) rendezvous is enabled, defaulting to true.
 func (c NATConfig) ServerIndependentOrDefault() bool { return boolOrDefault(c.ServerIndependent, true) }
+
+// LugdunumCallbackOrDefault reports whether the Lugdunum NAT callback is enabled,
+// defaulting to true (effective only with supportCrypt).
+func (c NATConfig) LugdunumCallbackOrDefault() bool { return boolOrDefault(c.LugdunumCallback, true) }
 
 // IPv6Config controls dual-stack listening and IPv6 source publication. When
 // disabled the server behaves exactly as before: IPv4-only listeners, no IPv6

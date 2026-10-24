@@ -5,6 +5,10 @@ const (
 	PrEMule uint8 = 0xc5
 	PrZlib  uint8 = 0xd4
 	PrNat   uint8 = 0xf1
+	// PrKad and PrKadZlib are Kad's UDP markers. The server never speaks Kad; they are
+	// here so a datagram meant for a client's Kad socket can avoid them.
+	PrKad     uint8 = 0xe4
+	PrKadZlib uint8 = 0xe5
 )
 
 const (
@@ -106,6 +110,24 @@ const (
 	OpFoundSourcesIPv6     uint8 = 0x25
 	OpGlobGetSourcesIPv6   uint8 = 0xa5
 	OpGlobFoundSourcesIPv6 uint8 = 0xa6
+)
+
+// Lugdunum eserver's LowID-to-LowID NAT callback (docs/lugdunum-nat-callback.local.md),
+// also spoken by NeoLoader, eMuleQt and ed2k-server 0.9.85.
+//
+//	OpNatCallbackRequest      UDP 0xa6 client→server, obfuscated only: <target ID 4><requester ID 4>
+//	OpNatCallbackRequestedUDP UDP 0xa7 server→client notice
+//	OpNatCallbackRequested    TCP 0x37 server→client notice, the fallback
+//	notice payload: <requester IP 4><requester UDP port 2 LE><requester ID 4><crypt flags 1>[<user hash 16>]
+//
+// UDP 0xa6/0xa7 share values with OpGlobFoundSourcesIPv6 and OpServerListReqIPv6 but
+// not directions: this server only ever receives 0xa6 from a client and receives 0xa7
+// only from a server, so the inbound switch takes 0xa6 as the request and 0xa7 as
+// gossip. Sending 0xa7 to a client is always the notice.
+const (
+	OpNatCallbackRequest      uint8 = 0xa6
+	OpNatCallbackRequestedUDP uint8 = 0xa7
+	OpNatCallbackRequested    uint8 = 0x37
 )
 
 // OpCallbackReqdIPv6 is the IPv6 form of OP_CALLBACKREQUESTED (0x35): the server
@@ -378,6 +400,11 @@ const (
 	// 0x1000/0x2000 unofficially (chacha20/aes256). 0x4000 is the first clean bit.
 	// Clients ignore unknown bits, so this is display/verify metadata.
 	FlagIPv6 uint32 = 0x4000
+	// FlagNatCallback is Lugdunum's SRV_TCPFLG_NATTRAVERSAL / SRV_UDPFLG_NATTRAVERSAL:
+	// this server answers the UDP 0xa6 NAT callback (OpNatCallbackRequest). Set only
+	// when natTraversal.lugdunumCallback is on. Clients use the callback only when this
+	// bit is set and OP_IDCHANGE is 24 bytes long.
+	FlagNatCallback uint32 = 0x1000
 	// FlagNatRendezvous advertises that this server offers server-independent
 	// (cross-server / serverless) PR_NAT hole-punch rendezvous — it will pair two
 	// registered clients regardless of which eD2K server (if any) they are logged
@@ -387,6 +414,9 @@ const (
 	// 0x8000 (ed2k-server IPv6 update), 0x10000 (meta search), 0x20000 (ed2k-server
 	// LowID hole punch). 0x40000 is the next clean bit. Clients ignore unknown bits. Advertised only when
 	// natTraversal.serverIndependent is on. See docs/ipv6-client-implementation-spec.md §9.
+	// Also taken since: 0x80000 (FlagServerSearch below) and 0x100000 (ed2k-server
+	// 0.9.85 two-sided hole punch, server and client bit, andrey23127/ed2k-server#39).
+	// New eNode-go bits go above 0x100000.
 	FlagNatRendezvous uint32 = 0x40000
 	// FlagMetaSearch advertises that search answers may carry torrent/Usenet/web rows
 	// (FT_META_* tags, docs/meta-search.md). 0x10000 is the next clean bit above
@@ -413,6 +443,10 @@ const (
 	// IPv6 bit (docs/lugdunum-nat-callback.local.md), so neither is read here.
 	SrvCapMetaSearch    uint32 = 0x10000
 	SrvCapUDPMetaSearch uint32 = 0x02
+	// SrvCapNatTraversal is the client's CT_SERVER_FLAGS login bit for Lugdunum's NAT
+	// callback. With natTraversal.lugdunumCallback on, a LowID client that sets it gets
+	// an odd LowID and may be named as a callback target; every other LowID is even.
+	SrvCapNatTraversal uint32 = 0x1000
 )
 
 const (

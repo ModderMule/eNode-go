@@ -23,6 +23,9 @@ type UDPServerConfig struct {
 	// address) instead of the IPv4-only "udp4", and drives the SRV_UDPFLG_IPV6
 	// advertisement. False reproduces the original behaviour exactly.
 	DualStack bool
+	// NatCallback advertises FlagNatCallback (0x1000) in the UDP flags, as Lugdunum
+	// does (its UDP word is 0x17fb).
+	NatCallback bool
 	// Workers and QueueSize bound the datagram handler pool. Zero means the
 	// defaults below.
 	Workers   int
@@ -50,6 +53,9 @@ func BuildUDPFlags(cfg UDPServerConfig) uint32 {
 	}
 	if cfg.DualStack {
 		flags += FlagIPv6
+	}
+	if cfg.NatCallback {
+		flags += FlagNatCallback
 	}
 	return flags
 }

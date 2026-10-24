@@ -105,6 +105,17 @@ func RandBuf(length int) ([]byte, error) {
 	return out, nil
 }
 
+// randClientSocketMarker is RandProtocol without the Kad markers 0xe4/0xe5 either.
+// The marker byte is not part of the key, so any value outside the set decrypts.
+func randClientSocketMarker() uint8 {
+	for {
+		p := uint8(Rand(0xff))
+		if !IsProtocol(p) && p != PrKad && p != PrKadZlib {
+			return p
+		}
+	}
+}
+
 func RandProtocol() uint8 {
 	p := uint8(0xff)
 	for i := 0; i < 5; i++ {

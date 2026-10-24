@@ -261,6 +261,9 @@ func (r *reloader) stopGossipIO() {
 // The advertised flag words are derived from them.
 func serverListenConfigs(cfg config.Config) (ed2k.TCPServerConfig, ed2k.UDPServerConfig) {
 	dualStack := cfg.IPv6.EnabledOrDefault()
+	// The Lugdunum NAT callback request is accepted only obfuscated, and only a
+	// LowID can be its target, so it is offered only when both are possible.
+	natCallback := cfg.NAT.LugdunumCallbackOrDefault() && cfg.SupportCrypt && cfg.TCP.AllowLowIDs
 	tcpCfg := ed2k.TCPServerConfig{
 		Address:        cfg.Address,
 		Port:           cfg.TCP.Port,
@@ -275,6 +278,7 @@ func serverListenConfigs(cfg config.Config) (ed2k.TCPServerConfig, ed2k.UDPServe
 		// only when the NAT service itself is enabled. It drives both the
 		// FlagNatRendezvous advertisement and the OP_SERVERIDENT NAT-port tag.
 		NatRendezvous: cfg.NAT.Enabled && cfg.NAT.ServerIndependentOrDefault(),
+		NatCallback:   natCallback,
 	}
 	udpCfg := ed2k.UDPServerConfig{
 		Address:      cfg.Address,
@@ -283,6 +287,7 @@ func serverListenConfigs(cfg config.Config) (ed2k.TCPServerConfig, ed2k.UDPServe
 		GetFiles:     cfg.UDP.GetFiles,
 		SupportCrypt: cfg.SupportCrypt,
 		DualStack:    dualStack,
+		NatCallback:  natCallback,
 	}
 	return tcpCfg, udpCfg
 }

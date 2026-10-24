@@ -341,6 +341,11 @@ With `admin.pprof: true` (the default) the dashboard serves Go's profiler under
 other clients only with `admin.username`/`admin.password`. A heap dump can hold
 anything that was in memory, keys and passwords included. The key needs a restart.
 
+A browser opening a binary profile (`heap`, `profile`, `trace`, …) gets a short page
+with a **Download** link (`?download=1`), a text view (`?debug=1`) and the
+`go tool pprof` commands, instead of an unnamed file download. curl and
+`go tool pprof` do not ask for HTML, so they get the profile itself.
+
 On a server whose dashboard is bound to loopback, profile it over SSH:
 
 ```bash

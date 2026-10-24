@@ -194,6 +194,8 @@ type ServerRuntime struct {
 	// parking is the handover round in progress, or nil. While it is set every
 	// session parks at its next read; see ParkSessions.
 	parking atomic.Pointer[parkRound]
+	// natCallback is the state of Lugdunum's NAT callback (natcallback.go).
+	natCallback natCallbackState
 }
 
 // ipv6Enabled reports whether IPv6 is on at all (dual-stack accept, CT_MOD_IP_V6
@@ -607,6 +609,10 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 			s.udpGlobGetSourcesIPv6(b, remote, conn, crypt, module)
 		case OpGlobServStatReq:
 			s.udpGlobServStatReq(b, remote, conn, crypt, module)
+		// Lugdunum's NAT callback request. 0xa6 is also OpGlobFoundSourcesIPv6, but
+		// that one only ever goes from this server to a client.
+		case OpNatCallbackRequest:
+			s.udpNatCallbackRequest(b, remote, conn, obfuscated, module)
 		case OpServerDescReq:
 			if len(data) < 6 {
 				s.udpServDescResOld(remote, conn, crypt, module)
@@ -724,6 +730,12 @@ type tcpClient struct {
 	// CT_SERVER_FLAGS: it can act on torrent/Usenet/web rows. Written once on this
 	// connection's goroutine before its first search, and read only by it.
 	metaCapable bool
+	// nattCapable is set at login when the Lugdunum NAT callback is on and the client
+	// sent SrvCapNatTraversal (0x1000): it got an odd LowID and may be named as a
+	// callback target. A UDP worker reads it through the LowIDs table, so it is
+	// written and read under infoMu. It sits in the padding after metaCapable, so it
+	// adds nothing to the size of a session.
+	nattCapable bool
 	// ed3kID is the ed3k node ID the client sent as CT_ED3K at login, or nil. Read
 	// and written under infoMu.
 	ed3kID []byte
@@ -1273,6 +1285,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// re-publish them per source. Absent tag → 0, i.e. no crypt advertised.
 	c.info.CryptOptions = cryptOptionsFromLoginFlags(loginFlags(req.Tags))
 	c.metaCapable = loginFlags(req.Tags)&SrvCapMetaSearch != 0
+	c.nattCapable = c.server.natCallbackEnabled() && loginFlags(req.Tags)&SrvCapNatTraversal != 0
 	c.nick, c.software = loginNick(req.Tags), loginSoftware(req.Tags)
 	c.ed3kID = loginEd3k(req.Tags)
 	c.info.IPv6 = v6Bytes
@@ -1327,7 +1340,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		// clients (all of whom have ipv4 == 0) from colliding on one seed. The ID
 		// that comes back is written under infoMu below, so a concurrent reader
 		// sees either the old or the new value, never a torn one.
-		id, ok := c.server.LowIDs.AddByAddress(c.peerIP, ipv4, port, c)
+		id, ok := c.server.LowIDs.AddByAddress(c.peerIP, ipv4, port, c, c.lowIDParity())
 		if !ok {
 			c.closeWithReason("lowid-pool-exhausted")
 			return
@@ -2038,7 +2051,11 @@ func (c *tcpClient) sendIDChange(id uint32) {
 	if IsLANIP(c.peerIP) && !HasHighID(id) {
 		observed = 0
 	}
-	packet, err := BuildIDChangePacket(id, c.server.tcp().Flags, c.server.tcp().Port, observed)
+	var natPorts *IDChangeNatPorts
+	if c.wantsLongIDChange() {
+		natPorts = c.idChangeNatPorts(id)
+	}
+	packet, err := BuildIDChangePacket(id, c.server.tcp().Flags, c.server.tcp().Port, observed, natPorts)
 	if err != nil {
 		return
 	}

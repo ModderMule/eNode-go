@@ -41,6 +41,10 @@ type SessionState struct {
 	ConnectedAt time.Time
 	IPv6Capable bool
 	MetaCapable bool
+	// NattCapable is tcpClient.nattCapable. A state from a build before the Lugdunum
+	// callback has it false, and its LowID may be odd: such a session is never named
+	// as a callback target, so a client that tries costs one timed-out attempt.
+	NattCapable bool
 	// Ed3kID is the CT_ED3K node ID of the login, nil when the client sent none.
 	Ed3kID []byte
 	// PendingResults is the rest of the last search, for OP_QUERY_MORE_RESULT.
@@ -392,6 +396,7 @@ func (c *tcpClient) exportState() SessionState {
 	st.ConnectedAt = c.connectedAt
 	st.MetaCapable = c.metaCapable
 	c.infoMu.Lock()
+	st.NattCapable = c.nattCapable
 	st.Ed3kID = append([]byte(nil), c.ed3kID...)
 	c.infoMu.Unlock()
 	st.PendingResults = c.pendingRows()
@@ -431,6 +436,9 @@ func (c *tcpClient) applyState(st SessionState) {
 		c.connectedAt = st.ConnectedAt
 	}
 	c.metaCapable = st.MetaCapable
+	c.infoMu.Lock()
+	c.nattCapable = st.NattCapable
+	c.infoMu.Unlock()
 	// The deadline is not handed over; the new process grants a fresh one.
 	c.keepPendingResults(st.PendingResults, time.Now().Add(c.server.tcp().MoreResultsTTL))
 	c.softLimitWarned = st.SoftLimitWarned

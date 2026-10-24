@@ -15,4 +15,4 @@
 
 ## Project
 
-- when adding new keys to `config.example.yaml` always add them to all other config files too
+- when adding new keys to `enode.config.yaml` always add them to all other config files too

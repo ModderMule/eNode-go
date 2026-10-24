@@ -679,6 +679,11 @@ natTraversal:
   ipv6: true                 # IPv6 hole-punching (dual-stack candidates); needs ipv6.enabled
   serverIndependent: true    # cross-server / serverless LowID↔LowID rendezvous (default on)
   registrationTTLSeconds: 30
+  # Lugdunum eserver's LowID↔LowID callback (UDP 0xA6 → 0xA7/TCP 0x37), as spoken by
+  # NeoLoader and eMuleQt. Advertises flag 0x1000 and gives odd LowIDs to clients
+  # that set login bit 0x1000, even ones to everyone else. Independent of `enabled`
+  # above; needs supportCrypt. Default on.
+  lugdunumCallback: true
 
 # IPv6 dual-stack support. When enabled (the default), the TCP/UDP listeners bind
 # the dual-stack wildcard (an empty top-level `address`), the server accepts IPv6

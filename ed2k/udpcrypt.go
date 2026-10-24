@@ -111,6 +111,18 @@ func (u *UDPCrypt) Encrypt(buffer []byte) []byte {
 	return u.encrypt(buffer, MagicValueUDPServerClient)
 }
 
+// EncryptForClientSocket is Encrypt with a marker byte that a client's own UDP
+// socket never reads as eMule (0xc5) or Kad (0xe4, 0xe5) traffic. For a server reply
+// that lands on the client's client/Kad socket, the Lugdunum NAT notice 0xa7: a
+// random marker would sometimes be routed to the wrong decoder and lost.
+func (u *UDPCrypt) EncryptForClientSocket(buffer []byte) []byte {
+	out := u.encrypt(buffer, MagicValueUDPServerClient)
+	if u.Status == CsEncrypting && len(out) > 0 {
+		out[0] = randClientSocketMarker()
+	}
+	return out
+}
+
 // EncryptAsClient wraps a datagram for the client-to-server direction, with direction
 // byte MAGICVALUE_UDP_CLIENTSERVER (0x6B).
 //

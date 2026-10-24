@@ -50,8 +50,8 @@ func TestAddByAddressDistinguishesV6OnlyClients(t *testing.T) {
 	// seed the way AddByEndpoint(0, port) would; they get distinct LowIDs.
 	a := net.ParseIP("2001:db8::1")
 	b := net.ParseIP("2001:db8::2")
-	idA, okA := l.AddByAddress(a, 0, 4662, "a")
-	idB, okB := l.AddByAddress(b, 0, 4662, "b")
+	idA, okA := l.AddByAddress(a, 0, 4662, "a", LowIDAnyParity)
+	idB, okB := l.AddByAddress(b, 0, 4662, "b", LowIDAnyParity)
 	if !okA || !okB {
 		t.Fatalf("both adds should succeed: %v %v", okA, okB)
 	}
@@ -72,7 +72,7 @@ func TestAddByAddressV4MatchesAddByEndpoint(t *testing.T) {
 	want, _ := l1.AddByEndpoint(ipv4, 4662, "x")
 
 	l2 := NewLowIDClients(true, 0, 0)
-	got, _ := l2.AddByAddress(net.ParseIP("1.2.3.4"), ipv4, 4662, "x")
+	got, _ := l2.AddByAddress(net.ParseIP("1.2.3.4"), ipv4, 4662, "x", LowIDAnyParity)
 	if got != want {
 		t.Fatalf("v4 AddByAddress diverged from AddByEndpoint: got %d want %d", got, want)
 	}

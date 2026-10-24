@@ -42,7 +42,7 @@ func TestBuildServerPackets(t *testing.T) {
 		t.Fatalf("opcode mismatch")
 	}
 
-	idc, err := BuildIDChangePacket(123, 0x10, 4661, 0)
+	idc, err := BuildIDChangePacket(123, 0x10, 4661, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestIDChangeCarriesObservedIPv4(t *testing.T) {
 			t.Logf("input: id=0x%08x flags=0x%08x primaryPort=%d observedIPv4=0x%08x",
 				tc.id, flags, primaryPort, tc.observed)
 
-			buf, err := BuildIDChangePacket(tc.id, flags, primaryPort, tc.observed)
+			buf, err := BuildIDChangePacket(tc.id, flags, primaryPort, tc.observed, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

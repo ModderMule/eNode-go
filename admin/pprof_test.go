@@ -66,3 +66,36 @@ func TestPprofGuardedOffBox(t *testing.T) {
 		}
 	}
 }
+
+// TestPprofBrowserGetsDownloadPage covers a browser opening a binary profile: a page with
+// a download link, not a nameless file download. curl, go tool pprof, the download link
+// and the text view still get the profile itself.
+func TestPprofBrowserGetsDownloadPage(t *testing.T) {
+	browser := func(r *http.Request) { r.Header.Set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8") }
+	cases := []struct {
+		path     string
+		mutate   func(*http.Request)
+		wantType string
+		wantBody string
+	}{
+		{"/debug/pprof/heap", browser, "text/html", `href="?download=1"`},
+		{"/debug/pprof/goroutine", browser, "text/html", "View as text"},
+		{"/debug/pprof/profile?seconds=5", browser, "text/html", "download=1&amp;seconds=5"},
+		{"/debug/pprof/heap?download=1", browser, "application/octet-stream", ""},
+		{"/debug/pprof/heap?debug=1", browser, "text/plain", "heap profile"},
+		{"/debug/pprof/heap", nil, "application/octet-stream", ""},
+		{"/debug/pprof/", browser, "text/html", "Types of profiles available"},
+		{"/debug/pprof/nosuch", browser, "text/plain", "Unknown profile"},
+	}
+	for _, c := range cases {
+		w := do(newPprofServer(true, "", ""), http.MethodGet, c.path, "", c.mutate)
+		ct := w.Header().Get("Content-Type")
+		t.Logf("input: GET %s browser=%v; output: %d %s (%d bytes)", c.path, c.mutate != nil, w.Code, ct, w.Body.Len())
+		if !strings.HasPrefix(ct, c.wantType) {
+			t.Errorf("%s: Content-Type %q, want %s", c.path, ct, c.wantType)
+		}
+		if !strings.Contains(w.Body.String(), c.wantBody) {
+			t.Errorf("%s: body lacks %q", c.path, c.wantBody)
+		}
+	}
+}

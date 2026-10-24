@@ -342,6 +342,15 @@ func BuildServerStatusPacket(clients, files int) (*Buffer, error) {
 	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
+// IDChangeNatPorts are the two words Lugdunum appends to OP_IDCHANGE for a client
+// that set crypt support and SrvCapNatTraversal. ObfuscationTCPPort is the server's
+// obfuscated TCP port; ClientTCPPort is the client's TCP port as the server sees it:
+// the connection's source port for a LowID, the listen port for a HighID.
+type IDChangeNatPorts struct {
+	ObfuscationTCPPort uint16
+	ClientTCPPort      uint16
+}
+
 // BuildIDChangePacket builds OP_IDCHANGE in eMule's full documented layout,
 // <newID 4><serverFlags 4><primaryTCPPort 4><observedClientIPv4 4>
 // (srchybrid/Opcodes.h:182). The last two words are what make the packet 16 bytes
@@ -356,7 +365,13 @@ func BuildServerStatusPacket(clients, files int) (*Buffer, error) {
 //
 // primaryTCPPort is annotated "(unused)" in the reference and is ignored by both
 // surveyed clients; it carries the server's own listening port to match the name.
-func BuildIDChangePacket(id, tcpFlags uint32, primaryPort uint16, observedClientIPv4 uint32) (*Buffer, error) {
+//
+// natPorts, when not nil, appends Lugdunum's two NAT words and makes the packet 24
+// bytes: <obfuscation TCP port 4><client TCP port 4>. Lugdunum sends that form to a
+// client that set both crypt support and SrvCapNatTraversal, and clients take the
+// 24-byte length as the sign that the NAT callback is really offered
+// (docs/lugdunum-nat-callback.local.md#op_idchange).
+func BuildIDChangePacket(id, tcpFlags uint32, primaryPort uint16, observedClientIPv4 uint32, natPorts *IDChangeNatPorts) (*Buffer, error) {
 	// eMule zeroes a reported IP that looks like a LowID and ASSERTs on it
 	// (ServerSocket.cpp:309-312), so send 0 rather than a value the client will
 	// reject anyway. HasHighID also covers the v6-only session, whose IPv4 is 0
@@ -370,6 +385,12 @@ func BuildIDChangePacket(id, tcpFlags uint32, primaryPort uint16, observedClient
 		{Type: TypeUint32, Value: tcpFlags},
 		{Type: TypeUint32, Value: uint32(primaryPort)},
 		{Type: TypeUint32, Value: observedClientIPv4},
+	}
+	if natPorts != nil {
+		pack = append(pack,
+			PacketItem{Type: TypeUint32, Value: uint32(natPorts.ObfuscationTCPPort)},
+			PacketItem{Type: TypeUint32, Value: uint32(natPorts.ClientTCPPort)},
+		)
 	}
 	packet, err := MakePacket(PrED2K, pack)
 	if err != nil {

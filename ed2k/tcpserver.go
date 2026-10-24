@@ -27,6 +27,9 @@ type TCPServerConfig struct {
 	// NatRendezvous advertises FlagNatRendezvous (0x40000): this server offers
 	// server-independent (cross-server / serverless) PR_NAT hole-punch rendezvous.
 	NatRendezvous bool
+	// NatCallback advertises FlagNatCallback (0x1000): this server speaks
+	// Lugdunum's UDP 0xA6 NAT callback. See docs/lugdunum-nat-callback.local.md.
+	NatCallback bool
 	// Gate holds the accept loop while closed; nil accepts from the start. See Gate.
 	Gate *Gate
 }
@@ -52,6 +55,9 @@ func BuildTCPFlags(cfg TCPServerConfig) uint32 {
 	}
 	if cfg.NatRendezvous {
 		flags += FlagNatRendezvous
+	}
+	if cfg.NatCallback {
+		flags += FlagNatCallback
 	}
 	return flags
 }
