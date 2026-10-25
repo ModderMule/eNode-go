@@ -432,8 +432,9 @@ to each other. It covers the cases a direct connect or a callback cannot:
   firewall. Neither can accept an inbound connection, so neither direct-reach nor the
   `0x26` callback (§7) works. This is the v6 analogue of LowID↔LowID.
 
-This protocol exists only in eNode-go today; no C++ client implements it yet. This
-section is the wire contract to implement against.
+This protocol exists only in eNode-go today. The full contract for servers and clients,
+with costs and a comparison to the other LowID↔LowID schemes, is now
+`pr-nat-rendezvous-spec.md`; this section keeps the IPv6 details.
 
 ### Framing and byte order
 
@@ -500,7 +501,7 @@ each being the source endpoint the server *observed* a register arrive from (it 
 trusts a client-supplied address; NAT rewrites the source, and only the server sees
 the translated public `ip:port`). A dual-stack client therefore **registers once per
 family**: send `OP_NAT_REGISTER` from your IPv4 socket *and* from your IPv6 socket,
-each carrying the same user hash. Each keeps its own freshness (TTL, default 30 s), so
+each carrying the same user hash. Each keeps its own freshness (TTL, default 90 s; keepalive every 60 s), so
 keepalive on every family you registered.
 
 A user hash is public, so the server does not take a REGISTER on its word:

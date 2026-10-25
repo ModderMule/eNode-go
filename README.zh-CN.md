@@ -163,7 +163,7 @@ natTraversal:
   port: 2004                 # NAT 穿透 UDP 端口
   ipv6: true                 # IPv6 打洞（双栈候选端点）；需 ipv6.enabled
   serverIndependent: true    # 跨服务器 / 无服务器 LowID↔LowID 汇合（默认开启）
-  registrationTTLSeconds: 30 # NAT 注册表项有效期（秒）
+  registrationTTLSeconds: 90 # NAT 注册表项有效期（秒）
 
 ipv6:                        # IPv6 双栈；整段省略即为仅 IPv4 行为
   enabled: true              # 接受 IPv6 登录并启用 v6 代码路径（默认 true）

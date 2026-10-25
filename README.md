@@ -208,7 +208,7 @@ natTraversal:
   port: 2004                 # NAT traversal UDP port
   ipv6: true                 # IPv6 hole-punching (dual-stack candidates); needs ipv6.enabled
   serverIndependent: true    # Cross-server / serverless LowID↔LowID rendezvous (default on)
-  registrationTTLSeconds: 30 # NAT registry TTL (seconds)
+  registrationTTLSeconds: 90 # NAT registry TTL (seconds)
 
 ipv6:                        # IPv6 dual-stack; omit the whole block for IPv4-only behaviour
   enabled: true              # Accept IPv6 logins and run the v6 code paths (default true)

@@ -34,7 +34,7 @@ func startNATServer(t *testing.T) *net.UDPAddr {
 				return // socket closed on cleanup
 			}
 			pkt := append([]byte(nil), buf[:n]...)
-			handler.HandlePacket(pkt, remote, conn, nil)
+			handler.HandlePacket(pkt, remote, conn)
 		}
 	}()
 	t.Cleanup(func() {
@@ -70,7 +70,7 @@ func startNATServerV6(t *testing.T) *net.UDPAddr {
 				return // socket closed on cleanup
 			}
 			pkt := append([]byte(nil), buf[:n]...)
-			handler.HandlePacket(pkt, remote, conn, nil)
+			handler.HandlePacket(pkt, remote, conn)
 		}
 	}()
 	t.Cleanup(func() {

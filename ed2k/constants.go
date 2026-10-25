@@ -130,6 +130,14 @@ const (
 	OpNatCallbackRequested    uint8 = 0x37
 )
 
+// OpNatWake is the PR_NAT TCP wake-up (docs/pr-nat-rendezvous-spec.md): server→client
+// on the eD2K session, payload <families 1> (NatWakeIPv4 | NatWakeIPv6). The client
+// answers with one PR_NAT REGISTER per family. Sent only to a session that set
+// SrvCapNatWake. 0x46 is free in eMule, eMuleQt, aMule, Lugdunum and ed2k-server; it
+// avoids 0x39-0x3d (old chat), 0x43 (OP_USERS_LIST) and ed2k-server's 0x60-0x63.
+// eMule and eMuleQt log an unknown server opcode and carry on.
+const OpNatWake uint8 = 0x46
+
 // OpCallbackReqdIPv6 is the IPv6 form of OP_CALLBACKREQUESTED (0x35): the server
 // sends it to a v6-capable, firewalled callback target so it can call back to a
 // requester that has no usable IPv4 but a reachable public IPv6. The payload is
@@ -416,8 +424,15 @@ const (
 	// natTraversal.serverIndependent is on. See docs/ipv6-client-implementation-spec.md §9.
 	// Also taken since: 0x80000 (FlagServerSearch below) and 0x100000 (ed2k-server
 	// 0.9.85 two-sided hole punch, server and client bit, andrey23127/ed2k-server#39).
-	// New eNode-go bits go above 0x100000.
+	// New eNode-go bits go above 0x200000 (FlagNatWake below).
 	FlagNatRendezvous uint32 = 0x40000
+	// FlagNatWake advertises the PR_NAT TCP wake-up (OpNatWake): this server wakes a
+	// logged-in PR_NAT target that has no registration, so a client that set
+	// SrvCapNatWake needs no standing PR_NAT keepalive. Set on the TCP and UDP words
+	// when natTraversal.enabled and natTraversal.tcpWake are on, also with
+	// serverIndependent off. 0x200000 was the first bit free everywhere (ed2k-server
+	// README bit table, 2026-10-25).
+	FlagNatWake uint32 = 0x200000
 	// FlagMetaSearch advertises that search answers may carry torrent/Usenet/web rows
 	// (FT_META_* tags, docs/meta-search.md). 0x10000 is the next clean bit above
 	// 0x8000; clients ignore unknown bits. Set on both the TCP and UDP word
@@ -447,6 +462,10 @@ const (
 	// callback. With natTraversal.lugdunumCallback on, a LowID client that sets it gets
 	// an odd LowID and may be named as a callback target; every other LowID is even.
 	SrvCapNatTraversal uint32 = 0x1000
+	// SrvCapNatWake is the client's CT_SERVER_FLAGS login bit for the PR_NAT wake-up:
+	// "wake me with OpNatWake, I keep no standing registration". Same value as
+	// FlagNatWake, as ed2k-server pairs its 0x100000 bits.
+	SrvCapNatWake uint32 = 0x200000
 )
 
 const (

@@ -425,3 +425,28 @@ func TestNatCallbackWindowExpires(t *testing.T) {
 		t.Fatalf("stale entry usable=%t kept=%t", fresh, kept)
 	}
 }
+
+// The budget is per requester, so LowIDs sharing one IPv4 (carrier-grade NAT) do not
+// use up each other's requests.
+func TestNatCallbackRateLimitPerRequester(t *testing.T) {
+	r := newNatRig(t, FlagNatCallback, true)
+	_, _, cUDP := natSession(t, r.rt, 7, true, 0x7c)
+	sent := func() int { return len(r.bTCP.written()) }
+
+	for i := 0; i < natCallbackPerRequesterPerMinute; i++ {
+		r.request(r.aUDP, 5, 3, false)
+	}
+	full := sent()
+	r.request(r.aUDP, 5, 3, false)
+	overBudget := sent()
+	r.request(cUDP, 5, 7, false)
+	other := sent()
+	t.Logf("input: %d requests from A(3), one more from A, one from C(7) on the same IP, output: B bytes %d, %d, %d",
+		natCallbackPerRequesterPerMinute, full, overBudget, other)
+	if full == 0 || overBudget != full {
+		t.Fatalf("A over budget still delivered: %d -> %d", full, overBudget)
+	}
+	if other == overBudget {
+		t.Fatal("C on the same IP was limited by A's budget")
+	}
+}

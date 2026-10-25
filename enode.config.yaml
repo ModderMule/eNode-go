@@ -678,12 +678,18 @@ natTraversal:
   port: 2004
   ipv6: true                 # IPv6 hole-punching (dual-stack candidates); needs ipv6.enabled
   serverIndependent: true    # cross-server / serverless LowID↔LowID rendezvous (default on)
-  registrationTTLSeconds: 30
+  registrationTTLSeconds: 90
   # Lugdunum eserver's LowID↔LowID callback (UDP 0xA6 → 0xA7/TCP 0x37), as spoken by
   # NeoLoader and eMuleQt. Advertises flag 0x1000 and gives odd LowIDs to clients
   # that set login bit 0x1000, even ones to everyone else. Independent of `enabled`
   # above; needs supportCrypt. Default on.
   lugdunumCallback: true
+  # PR_NAT TCP wake-up: advertise flag 0x200000 and, when a SYNC2 names a client
+  # logged in here that set login bit 0x200000 and has no registration, wake it with
+  # TCP OP_NAT_WAKE (0x46) so it registers on demand. Such clients then send no
+  # standing PR_NAT keepalive. Needs `enabled`. Default on.
+  # See docs/pr-nat-rendezvous-spec.md.
+  tcpWake: true
 
 # IPv6 dual-stack support. When enabled (the default), the TCP/UDP listeners bind
 # the dual-stack wildcard (an empty top-level `address`), the server accepts IPv6

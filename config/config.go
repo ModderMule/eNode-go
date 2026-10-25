@@ -330,6 +330,12 @@ type NATConfig struct {
 	// supportCrypt, since the request is only accepted obfuscated. *bool so an absent
 	// key defaults on. See docs/lugdunum-nat-callback.local.md.
 	LugdunumCallback *bool `yaml:"lugdunumCallback"`
+	// TCPWake enables the PR_NAT TCP wake-up: flag 0x200000, and a SYNC2 for a
+	// logged-in client that set login bit 0x200000 and has no registration wakes it
+	// with TCP OP_NAT_WAKE (0x46) instead of failing. Such clients then need no
+	// standing PR_NAT keepalive. Effective only with Enabled. *bool so an absent key
+	// defaults on. See docs/pr-nat-rendezvous-spec.md.
+	TCPWake *bool `yaml:"tcpWake"`
 }
 
 // IPv6OrDefault reports whether IPv6 hole-punching is enabled, defaulting to true
@@ -343,6 +349,10 @@ func (c NATConfig) ServerIndependentOrDefault() bool { return boolOrDefault(c.Se
 // LugdunumCallbackOrDefault reports whether the Lugdunum NAT callback is enabled,
 // defaulting to true (effective only with supportCrypt).
 func (c NATConfig) LugdunumCallbackOrDefault() bool { return boolOrDefault(c.LugdunumCallback, true) }
+
+// TCPWakeOrDefault reports whether the PR_NAT TCP wake-up is enabled, defaulting to
+// true (effective only with natTraversal.enabled).
+func (c NATConfig) TCPWakeOrDefault() bool { return boolOrDefault(c.TCPWake, true) }
 
 // IPv6Config controls dual-stack listening and IPv6 source publication. When
 // disabled the server behaves exactly as before: IPv4-only listeners, no IPv6
@@ -1061,7 +1071,7 @@ func setDefaults(cfg *Config) error {
 		cfg.NAT.Port = 2004
 	}
 	if cfg.NAT.RegistrationTTLSeconds <= 0 {
-		cfg.NAT.RegistrationTTLSeconds = 30
+		cfg.NAT.RegistrationTTLSeconds = 90
 	}
 	// Localhost-only by default: the dashboard is on out of the box but reachable
 	// only from the same machine until an operator sets a wider bindIP.

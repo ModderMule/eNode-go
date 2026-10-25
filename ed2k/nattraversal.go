@@ -14,8 +14,28 @@ import (
 
 const (
 	DefaultNATTraversalPort = 2004
-	defaultNATRegistryTTL   = 30 * time.Second
+	defaultNATRegistryTTL   = 90 * time.Second
 	defaultNATCleanupEvery  = 10 * time.Second
+	// natWakeMaxPending caps the targets waiting on a wake at once. Beyond it a SYNC2
+	// for an unregistered target fails at once, as without the wake.
+	natWakeMaxPending = 4096
+	// natWakeMaxWaiters caps the requesters waiting on one target.
+	natWakeMaxWaiters = 4
+)
+
+// natWakeTimeout is how long a SYNC2 waits for a woken target's REGISTER before the
+// requester gets OP_NAT_FAILED 0x01. ed2k-server's extension waits 3 s too. A variable
+// so tests can shorten it.
+var natWakeTimeout = 3 * time.Second
+
+// natWakeIPv6Grace is how long a wait that asked for IPv6 holds on after the target's
+// IPv4 REGISTER arrived first, so the pairing can still be IPv6. A variable for tests.
+var natWakeIPv6Grace = 500 * time.Millisecond
+
+// OP_NAT_WAKE family bits: which families the woken target should REGISTER over.
+const (
+	NatWakeIPv4 byte = 0x01
+	NatWakeIPv6 byte = 0x02
 )
 
 // OP_NAT_FAILED reason codes (payload byte 0).
@@ -34,7 +54,8 @@ type NATTraversalConfig struct {
 // natCandidate is one reachable endpoint of a client, per address family. A
 // dual-stack client accumulates both a v4 and a v6 candidate under one hash; each
 // keeps its own lastSeen so a stale candidate is expired before it can be handed to
-// a peer as a punch target.
+// a peer as a punch target. It is the snapshot form get() hands out; the registry
+// itself stores natSlot.
 type natCandidate struct {
 	addr     *net.UDPAddr
 	lastSeen time.Time
@@ -47,15 +68,66 @@ type natClientEntry struct {
 	version uint8
 }
 
+// natEndpoint is a UDP endpoint in a fixed-size, comparable form, so it can key the
+// keepalive index. The IP is in its 16-byte form: IPv4 as v4-mapped, which is also how
+// a dual-stack socket reports it, so both spellings of one IPv4 meet on the same key.
+type natEndpoint struct {
+	ip   [16]byte
+	port uint16
+}
+
+// natSlot is one stored candidate. seen is the handler tick (natTick) of the last
+// REGISTER or keepalive; 0 means the slot is empty. Values, not pointers, and a 32-bit
+// tick rather than a time.Time: an entry costs no allocations of its own, which pays
+// for the index.
+type natSlot struct {
+	ep   natEndpoint
+	seen uint32
+}
+
+type natStoredEntry struct {
+	v4, v6  natSlot
+	version uint8
+}
+
 type natOutbound struct {
 	to     *net.UDPAddr
 	packet []byte
+	// via, when set, is the socket this datagram leaves from instead of the one the
+	// current datagram arrived on: a SYNC to a requester that is waiting on a wake goes
+	// out through the socket its own SYNC2 came in on, which its NAT mapping expects.
+	via UDPReplyConn
+}
+
+// natWakeWaiter is one requester whose SYNC2 is waiting on a woken target.
+type natWakeWaiter struct {
+	hash    [16]byte
+	connAck [4]byte
+	remote  *net.UDPAddr
+	conn    UDPReplyConn
+}
+
+// natWakePending is a target that was sent OP_NAT_WAKE and has not registered yet.
+type natWakePending struct {
+	families byte
+	waiters  []natWakeWaiter
+	timer    *time.Timer
+	// graced is set once the target's IPv4 arrived and the timer was cut to
+	// natWakeIPv6Grace, waiting for its IPv6.
+	graced bool
 }
 
 type NATTraversalHandler struct {
-	mu                  sync.RWMutex
-	ttl                 time.Duration
-	entries             map[[16]byte]natClientEntry
+	mu  sync.RWMutex
+	ttl time.Duration
+	// epoch is when the handler was made; natSlot.seen counts milliseconds from it.
+	epoch   time.Time
+	entries map[[16]byte]natStoredEntry
+	// byAddr indexes every stored candidate by its endpoint, so a keepalive, which
+	// carries no hash, finds its entry in one lookup instead of a scan of the registry.
+	// Every write to a slot's endpoint goes through setSlot/clearSlot, which keep it
+	// in step.
+	byAddr              map[natEndpoint][16]byte
 	announceIPv4        uint32
 	announceIPv6        [16]byte
 	announcePort        uint16
@@ -75,6 +147,13 @@ type NATTraversalHandler struct {
 	// under a user hash (local=false when there is none). REGISTER for such a hash is
 	// accepted only from those addresses; see registerAllowed.
 	sessionAddrs func(hash [16]byte) (v4, v6 net.IP, local bool)
+	// sessionWake, when set, sends OP_NAT_WAKE to the session logged in here under a
+	// user hash, asking it to REGISTER over the given families. It reports false when
+	// there is no such session or it did not announce SrvCapNatWake.
+	sessionWake func(hash [16]byte, families byte) bool
+	// pending holds targets that were woken and have not registered yet. Only attempts
+	// in flight are in it, for at most natWakeTimeout each.
+	pending map[[16]byte]*natWakePending
 }
 
 // SetSessionAddrs registers the lookup registerAllowed binds a REGISTER to. Mirrors
@@ -119,7 +198,10 @@ func NewNATTraversalHandler(registrationTTL time.Duration) *NATTraversalHandler 
 	}
 	return &NATTraversalHandler{
 		ttl:                 registrationTTL,
-		entries:             map[[16]byte]natClientEntry{},
+		epoch:               time.Now(),
+		entries:             map[[16]byte]natStoredEntry{},
+		byAddr:              map[natEndpoint][16]byte{},
+		pending:             map[[16]byte]*natWakePending{},
 		announcePortByLocal: map[uint16]uint16{},
 		// Default to the historical open behaviour: pair any registered pair. main.go
 		// overrides this from natTraversal.serverIndependent.
@@ -240,7 +322,11 @@ func (h *NATTraversalHandler) rendezvousGate() (bool, func(hash [16]byte) bool) 
 	return h.serverIndependent, h.isLocalMember
 }
 
-func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt) {
+// HandlePacket answers one PR_NAT datagram. PR_NAT is plaintext on every listener:
+// the caller hands it the datagram as it arrived, before any eD2K deobfuscation, and
+// every reply and forward goes out in plaintext. An obfuscated reply could not be read
+// by the client, and a forward encrypted with the requester's key not by the target.
+func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, conn UDPReplyConn) {
 	if len(data) == 0 || remote == nil || conn == nil {
 		return
 	}
@@ -251,31 +337,7 @@ func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, con
 	if localAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok && localAddr != nil && localAddr.Port > 0 {
 		localPort = uint16(localAddr.Port)
 	}
-	var forwardSrc net.IP // resolved on first use; most datagrams only answer the sender
-	for _, out := range h.processPacket(data, remote, localPort) {
-		target := ""
-		if out.to != nil {
-			target = out.to.String()
-		}
-		if len(out.packet) > 0 && out.packet[0] == PrNat {
-			LogNATRaw("nat", "send", target, out.packet)
-		}
-		wire := out.packet
-		if crypt != nil && crypt.Status == CsEncrypting {
-			wire = crypt.Encrypt(out.packet)
-		}
-		if sameEndpoint(out.to, remote) {
-			_, _ = conn.WriteToUDP(wire, out.to)
-			continue
-		}
-		// A forward to the other peer of a pairing. The arrival address is the one
-		// the *sender* used, not the target, so send from the IPv6 we announce in the
-		// REGISTER ack — the address the target was told to keep talking to.
-		if forwardSrc == nil {
-			forwardSrc = h.announcedIPv6()
-		}
-		_, _ = WriteToUDPFrom(conn, wire, out.to, forwardSrc)
-	}
+	h.send(conn, remote, h.processPacketFrom(data, remote, localPort, conn))
 }
 
 func (h *NATTraversalHandler) StartCleanup(interval time.Duration) func() {
@@ -299,6 +361,13 @@ func (h *NATTraversalHandler) StartCleanup(interval time.Duration) func() {
 }
 
 func (h *NATTraversalHandler) processPacket(data []byte, remote *net.UDPAddr, localPort uint16) []natOutbound {
+	return h.processPacketFrom(data, remote, localPort, nil)
+}
+
+// processPacketFrom is processPacket with the socket the datagram arrived on, which a
+// SYNC2 waiting on a wake keeps for its later answer. conn may be nil (tests): the
+// answer to a wait that times out is then dropped.
+func (h *NATTraversalHandler) processPacketFrom(data []byte, remote *net.UDPAddr, localPort uint16, conn UDPReplyConn) []natOutbound {
 	if len(data) == 0 || remote == nil {
 		return nil
 	}
@@ -364,7 +433,7 @@ func (h *NATTraversalHandler) processPacket(data []byte, remote *net.UDPAddr, lo
 		}
 		return nil
 	case OpNatSync2:
-		return h.handleSync2(remote, payload)
+		return h.handleSync2(remote, payload, conn)
 	default:
 		return nil
 	}
@@ -386,6 +455,8 @@ func (h *NATTraversalHandler) handleRegister(remote *net.UDPAddr, payload []byte
 		return nil
 	}
 	h.upsert(hash, remote, version)
+	// A woken target's REGISTER completes the SYNC2s waiting on it, after the ack.
+	paired := h.completeWake(hash, remote)
 
 	h.mu.RLock()
 	port := h.announcePort
@@ -403,29 +474,30 @@ func (h *NATTraversalHandler) handleRegister(remote *net.UDPAddr, payload []byte
 		resp := make([]byte, 18)
 		binary.BigEndian.PutUint16(resp[0:2], port)
 		copy(resp[2:18], ipv6[:])
-		return []natOutbound{{
+		return append([]natOutbound{{
 			to:     cloneUDPAddr(remote),
 			packet: encodeNATPacket(OpNatRegisterIPv6, resp),
-		}}
+		}}, paired...)
 	}
 
 	resp := make([]byte, 6)
 	binary.BigEndian.PutUint16(resp[0:2], port)
 	binary.BigEndian.PutUint32(resp[2:6], ipv4)
-	return []natOutbound{{
+	return append([]natOutbound{{
 		to:     cloneUDPAddr(remote),
 		packet: encodeNATPacket(OpNatRegister, resp),
-	}}
+	}}, paired...)
 }
 
-func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte) []natOutbound {
+func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte, conn UDPReplyConn) []natOutbound {
 	if len(payload) < 36 {
 		return nil
 	}
 	var srcHash [16]byte
 	var dstHash [16]byte
+	var connAck [4]byte
 	copy(srcHash[:], payload[0:16])
-	connAck := append([]byte(nil), payload[16:20]...)
+	copy(connAck[:], payload[16:20])
 	copy(dstHash[:], payload[20:36])
 
 	// Auto-register the requester's candidate for the family this SYNC2 arrived on
@@ -450,6 +522,11 @@ func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte) [
 		int(h.ttl/time.Second),
 	)
 	if !dstOK {
+		// No registration: a target logged in here that asked for it is woken over
+		// TCP instead, and the answer comes when it registers (or after natWakeTimeout).
+		if h.wakeTarget(src, dstHash, connAck, remote, conn) {
+			return nil
+		}
 		return []natOutbound{h.natFailed(remote, dstHash, natFailReasonNotRegistered)}
 	}
 
@@ -469,8 +546,20 @@ func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte) [
 		}
 	}
 
-	// Pair on a family both peers can reach, preferring IPv6. Both endpoints must
-	// share a family — the two firewalled peers punch directly at each other.
+	if out := pairOutbound(src, dst, connAck[:], v6Enabled); out != nil {
+		return out
+	}
+	// Registered, but not in a family the requester has: a wake asks for the rest.
+	if h.wakeTarget(src, dstHash, connAck, remote, conn) {
+		return nil
+	}
+	return []natOutbound{h.natFailed(remote, dstHash, natFailReasonNoCommonFamily)}
+}
+
+// pairOutbound builds the two SYNCs that introduce src and dst on a family both have,
+// preferring IPv6, or returns nil when they share none. Both endpoints must share a
+// family: the two firewalled peers punch directly at each other.
+func pairOutbound(src, dst natClientEntry, connAck []byte, v6Enabled bool) []natOutbound {
 	switch {
 	case v6Enabled && src.v6 != nil && dst.v6 != nil:
 		return []natOutbound{
@@ -495,7 +584,7 @@ func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte) [
 			},
 		}
 	default:
-		return []natOutbound{h.natFailed(remote, dstHash, natFailReasonNoCommonFamily)}
+		return nil
 	}
 }
 
@@ -604,47 +693,44 @@ func (h *NATTraversalHandler) upsert(hash [16]byte, remote *net.UDPAddr, version
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	entry := h.entries[hash] // zero value when absent; preserves the other family slot
-	entry.hash = hash
 	if version > 0 {
 		entry.version = version
 	}
-	cand := &natCandidate{addr: cloneUDPAddr(remote), lastSeen: time.Now()}
-	if remoteIsIPv6(remote) {
-		entry.v6 = cand
-	} else {
-		entry.v4 = cand
-	}
+	h.setSlotLocked(hash, &entry, remoteIsIPv6(remote), natEndpointOf(remote), h.tick())
 	h.entries[hash] = entry
 }
 
 // touchByAddr refreshes the candidate matching a source address and reports whether one
-// was found, along with the user hash it belongs to.
+// was found, along with the user hash it belongs to. One index lookup: a keepalive used
+// to scan the whole registry under the write lock, which grew with the square of the
+// number of registered clients.
 //
 // The hash is returned so a keepalive can also count as liveness for that user's eD2K TCP
 // session — see SetSessionTouch. Without it the caller has proof the client is alive but
 // no way to say which client.
 func (h *NATTraversalHandler) touchByAddr(remote *net.UDPAddr) (hash [16]byte, matched bool) {
+	ep := natEndpointOf(remote)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	now := time.Now()
-	for _, entry := range h.entries {
-		// entry.v4/v6 are pointers shared with the map, so writing through them
-		// refreshes the stored candidate directly.
-		if entry.v4 != nil && sameEndpoint(entry.v4.addr, remote) {
-			entry.v4.lastSeen = now
-			return entry.hash, true
-		}
-		if entry.v6 != nil && sameEndpoint(entry.v6.addr, remote) {
-			entry.v6.lastSeen = now
-			return entry.hash, true
-		}
+	owner, ok := h.byAddr[ep]
+	if !ok {
+		return hash, false
 	}
-	return hash, false
+	entry, ok := h.entries[owner]
+	if !ok {
+		return hash, false
+	}
+	slot := entry.slot(remoteIsIPv6(remote))
+	if slot.seen == 0 || slot.ep != ep {
+		return hash, false
+	}
+	slot.seen = h.tick()
+	h.entries[owner] = entry
+	return owner, true
 }
 
-// get returns a deep copy of the entry so the caller holds a stable snapshot after
-// the lock is released — the map keeps live candidate pointers that touchByAddr and
-// upsert mutate, and an alias would let a caller observe those changes.
+// get returns a snapshot of the entry, built fresh, so the caller holds stable values
+// after the lock is released.
 func (h *NATTraversalHandler) get(hash [16]byte) (natClientEntry, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -652,34 +738,21 @@ func (h *NATTraversalHandler) get(hash [16]byte) (natClientEntry, bool) {
 	if !ok {
 		return natClientEntry{}, false
 	}
-	return v.clone(), true
-}
-
-func (e natClientEntry) clone() natClientEntry {
-	out := natClientEntry{hash: e.hash, version: e.version}
-	if e.v4 != nil {
-		c := natCandidate{addr: cloneUDPAddr(e.v4.addr), lastSeen: e.v4.lastSeen}
-		out.v4 = &c
-	}
-	if e.v6 != nil {
-		c := natCandidate{addr: cloneUDPAddr(e.v6.addr), lastSeen: e.v6.lastSeen}
-		out.v6 = &c
-	}
-	return out
+	return v.snapshot(hash, h.tick(), time.Now()), true
 }
 
 func (h *NATTraversalHandler) cleanup() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	cutoff := time.Now().Add(-h.ttl)
+	now := h.tick()
 	for k, entry := range h.entries {
-		if entry.v4 != nil && entry.v4.lastSeen.Before(cutoff) {
-			entry.v4 = nil
+		if entry.v4.seen != 0 && natAge(now, entry.v4.seen) > h.ttl {
+			h.clearSlotLocked(k, &entry, false)
 		}
-		if entry.v6 != nil && entry.v6.lastSeen.Before(cutoff) {
-			entry.v6 = nil
+		if entry.v6.seen != 0 && natAge(now, entry.v6.seen) > h.ttl {
+			h.clearSlotLocked(k, &entry, true)
 		}
-		if entry.v4 == nil && entry.v6 == nil {
+		if entry.v4.seen == 0 && entry.v6.seen == 0 {
 			delete(h.entries, k)
 		} else {
 			h.entries[k] = entry
@@ -703,10 +776,10 @@ func (h *NATTraversalHandler) candidateCount(hash [16]byte) int {
 		return 0
 	}
 	n := 0
-	if entry.v4 != nil {
+	if entry.v4.seen != 0 {
 		n++
 	}
-	if entry.v6 != nil {
+	if entry.v6.seen != 0 {
 		n++
 	}
 	return n
@@ -750,7 +823,8 @@ func (h *NATTraversalHandler) registrySummary(limit int) string {
 		if i > 0 {
 			b.WriteString("; ")
 		}
-		b.WriteString(fmt.Sprintf("hash=%x v4=%s v6=%s", hash[:], formatCandidate(entry.v4), formatCandidate(entry.v6)))
+		snap := entry.snapshot(hash, h.tick(), time.Now())
+		b.WriteString(fmt.Sprintf("hash=%x v4=%s v6=%s", hash[:], formatCandidate(snap.v4), formatCandidate(snap.v6)))
 		i++
 		if i >= limit {
 			if len(h.entries) > limit {
@@ -925,4 +999,130 @@ func formatNATPayload(opcode uint8, payload []byte) string {
 
 func uint32ToIPv4BE(v uint32) string {
 	return fmt.Sprintf("%d.%d.%d.%d", byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
+
+// natEndpointOf converts a UDP address to its index key. The zone is dropped: a
+// rendezvous candidate is a public address, never a link-local one.
+func natEndpointOf(addr *net.UDPAddr) natEndpoint {
+	var ep natEndpoint
+	if addr == nil {
+		return ep
+	}
+	if ip16 := addr.IP.To16(); ip16 != nil {
+		copy(ep.ip[:], ip16)
+	}
+	ep.port = uint16(addr.Port)
+	return ep
+}
+
+// udpAddr converts the key back, with an IPv4 in its 4-byte form.
+func (ep natEndpoint) udpAddr() *net.UDPAddr {
+	ip := net.IP(append([]byte(nil), ep.ip[:]...))
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return &net.UDPAddr{IP: ip, Port: int(ep.port)}
+}
+
+// slot returns the entry's slot for one family.
+func (e *natStoredEntry) slot(v6 bool) *natSlot {
+	if v6 {
+		return &e.v6
+	}
+	return &e.v4
+}
+
+// snapshot builds the natClientEntry form handed out by get. nowTick and now are the
+// same instant as a tick and as a time.
+func (e natStoredEntry) snapshot(hash [16]byte, nowTick uint32, now time.Time) natClientEntry {
+	out := natClientEntry{hash: hash, version: e.version}
+	if e.v4.seen != 0 {
+		out.v4 = &natCandidate{addr: e.v4.ep.udpAddr(), lastSeen: now.Add(-natAge(nowTick, e.v4.seen))}
+	}
+	if e.v6.seen != 0 {
+		out.v6 = &natCandidate{addr: e.v6.ep.udpAddr(), lastSeen: now.Add(-natAge(nowTick, e.v6.seen))}
+	}
+	return out
+}
+
+// tick is the current time as natSlot.seen counts it: milliseconds since the handler
+// was made, never 0 (the empty slot). It wraps after 49 days; natAge is modular, and a
+// candidate lives one TTL, so the wrap is harmless.
+func (h *NATTraversalHandler) tick() uint32 {
+	t := uint32(time.Since(h.epoch) / time.Millisecond)
+	if t == 0 {
+		t = 1
+	}
+	return t
+}
+
+// natAge is how long ago seen was, given the current tick.
+func natAge(now, seen uint32) time.Duration {
+	return time.Duration(now-seen) * time.Millisecond
+}
+
+// setSlotLocked stores ep as hash's candidate for one family and keeps byAddr in step.
+// The caller holds h.mu and writes entry back to h.entries.
+//
+// An endpoint is one socket, so it belongs to one hash. When another hash holds it,
+// that older registration is stale (a client that restarted with a new hash on the same
+// port) and its slot is cleared: otherwise its keepalives would refresh the wrong entry.
+func (h *NATTraversalHandler) setSlotLocked(hash [16]byte, entry *natStoredEntry, v6 bool, ep natEndpoint, now uint32) {
+	slot := entry.slot(v6)
+	if slot.seen != 0 && slot.ep != ep && h.byAddr[slot.ep] == hash {
+		delete(h.byAddr, slot.ep)
+	}
+	if owner, ok := h.byAddr[ep]; ok && owner != hash {
+		if other, ok := h.entries[owner]; ok {
+			if os := other.slot(v6); os.ep == ep {
+				*os = natSlot{}
+			}
+			if other.v4.seen == 0 && other.v6.seen == 0 {
+				delete(h.entries, owner)
+			} else {
+				h.entries[owner] = other
+			}
+		}
+	}
+	slot.ep = ep
+	slot.seen = now
+	h.byAddr[ep] = hash
+}
+
+// clearSlotLocked empties one family slot of hash's entry and drops its index entry.
+// The caller holds h.mu and writes entry back.
+func (h *NATTraversalHandler) clearSlotLocked(hash [16]byte, entry *natStoredEntry, v6 bool) {
+	slot := entry.slot(v6)
+	if h.byAddr[slot.ep] == hash {
+		delete(h.byAddr, slot.ep)
+	}
+	*slot = natSlot{}
+}
+
+// send writes processPacket's answers, all in plaintext. A datagram with via set
+// leaves from that socket; one back to the sender from the socket it arrived on. Any
+// other is a forward to the second peer of a pairing: the arrival address is the one
+// the *sender* used, not the target, so it goes out from the IPv6 we announce in the
+// REGISTER ack, the address the target was told to keep talking to.
+func (h *NATTraversalHandler) send(conn UDPReplyConn, remote *net.UDPAddr, outs []natOutbound) {
+	var forwardSrc net.IP // resolved on first use; most datagrams only answer the sender
+	for _, out := range outs {
+		if out.to == nil || len(out.packet) == 0 {
+			continue
+		}
+		if out.packet[0] == PrNat {
+			LogNATRaw("nat", "send", out.to.String(), out.packet)
+		}
+		switch {
+		case out.via != nil:
+			_, _ = out.via.WriteToUDP(out.packet, out.to)
+		case sameEndpoint(out.to, remote):
+			_, _ = conn.WriteToUDP(out.packet, out.to)
+		default:
+			if forwardSrc == nil {
+				forwardSrc = h.announcedIPv6()
+			}
+			_, _ = WriteToUDPFrom(conn, out.packet, out.to, forwardSrc)
+		}
+	}
 }

@@ -351,6 +351,7 @@ func (s *ServerRuntime) SetNATHandler(handler *NATTraversalHandler) {
 	// main.go so the wiring cannot be forgotten when a NAT handler is attached.
 	handler.SetSessionTouch(s.TouchSessionByHash)
 	handler.SetSessionAddrs(s.sessionAddrs)
+	handler.SetSessionWake(s.wakeNatSession)
 }
 
 // sessionAddrs reports the addresses of the session logged in under hash: the
@@ -526,6 +527,15 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 			logging.Debugf("udp datagram dropped remote=%s len=%d reason=%s", remote, len(data), reason)
 			return
 		}
+		// PR_NAT is plaintext on every listener, so it is taken on the raw bytes, before
+		// any deobfuscation, and answered in plaintext. It used to be dispatched after
+		// Decrypt with the listener's crypt, which on the obfuscated port encrypted the
+		// reply (unreadable to the client) and the forward to the other peer (with the
+		// requester's key). A datagram that only decrypts to 0xf1 is not PR_NAT.
+		if s.NAT != nil && (data[0] == PrNat || len(data) == 1) {
+			s.NAT.HandlePacket(data, remote, conn)
+			return
+		}
 		// The obfuscation key is per-client, derived from the source IP (see
 		// deriveUDPKey). Built per datagram, not once per listener: the handler
 		// runs concurrently across a worker pool (udpserver.go), so a shared crypt
@@ -554,14 +564,6 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 			data = s.decryptPeerReply(data, remote.IP)
 		}
 		obfuscated := enableCrypt && !arrivedPlaintext && len(data) > 0 && data[0] == PrED2K
-		if s.NAT != nil {
-			if data[0] == PrNat || len(data) == 1 {
-				s.NAT.HandlePacket(data, remote, conn, crypt)
-				if data[0] == PrNat {
-					return
-				}
-			}
-		}
 		LogUDPRaw(module, "recv", remote.String(), data)
 		b := NewBufferFromBytes(data)
 		protocol, err := b.GetUInt8()
@@ -736,6 +738,11 @@ type tcpClient struct {
 	// written and read under infoMu. It sits in the padding after metaCapable, so it
 	// adds nothing to the size of a session.
 	nattCapable bool
+	// natWakeCapable is set at login when the PR_NAT wake-up is on and the client sent
+	// SrvCapNatWake (0x200000): a SYNC2 for it may wake it with OpNatWake. Read by a
+	// UDP worker through sessionsByHash, so written and read under infoMu. Also in the
+	// padding, so a session stays the same size.
+	natWakeCapable bool
 	// ed3kID is the ed3k node ID the client sent as CT_ED3K at login, or nil. Read
 	// and written under infoMu.
 	ed3kID []byte
@@ -1286,6 +1293,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	c.info.CryptOptions = cryptOptionsFromLoginFlags(loginFlags(req.Tags))
 	c.metaCapable = loginFlags(req.Tags)&SrvCapMetaSearch != 0
 	c.nattCapable = c.server.natCallbackEnabled() && loginFlags(req.Tags)&SrvCapNatTraversal != 0
+	c.natWakeCapable = c.server.natWakeEnabled() && loginFlags(req.Tags)&SrvCapNatWake != 0
 	c.nick, c.software = loginNick(req.Tags), loginSoftware(req.Tags)
 	c.ed3kID = loginEd3k(req.Tags)
 	c.info.IPv6 = v6Bytes

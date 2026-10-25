@@ -264,6 +264,12 @@ func serverListenConfigs(cfg config.Config) (ed2k.TCPServerConfig, ed2k.UDPServe
 	// The Lugdunum NAT callback request is accepted only obfuscated, and only a
 	// LowID can be its target, so it is offered only when both are possible.
 	natCallback := cfg.NAT.LugdunumCallbackOrDefault() && cfg.SupportCrypt && cfg.TCP.AllowLowIDs
+	// Server-independent (cross-server / serverless) PR_NAT rendezvous is effective
+	// only when the NAT service itself is enabled. It drives the FlagNatRendezvous
+	// advertisement and, with the wake, the OP_SERVERIDENT NAT-port tag.
+	natRendezvous := cfg.NAT.Enabled && cfg.NAT.ServerIndependentOrDefault()
+	// The TCP wake-up pairs clients logged in here, so it needs only the service.
+	natWake := cfg.NAT.Enabled && cfg.NAT.TCPWakeOrDefault()
 	tcpCfg := ed2k.TCPServerConfig{
 		Address:        cfg.Address,
 		Port:           cfg.TCP.Port,
@@ -274,20 +280,20 @@ func serverListenConfigs(cfg config.Config) (ed2k.TCPServerConfig, ed2k.UDPServe
 		SupportCrypt:   cfg.SupportCrypt,
 		IPInLogin:      cfg.IPInLogin,
 		DualStack:      dualStack,
-		// Server-independent (cross-server / serverless) PR_NAT rendezvous is effective
-		// only when the NAT service itself is enabled. It drives both the
-		// FlagNatRendezvous advertisement and the OP_SERVERIDENT NAT-port tag.
-		NatRendezvous: cfg.NAT.Enabled && cfg.NAT.ServerIndependentOrDefault(),
-		NatCallback:   natCallback,
+		NatRendezvous:  natRendezvous,
+		NatCallback:    natCallback,
+		NatWake:        natWake,
 	}
 	udpCfg := ed2k.UDPServerConfig{
-		Address:      cfg.Address,
-		Port:         cfg.UDP.Port,
-		GetSources:   cfg.UDP.GetSources,
-		GetFiles:     cfg.UDP.GetFiles,
-		SupportCrypt: cfg.SupportCrypt,
-		DualStack:    dualStack,
-		NatCallback:  natCallback,
+		Address:       cfg.Address,
+		Port:          cfg.UDP.Port,
+		GetSources:    cfg.UDP.GetSources,
+		GetFiles:      cfg.UDP.GetFiles,
+		SupportCrypt:  cfg.SupportCrypt,
+		DualStack:     dualStack,
+		NatCallback:   natCallback,
+		NatRendezvous: natRendezvous,
+		NatWake:       natWake,
 	}
 	return tcpCfg, udpCfg
 }
@@ -307,7 +313,9 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 	// description reply's tag is the whole advertisement. See the constant.
 	dualStack := cfg.IPv6.EnabledOrDefault()
 	natRendezvousPort := uint16(0)
-	if tcpCfg.NatRendezvous {
+	// The port is needed by every client that may use PR_NAT here: with
+	// server-independent rendezvous, or to answer a wake.
+	if tcpCfg.NatRendezvous || tcpCfg.NatWake {
 		natRendezvousPort = cfg.NAT.Port
 	}
 	tcp := ed2k.TCPRuntimeConfig{

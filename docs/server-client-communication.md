@@ -39,6 +39,7 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_CALLBACKREQUESTED` | `0x35` | Server -> LowID client | Notify LowID client to connect back. |
 | `OP_CALLBACKFAILED` | `0x36` | Server -> Client | Callback target unavailable/failure. |
 | `OP_NAT_CALLBACKREQUESTED` | `0x37` | Server -> LowID client | Lugdunum NAT callback notice, TCP fallback for UDP `0xa7`; see [`lugdunum-nat-callback.local.md`](lugdunum-nat-callback.local.md#enode-go). |
+| `OP_NAT_WAKE` | `0x46` | Server -> Client | PR_NAT wake-up: `families(uint8)` (`0x01` IPv4, `0x02` IPv6). Sent to a session that set login bit `0x200000` when a SYNC2 names it and it has no registration; the client answers with one PR_NAT `REGISTER` per family. See [`pr-nat-rendezvous-spec.md`](pr-nat-rendezvous-spec.md#waking-a-local-target). |
 | `OP_GETSOURCES_IPV6` | `0x24` | Client -> Server | IPv6 tag-block source query (opt-in); payload as `OP_GETSOURCES2`. |
 | `OP_FOUNDSOURCES_IPV6` | `0x25` | Server -> Client | IPv6 tag-block source response (per source: `id+port+tagCount+tags`). |
 | `OP_CALLBACKREQUESTED_IPV6` | `0x26` | Server -> v6-capable client | IPv6 form of `OP_CALLBACKREQUESTED`; sent when the requester has no usable IPv4 but a reachable public IPv6. |
@@ -395,10 +396,13 @@ endpoint fields are **big-endian**. IPv6 hole-punching is gated by `natTraversal
 the family is IPv4-only. The registry is keyed by user hash and is **login-independent**:
 `natTraversal.serverIndependent` (default on) makes the server pair two registered
 clients regardless of which eD2K server (if any) they are on — cross-server / serverless
-LowID↔LowID — and advertise it via `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` plus a
-`ST_NAT_PORT (0x9d)` uint16 tag in `OP_SERVERIDENT`; when off, pairing is restricted to
-clients logged into this server (`OP_NAT_FAILED` reason `0x03`). Full protocol + byte-exact
-layouts: [`ipv6-client-implementation-spec.md`](ipv6-client-implementation-spec.md) §9.
+LowID↔LowID — and advertise it via `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` in the TCP and
+UDP flags plus a `ST_NAT_PORT (0x9d)` uint16 tag in `OP_SERVERIDENT`; when off, pairing is
+restricted to clients logged into this server (`OP_NAT_FAILED` reason `0x03`).
+`natTraversal.tcpWake` (default on) adds flag `0x200000` and the TCP wake-up
+(`OP_NAT_WAKE`, above), so clients logged in here keep no standing registration. PR_NAT is
+plaintext on every port, the obfuscated one included. Full protocol + byte-exact layouts:
+[`pr-nat-rendezvous-spec.md`](pr-nat-rendezvous-spec.md).
 
 | OP constant | Hex | Direction | Meaning |
 |---|---:|---|---|

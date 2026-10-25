@@ -3,6 +3,7 @@ package ed2k
 import (
 	"encoding/binary"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -28,9 +29,11 @@ import (
 // (and the doc) use 19 s.
 const natCallbackWindow = 19 * time.Second
 
-// natCallbackPerIPPerMinute caps 0xa6 requests per source address. eMuleQt sends at
-// most 9 per attempt, every 5 s; ed2k-server allows a burst of 10, then 1/s.
-const natCallbackPerIPPerMinute = 60
+// natCallbackPerRequesterPerMinute caps 0xa6 requests per requester LowID. eMuleQt
+// sends at most 9 per attempt, every 5 s; ed2k-server allows a burst of 10, then 1/s.
+// Keyed by requester, not by address: behind a carrier-grade NAT many LowIDs share one
+// IPv4, and a per-address budget would let a few of them silence the rest.
+const natCallbackPerRequesterPerMinute = 60
 
 // natCallbackNoticeFlagHash is OR-ed into the notice's crypt byte when the
 // requester's user hash follows.
@@ -133,17 +136,19 @@ func (s *ServerRuntime) udpNatCallbackRequest(b *Buffer, remote *net.UDPAddr, co
 	if err != nil {
 		return
 	}
-	if !s.natCallback.allow(addressKey(remote.IP)) {
-		s.blocks.rateLimited.Add(1)
-		logging.Debugf("nat callback rate limited remote=%s", remote)
-		return
-	}
-
 	requester, ok := s.natCallbackPeer(requesterID)
 	if !ok || requester.ipv4 != srcIPv4 {
-		// Stricter than eserver, which takes the requester's word for its ID: a
-		// client may only request in its own name, from its own address.
+		// The requester ID must be a LowID session logged in from this IPv4. That
+		// binds the ID to an address, not to one client: clients behind the same
+		// NAT can still request in each other's name, as on eserver.
 		logging.Debugf("nat callback requester unknown remote=%s requester=%d", remote, requesterID)
+		return
+	}
+	// After the requester check, so the limiter only ever holds buckets for real
+	// sessions and a flood of made-up IDs cannot grow it.
+	if !s.natCallback.allow(requesterID) {
+		s.blocks.rateLimited.Add(1)
+		logging.Debugf("nat callback rate limited remote=%s requester=%d", remote, requesterID)
 		return
 	}
 	now := time.Now()
@@ -284,14 +289,14 @@ func (c *tcpClient) idChangeNatPorts(id uint32) *IDChangeNatPorts {
 	return &IDChangeNatPorts{ObfuscationTCPPort: obf, ClientTCPPort: clientPort}
 }
 
-func (n *natCallbackState) allow(key string) bool {
+func (n *natCallbackState) allow(requesterID uint32) bool {
 	n.mu.Lock()
 	if n.limiter == nil {
-		n.limiter = ratelimit.New(natCallbackPerIPPerMinute)
+		n.limiter = ratelimit.New(natCallbackPerRequesterPerMinute)
 	}
 	l := n.limiter
 	n.mu.Unlock()
-	return l.Allow(key)
+	return l.Allow(strconv.FormatUint(uint64(requesterID), 10))
 }
 
 // remember records an accepted request. Old entries are swept here, at most once

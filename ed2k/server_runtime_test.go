@@ -1,6 +1,7 @@
 package ed2k
 
 import (
+	"bytes"
 	"encoding/binary"
 	"math"
 	"net"
@@ -49,7 +50,10 @@ func TestNewServerRuntimeSetsDefaultServerStatusInterval(t *testing.T) {
 	}
 }
 
-func TestUDPObfuscatedNATRegisterReplyIsEncrypted(t *testing.T) {
+// PR_NAT is plaintext on every listener: an obfuscated REGISTER on the obfuscated
+// port is not PR_NAT and gets no answer. It used to be answered obfuscated, which no
+// client reads (eMuleQt sends PR_NAT raw).
+func TestUDPObfuscatedNATRegisterIsIgnored(t *testing.T) {
 	serverKey := uint32(0x22334455)
 	rt := NewServerRuntime(TCPRuntimeConfig{}, UDPRuntimeConfig{UDPServerKey: serverKey}, storage.NewMemoryEngine())
 	nat := NewNATTraversalHandler(time.Minute)
@@ -61,7 +65,6 @@ func TestUDPObfuscatedNATRegisterReplyIsEncrypted(t *testing.T) {
 		t.Fatalf("listen server udp: %v", err)
 	}
 	defer serverConn.Close()
-
 	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		t.Fatalf("listen client udp: %v", err)
@@ -73,38 +76,76 @@ func TestUDPObfuscatedNATRegisterReplyIsEncrypted(t *testing.T) {
 		hash[i] = byte(i + 1)
 	}
 	req := encodeNATPacket(OpNatRegister, hash[:])
-	// The client obfuscates with the per-client key derived from its own IP, which
-	// is what the obf listener recomputes from the datagram's source IP.
 	crypt := NewUDPCrypt(true, deriveUDPKey(LegacyUDPSecret(serverKey), net.IPv4(127, 0, 0, 1)))
 	wire := buildObfuscatedClientUDP(crypt, req, 0x3344)
-
 	remote := clientConn.LocalAddr().(*net.UDPAddr)
+	t.Logf("obfuscated REGISTER %d bytes from %s", len(wire), remote)
 	handler(wire, remote, serverConn)
 
-	_ = clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = clientConn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
 	buf := make([]byte, 2048)
-	n, _, err := clientConn.ReadFromUDP(buf)
-	if err != nil {
-		t.Fatalf("read nat register ack: %v", err)
+	if n, _, err := clientConn.ReadFromUDP(buf); err == nil {
+		t.Fatalf("obfuscated REGISTER answered with %d bytes %x", n, buf[:n])
 	}
-	gotWire := append([]byte(nil), buf[:n]...)
-	if len(gotWire) == 0 {
-		t.Fatalf("empty nat register ack")
+	if got := nat.entryCount(); got != 0 {
+		t.Fatalf("obfuscated REGISTER stored %d entries, want 0", got)
 	}
-	if gotWire[0] == PrNat {
-		t.Fatalf("nat register ack should be obfuscated on udp-obfuscated listener")
-	}
+	t.Logf("no answer, registry size %d", nat.entryCount())
+}
 
-	plain, ok := decryptObfuscatedServerUDP(crypt, gotWire)
-	if !ok {
-		t.Fatalf("failed to decrypt obfuscated nat register ack")
+// A plaintext REGISTER and SYNC2 on the obfuscated port are answered in plaintext,
+// and so is the forward to the other peer.
+func TestUDPObfuscatedListenerAnswersNATInPlaintext(t *testing.T) {
+	rt := NewServerRuntime(TCPRuntimeConfig{}, UDPRuntimeConfig{UDPServerKey: 0x22334455}, storage.NewMemoryEngine())
+	nat := NewNATTraversalHandler(time.Minute)
+	rt.SetNATHandler(nat)
+	handler := rt.UDPHandler(true)
+
+	serverConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen server udp: %v", err)
 	}
-	opcode, _, ok := decodeNATPacket(plain)
-	if !ok {
-		t.Fatalf("decrypted ack is not a NAT packet")
+	defer serverConn.Close()
+	peerA, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen peer A: %v", err)
 	}
-	if opcode != OpNatRegister {
-		t.Fatalf("opcode=0x%x want=0x%x", opcode, OpNatRegister)
+	defer peerA.Close()
+	peerB, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen peer B: %v", err)
+	}
+	defer peerB.Close()
+
+	hashA := bytes.Repeat([]byte{0xa1}, 16)
+	hashB := bytes.Repeat([]byte{0xb2}, 16)
+	read := func(c *net.UDPConn, what string) []byte {
+		t.Helper()
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 2048)
+		n, _, err := c.ReadFromUDP(buf)
+		if err != nil {
+			t.Fatalf("read %s: %v", what, err)
+		}
+		got := append([]byte(nil), buf[:n]...)
+		t.Logf("%s: %x", what, got)
+		if got[0] != PrNat {
+			t.Fatalf("%s is not plaintext PR_NAT: first byte 0x%02x", what, got[0])
+		}
+		return got
+	}
+	handler(encodeNATPacket(OpNatRegister, hashA), peerA.LocalAddr().(*net.UDPAddr), serverConn)
+	read(peerA, "ack A")
+	handler(encodeNATPacket(OpNatRegister, hashB), peerB.LocalAddr().(*net.UDPAddr), serverConn)
+	read(peerB, "ack B")
+
+	sync2 := append(append(append([]byte(nil), hashA...), 1, 0, 0, 0), hashB...)
+	handler(encodeNATPacket(OpNatSync2, sync2), peerA.LocalAddr().(*net.UDPAddr), serverConn)
+	if op, _, _ := decodeNATPacket(read(peerA, "SYNC to requester")); op != OpNatSync {
+		t.Fatalf("requester opcode 0x%02x, want SYNC", op)
+	}
+	if op, _, _ := decodeNATPacket(read(peerB, "SYNC forwarded to target")); op != OpNatSync {
+		t.Fatalf("target opcode 0x%02x, want SYNC", op)
 	}
 }
 
