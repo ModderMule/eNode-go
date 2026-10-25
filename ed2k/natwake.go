@@ -187,23 +187,13 @@ func (h *NATTraversalHandler) expireWake(hash [16]byte, p *natWakePending) {
 	}
 	delete(h.pending, hash)
 	h.mu.Unlock()
-	var forwardSrc net.IP
-	for _, out := range h.wakeOutbound(hash, p) {
-		conn := out.via
-		if conn == nil {
-			// The SYNC to the target: no datagram of its own to answer, so it leaves
-			// from a requester's socket and the IPv6 we announce.
-			conn = p.waiters[0].conn
-			if forwardSrc == nil {
-				forwardSrc = h.announcedIPv6()
-			}
-		}
-		if conn == nil {
-			continue
-		}
-		LogNATRaw("nat", "send", out.to.String(), out.packet)
-		_, _ = WriteToUDPFrom(conn, out.packet, out.to, forwardSrc)
+	// No datagram to answer: requesters get theirs through via, the SYNC to the target
+	// leaves from the target's socket (a requester's when unknown).
+	var fallback UDPReplyConn
+	if len(p.waiters) > 0 {
+		fallback = p.waiters[0].conn
 	}
+	h.send(nil, fallback, nil, h.wakeOutbound(hash, p))
 }
 
 // wakeOutbound builds the answers to the requesters of a finished wait: the SYNC pair on

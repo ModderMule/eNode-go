@@ -22,8 +22,8 @@ func TestNatIndexRebinding(t *testing.T) {
 	newEP := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 1), Port: 50001}
 	h.processPacket(encodeNATPacket(OpNatRegister, hash), oldEP, 2004)
 	h.processPacket(encodeNATPacket(OpNatRegister, hash), newEP, 2004)
-	_, oldHit := h.touchByAddr(oldEP)
-	got, newHit := h.touchByAddr(newEP)
+	_, oldHit := h.touchByAddr(oldEP, 0)
+	got, newHit := h.touchByAddr(newEP, 0)
 	t.Logf("input: register %s then %s, output: keepalive old=%t new=%t (hash %x), index size %d", oldEP, newEP, oldHit, newHit, got[:4], len(h.byAddr))
 	if oldHit || !newHit || len(h.byAddr) != 1 {
 		t.Fatalf("after rebinding: old=%t new=%t index=%d, want false/true/1", oldHit, newHit, len(h.byAddr))
@@ -36,7 +36,7 @@ func TestNatIndexExpiry(t *testing.T) {
 	h.processPacket(encodeNATPacket(OpNatRegister, natIndexHash(1)), ep, 2004)
 	time.Sleep(80 * time.Millisecond)
 	h.cleanup()
-	_, hit := h.touchByAddr(ep)
+	_, hit := h.touchByAddr(ep, 0)
 	t.Logf("input: register, wait past TTL, sweep; output: entries=%d index=%d keepalive=%t", h.entryCount(), len(h.byAddr), hit)
 	if h.entryCount() != 0 || len(h.byAddr) != 0 || hit {
 		t.Fatal("expired candidate still indexed")
@@ -49,7 +49,7 @@ func TestNatIndexEndpointTakenOver(t *testing.T) {
 	ep := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 1), Port: 4672}
 	h.processPacket(encodeNATPacket(OpNatRegister, natIndexHash(1)), ep, 2004)
 	h.processPacket(encodeNATPacket(OpNatRegister, natIndexHash(2)), ep, 2004)
-	got, hit := h.touchByAddr(ep)
+	got, hit := h.touchByAddr(ep, 0)
 	t.Logf("input: hash 1 then hash 2 from %s, output: keepalive -> %x, entries=%d", ep, got[:4], h.entryCount())
 	if !hit || got != [16]byte(natIndexHash(2)) || h.entryCount() != 1 || h.candidateCount([16]byte(natIndexHash(1))) != 0 {
 		t.Fatal("endpoint not owned by the newer registration")
@@ -82,7 +82,7 @@ func TestNatIndexCost(t *testing.T) {
 	h := NewNATTraversalHandler(time.Hour)
 	for i := 0; i < n; i++ {
 		ip := net.IPv4(10, byte(i>>16), byte(i>>8), byte(i))
-		h.upsert([16]byte(natIndexHash(i)), &net.UDPAddr{IP: ip, Port: 4672}, 0)
+		h.upsert([16]byte(natIndexHash(i)), &net.UDPAddr{IP: ip, Port: 4672}, 0, 0)
 	}
 	runtime.GC()
 	runtime.ReadMemStats(&after)
@@ -93,8 +93,8 @@ func TestNatIndexCost(t *testing.T) {
 	const rounds = 10_000
 	start := time.Now()
 	for i := 0; i < rounds; i++ {
-		h.touchByAddr(miss)
-		h.touchByAddr(hit)
+		h.touchByAddr(miss, 0)
+		h.touchByAddr(hit, 0)
 	}
 	per := time.Since(start) / (2 * rounds)
 	t.Logf("input: %d IPv4 entries, output: %.0f B per entry incl. index, %v per keepalive", n, perEntry, per)

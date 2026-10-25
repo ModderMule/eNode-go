@@ -194,6 +194,27 @@ func NewUDPSourceConn(conn *net.UDPConn) UDPReplyConn {
 	return newUDPReplyConn(conn, nil)
 }
 
+// baseReplyConn strips the arrival-address pin from one of RunUDPServer's reply conns,
+// for sends that answer no datagram of their own. Any other conn comes back as it is.
+func baseReplyConn(conn UDPReplyConn) UDPReplyConn {
+	if rc, ok := conn.(*udpReplyConn); ok {
+		return newUDPReplyConn(rc.UDPConn, nil)
+	}
+	return conn
+}
+
+// replyConnListener is the listener behind conn, or nil when it is neither a reply conn
+// nor a *net.UDPConn (test fakes).
+func replyConnListener(conn UDPReplyConn) *net.UDPConn {
+	switch c := conn.(type) {
+	case *udpReplyConn:
+		return c.UDPConn
+	case *net.UDPConn:
+		return c
+	}
+	return nil
+}
+
 // udpPoolSize resolves the worker and queue sizes, defaulting the worker count
 // from the CPU count. The work is largely storage I/O rather than CPU, so a
 // small multiple of NumCPU keeps the database busy without unbounded fan-out.

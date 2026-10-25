@@ -65,7 +65,7 @@ type TCPRuntimeConfig struct {
 	ProbeIPv6        bool
 	ServerIPv6       []byte
 	// NatRendezvousPort is advertised as the TagNatPort (0x9d) tag in OP_SERVERIDENT
-	// when server-independent rendezvous is on. Zero omits the tag.
+	// when FlagNatRendezvous or FlagNatWake is set. Zero omits the tag.
 	NatRendezvousPort uint16
 	// MetaAPI is advertised in OP_SERVERIDENT when the Meta API is on.
 	MetaAPI MetaAPIAdvert

@@ -518,7 +518,9 @@ A user hash is public, so the server does not take a REGISTER on its word:
 A refused REGISTER gets no ack.
 
 At `SYNC2` time the server picks a **common family, preferring IPv6**: v6 if both
-peers have a v6 candidate, else v4 if both have v4, else `FAILED 0x02`. So register
+peers have a v6 candidate, else v4 if both have v4, else a TCP wake-up of a logged-in
+target for the requester's families (see `pr-nat-rendezvous-spec.md`), else
+`FAILED 0x02`. So register
 every family you can offer before `SYNC2`; at minimum register on the family of the
 target source (which you already know from the source record).
 
@@ -570,9 +572,10 @@ mechanism the eD2K server takes no part in. `PR_NAT` is the server-mediated path
 spans servers and covers IPv6.
 
 **Gate.** `natTraversal.serverIndependent` (default **true**) controls this. When on,
-the server pairs any two registered hashes and advertises the flag + `ST_NAT_PORT`.
-When off, it drops both advertisements and refuses a `SYNC2` unless **both** hashes are
-currently logged into it, replying `OP_NAT_FAILED` reason `0x03`; same-server
+the server pairs any two registered hashes and advertises `0x40000`. When off, it drops
+`0x40000` and refuses a `SYNC2` for a registered target unless **both** hashes are
+currently logged into it, replying `OP_NAT_FAILED` reason `0x03`. `ST_NAT_PORT` is sent
+whenever `0x40000` or the wake-up flag `0x200000` is; same-server
 LowID↔LowID still works. The gate is family-agnostic — it applies equally to IPv4 and
 IPv6 pairings, before family selection.
 
@@ -580,11 +583,13 @@ IPv6 pairings, before family selection.
 
 - `natTraversal.enabled` — run the service at all.
 - `natTraversal.port` — its UDP port (default `2004`). The handler is also reachable
-  on the main UDP port.
+  on the main UDP port (`udp.port`), the obfuscated UDP port and the gossip port.
 - `natTraversal.ipv6` — dual-stack hole-punching (default **true**). Effective only
   when `ipv6.enabled` is also on. When off, the server **declines** IPv6 `PR_NAT`
   datagrams (drops them, no ack, nothing stored) and the protocol is IPv4-only.
 - `natTraversal.serverIndependent` — cross-server / serverless rendezvous (default
   **true**). When off, pairing is restricted to clients logged into this server
-  (`OP_NAT_FAILED` reason `0x03` otherwise) and the capability flag + `ST_NAT_PORT` tag
-  are not advertised.
+  (`OP_NAT_FAILED` reason `0x03` otherwise) and `0x40000` is not advertised.
+- `natTraversal.tcpWake` — TCP wake-up of a logged-in target (default **true**, flag
+  `0x200000`); see [`pr-nat-rendezvous-spec.md`](pr-nat-rendezvous-spec.md).
+- `natTraversal.lugdunumCallback` — Lugdunum's LowID↔LowID callback (default **true**).

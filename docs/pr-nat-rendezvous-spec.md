@@ -39,15 +39,21 @@ use it.
 
 `0x40000` was `0x8000` before 2026-10-20 (ed2k-server took `0x8000` for `OP_IPV6_UPDATE`).
 A server implementing `PR_NAT` must use `0x40000`. The `OP_IDCHANGE` bit table in the
-ed2k-server README lists every bit in use; the first free one is `0x200000`.
+ed2k-server README lists every bit in use. `0x200000` is the wake-up's, so new bits go
+above it.
 
 A client is a participant once it registers. The only login bit is the wake-up's.
 
 ## Transport
 
-- **Ports.** Send to `ST_NAT_PORT` (default `2004`). eNode-go also accepts `PR_NAT` on its
-  main UDP port (TCP port + 4). Send from the client's own UDP socket, the one peers will
-  punch, so the observed source is the endpoint that matters.
+- **Ports.** Send the first `REGISTER` (or a `SYNC2`) to `ST_NAT_PORT` (default `2004`), then
+  follow the port in the register ack ([Field notes](#field-notes)). eNode-go accepts
+  `PR_NAT` on `ST_NAT_PORT`, its main UDP port (`udp.port`, default 5559), its obfuscated
+  UDP port and its gossip port; the ack on `ST_NAT_PORT` names the main UDP port. Send from
+  the client's own UDP socket, the one peers will punch, so the observed source is the
+  endpoint that matters.
+- **IPv6.** eNode-go serves IPv6 `PR_NAT` only with `ipv6.enabled` and `natTraversal.ipv6`
+  on. Without them IPv6 datagrams are dropped unanswered.
 - **Plaintext.** `PR_NAT` is never obfuscated, on any port. A server takes it on the raw
   bytes, before any eD2K deobfuscation, and answers in plaintext, also on its obfuscated UDP
   port. A datagram that only decrypts to `0xF1` is not `PR_NAT` and is dropped.
@@ -81,13 +87,13 @@ One message travels over the eD2K TCP session instead, in `PR_ED2K` (`0xE3`):
 
 | Opcode | Value | Direction | Payload | Size |
 | --- | --- | --- | --- | --- |
-| `OP_NAT_WAKE` | `0x46` | s→c, TCP | `families 1`: `0x01` register over IPv4, `0x02` over IPv6 | 1 |
+| `OP_NAT_WAKE` | `0x46` | s→c, TCP | `families 1`: `0x01` register over IPv4, `0x02` over IPv6 | 1 (7 B packet) |
 
 `0x46` is unused by eMule, aMule, eMuleQt, Lugdunum and ed2k-server, and eMule and eMuleQt log
 an unknown server opcode and carry on. A server sends it only to a session that set the
 login bit.
 
-Field notes:
+### Field notes
 
 - **Register ack.** The address is the **server's own** public address for that family, and
   the port is the one the server prefers for further `PR_NAT` traffic. An all-zero address
@@ -95,20 +101,28 @@ Field notes:
   and the request share opcode `0xE4`; tell them apart by direction (and its 6-byte length).
 - **`connAck`.** A 32-bit value the requester picks per attempt. The server copies it into
   both `SYNC`s, so each peer can tie the punch it receives to the attempt. eMuleQt uses a
-  random odd value.
+  random odd value. It ties a `SYNC` to its attempt by the peer hash, and the punched path
+  to the peer by source IP plus the user hash in its handoff, so it does not need `connAck`
+  on the path itself.
 - **`version`.** An opaque client byte for the peer's capabilities. A client that registered
   with `REGISTER_EX` and version > 0 gets `SYNC_EX` with the peer's version. Other IPv4
   receivers get the plain 26-byte `SYNC`. `SYNC_IPV6` always carries it, 0 when unknown.
-- **`FAILED` reasons.** `0x01`: the target hash is not registered (no live candidate).
-  `0x02`: the two peers share no address family. `0x03`: the server pairs only clients
-  logged in to it (`serverIndependent` off), and one of the two is not.
+- **`FAILED` reasons.** `0x01`: the target hash is not registered (no live candidate), or a
+  wake-up for it timed out, also one that started because the peers shared no family.
+  `0x02`: the two peers share no address family and no wake-up is possible. `0x03`: the
+  server pairs only clients logged in to it (`serverIndependent` off), and one of the two
+  is not. A target with no live candidate gets `0x01`, not `0x03`, because that check comes
+  first.
 
 ## Server behaviour
 
 **Registry.** Per user hash, at most one IPv4 and one IPv6 candidate. Each is the source
 endpoint the server observed, never an address the client wrote into a payload. Each has its
 own `lastSeen`. A candidate expires `registrationTTLSeconds` after it was last seen (default
-90 s; 30 s before 2026-10-25). A sweep runs every TTL/2, clamped to 5–60 s. An index from
+90 s; 30 s before 2026-10-25). From then on it is not paired, a keepalive on it is unmatched,
+and it no longer holds its hash's IP. A sweep runs every TTL/2, clamped to 5–60 s, and only
+frees the memory. Each candidate also remembers which of the server's `PR_NAT` sockets its
+last REGISTER, keepalive or auto-registering SYNC2 arrived on. An index from
 endpoint to hash finds the entry of a keepalive, which carries no hash, in one lookup. An
 endpoint is one socket, so it belongs to one hash: a REGISTER from an endpoint another hash
 holds takes it over.
@@ -118,8 +132,10 @@ answers with the ack for that family. Because a user hash is public, the server 
 sender first:
 
 - **The hash is logged in to this server:** the REGISTER must come from that session's IPv4,
-  or for IPv6 from the same /64 as the session's address (or the IPv6 it announced in
-  `CT_MOD_IP_V6`). If the session has no address in that family, the next rule applies.
+  or for IPv6 from the same /64 as the session's address. A session connected over IPv4
+  also counts the IPv6 it announced in `CT_MOD_IP_V6`; a session connected over IPv6 has
+  no IPv4. If the session has no address in that family, the next rule applies, so an
+  IPv6 session may register IPv4.
 - **Otherwise:** a live candidate is never replaced from a different IP. The same IP may
   change port, as after a NAT rebinding.
 
@@ -136,14 +152,17 @@ that sends nothing over TCP for hours is not reaped. An unmatched keepalive gets
    subject to the REGISTER checks. A requester therefore needs no standing registration.
 2. If the target hash has no live candidate, the server tries to wake it (below). If it
    cannot, the answer is `FAILED 0x01` to the requester.
-3. With `serverIndependent` off, both hashes must be logged in to this server, else
-   `FAILED 0x03`.
+3. With `serverIndependent` off, both hashes of a registered target must be logged in to
+   this server, else `FAILED 0x03`.
 4. The server picks a family both peers have, **preferring IPv6**. If there is none, it
    tries to wake the target for the requester's families, else `FAILED 0x02`.
 5. It sends the requester a `SYNC` with the target's endpoint and hash, and the target one
-   with the requester's. Both carry the requester's `connAck`. A forward to the target goes
-   out from the IPv6 address the server announced in its ack, so it matches the mapping the
-   target opened.
+   with the requester's. Both carry the requester's `connAck`. The requester's `SYNC` leaves
+   from the socket its SYNC2 arrived on. The forward to the target leaves from the socket the
+   target's candidate last arrived on (the requester's socket when that is unknown), and
+   over IPv6 from the address the server announced in its ack, so it matches the mapping the
+   target opened. Two peers can therefore use different server ports, as when one follows
+   the ack's port and the other does not.
 
 Without a wake the server keeps no per-attempt state, and a repeated SYNC2 is answered again.
 
@@ -173,8 +192,10 @@ on every family you can offer and keep each candidate alive:
 **To reach a peer (requester role).** Send `SYNC2` with your hash, a fresh `connAck` and the
 peer's hash. Repeat a few times if no `SYNC` comes (eMuleQt: every 5 s, at most 3 times). On
 `SYNC`, punch towards the endpoint and treat a datagram from it carrying the same `connAck`
-as the peer. On `FAILED`, try another path. On a wake server, send a `REGISTER` over your
-other family right before the `SYNC2`, so the server can pair on whichever the target has.
+as the peer, or match it by an equivalent check. On `FAILED`, try another path. On a wake
+server, send a `REGISTER` over your other family right before the `SYNC2`, so the server can
+pair on whichever the target has. eMuleQt sends the `SYNC2` over IPv6 when it can, and a
+`REGISTER` over IPv4 right before it.
 
 **Which peer.** Both sides need the other's user hash and a rendezvous server they both
 registered with. For two clients on the same server, that server is the rendezvous, and the
@@ -191,8 +212,13 @@ the target role needs this. A requester's `SYNC2` registers it on the spot.
 Both peers must use the **same** rendezvous server. eNode-go servers do not share their
 registries. Nothing in eD2K tells a requester which server a foreign target registered with.
 A target would have to publish the pair (user hash, rendezvous `ip:port`) through Kad or
-source exchange, and no client does that yet. eMuleQt uses `PR_NAT` only for peers on its
-own server, so cross-server pairing is ready on the server side and unused.
+source exchange, and no client does that yet.
+
+eMuleQt registers, and is woken, only on its own server. As a requester for a peer on
+another server it sweeps: it sends `SYNC2` to its own server, then to up to 8 listed servers
+whose UDP flags carry `0x40000`, 2 per server, 4 s apart. That finds a target only when the
+target is logged in to, or registered with, one of the swept servers. It ignores a `SYNC`
+for a hash it did not ask for.
 
 Clients logged in to the rendezvous server need no standing registration when it offers the
 wake-up. Only foreign targets keep one.
@@ -215,11 +241,11 @@ other clients do not speak `PR_NAT`.
 | Address- or port-restricted NAT (most home routers) | works | usually fails until the reverse request | works |
 | Symmetric NAT | fails | fails | fails |
 | IPv6 | yes, preferred when both registered one | no | no |
-| Cross-server | yes (same rendezvous server) | no | no |
+| Cross-server | yes (same rendezvous server; eMuleQt sweeps up to 8 servers as requester) | no | no |
 | Freshness of the endpoint | the last keepalive, at most a TTL old | the request itself, always fresh | the last `0x9F`, up to 600 s old; fresh with the extension |
-| Waking the target | logged in here: TCP `OP_NAT_WAKE`, then its `REGISTER`; foreign: its standing UDP mapping | TCP `0x37`, or UDP `0xA7` within 20 s of its own request | `0x61` over TCP; with the extension `0x37`, then the target's `0x9F` |
+| Waking the target | logged in here: TCP `OP_NAT_WAKE`, then its `REGISTER`; foreign: its standing UDP mapping | TCP `0x37`, or UDP `0xA7` within 19 s (eNode-go) of its own request | `0x61` over TCP; with the extension `0x37`, then the target's `0x9F` |
 | Standing traffic while idle | none with the wake-up; else keepalive every 60 s per family | none | `0x9F` every ~60 s |
-| Server memory per idle client | none with the wake-up (one bool in existing padding); else 147 bytes per registered family (measured) | none (eNode-go: one bool in existing padding) | one port and timestamp per client |
+| Server memory per idle client | none with the wake-up (one bool in existing padding); else 146 bytes per single-family client (measured) | none (eNode-go: one bool in existing padding) | one port and timestamp per client |
 | Failure feedback | `FAILED` with a reason | none | `0x62` with a reason |
 | Data on the punched path | not defined | not defined | not defined |
 | Clients | eMuleQt | eMuleQt, aMule, NeoLoader, NeoMule | eMuleQt, aMule |
@@ -234,6 +260,8 @@ What follows from the table:
   per-client state. Lugdunum's callback is the only one most clients speak.
 - On eNode-go, eMuleQt tries `PR_NAT` first when it knows the peer's hash, and Lugdunum's
   callback for hashless `OP_FOUNDSOURCES` rows or when `PR_NAT` produced no endpoint.
+  eMuleQt uses Lugdunum's callback only for an odd target LowID over an IPv4 session, so on
+  an IPv6 session there is no Lugdunum fallback.
 
 ## Sending cost
 
@@ -271,18 +299,21 @@ each before 2026-10-25, with a 20 s keepalive).
 | 100,000 | 1,667 + 1,667 | 57 KB/s (453 kbit/s) | 4.9 GB |
 
 The bandwidth is small. The packet rate matters more. In eNode-go a keepalive costs one index
-lookup, about 40 ns at 100,000 entries (measured; it was a 3.8 ms scan of the whole registry
+lookup, about 40–140 ns at 100,000 entries (`TestNatIndexCost`; it was a 3.8 ms scan of the whole registry
 before 2026-10-25). With the wake-up, none of this applies to clients logged in to the
 server.
 
-**One pairing:** 70 B in and 120 B out over IPv4 (186 B over IPv6), up to three times if the
-requester repeats. That is about 1.7 bytes out per byte in, all of it to the two endpoints the
+**One pairing:** 70 B in and 120 B out over IPv4 (122 B with `SYNC_EX`; 90 B in and 186 B
+out over IPv6), up to three times if the requester repeats. That is about 1.7 bytes out per
+byte in over IPv4 and 2.1 over IPv6, all of it to the two endpoints the
 server already holds for those hashes. Only the requester's endpoint comes from the request,
 and only when that slot was empty: a spoofed `SYNC2` can make the server send one `SYNC` to
 the forged source address, much as any register would.
 
-**Memory:** 147 bytes per registered family, measured on 100,000 IPv4 entries, the index
-included (hash key, entry with both family slots inline, endpoint key). It was 171 bytes
+**Memory:** 146 bytes per client with one family, measured by `TestNatIndexCost` on 100,000
+IPv4 entries, the index included (hash key, entry with both family slots inline, each with a
+1-byte socket index in its padding, endpoint key). A second family adds only its index
+entry. It was 171 bytes
 without an index, when each candidate was three allocations. Only clients that register cost
 anything.
 
@@ -290,10 +321,10 @@ anything.
 
 | | Bytes | When |
 | --- | --- | --- |
-| standing | 0 B; an empty TCP `OP_OFFERFILES` (6 + 4 B) after 20 min of TCP silence | instead of 68 B a minute per IPv4 family |
-| `OP_NAT_WAKE` | 6 + 2 B in the existing TCP session | once per attempt |
+| standing | an empty TCP `OP_OFFERFILES` (6 + 4 B) after 20 min of TCP silence, about 0.5 B a minute | instead of 68 B a minute (both ways) per IPv4 family |
+| `OP_NAT_WAKE` | 6 + 1 B in the existing TCP session | once per attempt |
 | target `REGISTER` + ack | 50 + 40 B over IPv4, 70 + 72 B over IPv6 | once per requested family |
-| requester's extra `REGISTER` + ack | 50 + 40 B | once, on a dual-stack requester |
+| requester's extra `REGISTER` + ack | 50 + 40 B over IPv4 | once, on a dual-stack requester |
 | `SYNC` pair | as above | once |
 
 The empty `OP_OFFERFILES` replaces the keepalive's second job: on eNode-go a `PR_NAT`
@@ -306,7 +337,7 @@ the pairing or 3 s.
 
 | | Lugdunum callback | ed2k-server hole punch |
 | --- | --- | --- |
-| Standing, per client | nothing | `0x9F` (2 + 16 B payload, 46 B datagram) every 60 s, unanswered: 46 B/min up, 2.8 KB/h |
+| Standing, per client | nothing | `0x9F` (2 + 16 B payload, 46 B datagram; 54–69 B obfuscated on an extension server) every 60 s, unanswered: 46 B/min up, 2.8 KB/h |
 | Request | `0xA6`, 10 B plaintext + 8–23 B obfuscation, 46–61 B datagram; eMuleQt sends up to 9, 5 s apart | TCP `0x60`, 6 + 6 B in the existing session |
 | Notice to the target | TCP `0x37`, 6 + 11 B (27 with the hash) in the existing session; or UDP `0xA7`, 49–65 B | TCP `0x61`, 6 + 29 B to both peers, resent at +1.2 s and +3 s: up to 6 × 35 B |
 | Mutual round | the target sends its own `0xA6`, and the requester gets the same notice | not needed |
@@ -314,8 +345,10 @@ the pairing or 3 s.
 Lugdunum's callback uses the least traffic, because the eD2K TCP session it relies on already
 exists. ed2k-server's standing `0x9F` has the same 60 s interval and costs two thirds of `PR_NAT`'s
 keepalive traffic per client (46 B a minute against 68 B both ways), because it gets no
-answer, but the port it gives peers can be up to 600 s old.
-`PR_NAT`'s 90 s TTL keeps the endpoint at most a minute old. The keepalive also holds the
+answer; obfuscated on an extension server it costs about as much. The port it gives peers
+can be up to 600 s old.
+With a 60 s keepalive the `PR_NAT` endpoint is at most a minute old, and the 90 s TTL means
+it is never used once older than that. The keepalive also holds the
 client's NAT mapping open, and that is the trade-off of the 60 s interval: RFC 4787 asks
 routers to keep an idle UDP mapping for at least 2 minutes, but some drop it after 30–60 s.
 Behind such a router a foreign target's `SYNC` can arrive after the mapping is gone. The
@@ -349,7 +382,9 @@ is logged in to it over the eD2K TCP session, so the target needs no standing re
    target's two `REGISTER`s race, so when IPv6 was asked for and the IPv4 one arrives first,
    the server waits up to 500 ms more for the IPv6 one, then pairs on what it has (measured
    in eMuleQt's natnet rig: the IPv4 one came first, 1 ms ahead). The requester's `SYNC`
-   leaves from the socket its SYNC2 arrived on, which its NAT mapping expects.
+   leaves from the socket and address its SYNC2 arrived on, which its NAT mapping expects,
+   and the target's from the socket its `REGISTER` arrived on. This holds also when the
+   pairing comes after the 500 ms wait or at the timeout.
 6. **Timeout.** If no `REGISTER` in a family the requester has arrives within 3 s, every
    waiting requester gets `FAILED 0x01`. A requester treats it like any `FAILED` and tries another path.
 7. **Limits.** At most 4096 targets wait at once; beyond that a SYNC2 fails at once, as
@@ -357,8 +392,10 @@ is logged in to it over the eD2K TCP session, so the target needs no standing re
    target, and in restricted mode (`serverIndependent` off) only for a requester logged in
    here too.
 8. **Abuse.** A SYNC2 is UDP, so its source can be forged. The worst a forger gets is one
-   8-byte TCP packet to a target and its `REGISTER`, at most once per target per 3 s, and a
-   `FAILED` to the forged address.
+   7-byte TCP packet to a target and its `REGISTER`, one wait per target at a time (with at
+   most one extra wake per newly requested family), and a `FAILED` or, if the target
+   registers, a `SYNC` to the forged address. A new wait can start as soon as one ends.
+   A fifth requester for a waiting target gets `FAILED` at once.
 
 The target's registration then lives one TTL like any other and is not kept alive.
 
@@ -376,7 +413,9 @@ The target's registration then lives one TTL like any other and is not kept aliv
 - [ ] `PR_NAT` taken before any deobfuscation and answered in plaintext on every port.
 - [ ] `SYNC2`: auto-register, `FAILED` 1/2/3, IPv6 first, both `SYNC`s with `connAck`, `EX`
       only to a versioned receiver.
-- [ ] Forward to an IPv6 target from the announced IPv6 address.
+- [ ] Treat a candidate past the TTL as gone on every read, not only at the sweep.
+- [ ] Forward to the target from the socket its candidate arrived on, and to an IPv6 target
+      from the announced IPv6 address; answer the requester from its SYNC2's socket.
 - [ ] Advertise `0x40000` only when unrestricted pairing is on, in the TCP and UDP flags.
 - [ ] Wake-up: `0x200000` in both flag words and `ST_NAT_PORT`; remember the login bit; on a
       SYNC2 for an unregistered local target send `OP_NAT_WAKE`, pair on its `REGISTER`,
@@ -392,6 +431,6 @@ The target's registration then lives one TTL like any other and is not kept aliv
       inside the TTL; re-register when pings stop.
 - [ ] `SYNC2` with a fresh `connAck`; repeat a few times; handle `SYNC`, `SYNC_EX`,
       `SYNC_IPV6` and `FAILED`.
-- [ ] Punch on `SYNC` from both sides; match the peer by `connAck`.
+- [ ] Punch on `SYNC` from both sides; match the peer by `connAck` or an equivalent check.
 - [ ] Send one request per target per scheme. Fall back to another scheme only after this one
       failed or timed out.

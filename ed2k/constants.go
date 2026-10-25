@@ -277,8 +277,8 @@ const (
 	// assuming the default 2004. 0x9D is free across the ST_* server-tag, CT_* client
 	// -tag and OP_* opcode namespaces in both surveyed C++ trees (ST_ tags end at
 	// 0x98, CT_ tags start at 0xA0); eMule's OP_SERVERIDENT tag loop consumes unknown
-	// name-IDs without disconnecting. Emitted only when natTraversal.serverIndependent
-	// is on. See docs/ipv6-client-implementation-spec.md §9.
+	// name-IDs without disconnecting. Emitted whenever FlagNatRendezvous (0x40000) or
+	// FlagNatWake (0x200000) is set. See docs/ipv6-client-implementation-spec.md §9.
 	TagNatPort uint8 = 0x9d
 	// TagIPv6Status is an eNode-go OP_SERVERIDENT extension: an IPv6Status* bitfield
 	// (uint8) telling the session what the server knows about its IPv6 — whether it

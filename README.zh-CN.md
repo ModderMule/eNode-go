@@ -163,6 +163,8 @@ natTraversal:
   port: 2004                 # NAT 穿透 UDP 端口
   ipv6: true                 # IPv6 打洞（双栈候选端点）；需 ipv6.enabled
   serverIndependent: true    # 跨服务器 / 无服务器 LowID↔LowID 汇合（默认开启）
+  tcpWake: true              # 通过 TCP 唤醒已登录的目标（标志 0x200000，默认开启）
+  lugdunumCallback: true     # Lugdunum LowID↔LowID 回调（0xA6/0x37，默认开启）
   registrationTTLSeconds: 90 # NAT 注册表项有效期（秒）
 
 ipv6:                        # IPv6 双栈；整段省略即为仅 IPv4 行为

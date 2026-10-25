@@ -306,7 +306,7 @@ func TestNatWakeFallsBackToIPv4AfterGrace(t *testing.T) {
 
 	h.HandlePacket(encodeNATPacket(OpNatRegister, hashA), aAddr, server)
 	readUDP(peerA) // ack
-	h.upsert([16]byte(hashA), &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 4672}, 0)
+	h.upsert([16]byte(hashA), &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 4672}, 0, 0)
 	h.HandlePacket(encodeNATPacket(OpNatSync2, sync2Payload(hashA, hashB, 2)), aAddr, server)
 	h.HandlePacket(encodeNATPacket(OpNatRegister, hashB), peerB.LocalAddr().(*net.UDPAddr), server)
 	ack := readUDP(peerB)

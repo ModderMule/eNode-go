@@ -59,6 +59,7 @@ type NATTraversalConfig struct {
 type natCandidate struct {
 	addr     *net.UDPAddr
 	lastSeen time.Time
+	sock     uint8 // natSlot.sock
 }
 
 type natClientEntry struct {
@@ -77,11 +78,16 @@ type natEndpoint struct {
 }
 
 // natSlot is one stored candidate. seen is the handler tick (natTick) of the last
-// REGISTER or keepalive; 0 means the slot is empty. Values, not pointers, and a 32-bit
-// tick rather than a time.Time: an entry costs no allocations of its own, which pays
-// for the index.
+// REGISTER or keepalive; 0 means the slot is empty, and a slot older than the TTL is
+// treated as empty before the sweep removes it (see liveSlot). Values, not pointers, and
+// a 32-bit tick rather than a time.Time: an entry costs no allocations of its own, which
+// pays for the index.
 type natSlot struct {
-	ep   natEndpoint
+	ep natEndpoint
+	// sock is the server socket that REGISTER or keepalive arrived on: 1 + its index in
+	// NATTraversalHandler.socks, 0 when unknown. A forward to this candidate leaves from
+	// that socket, the one its NAT mapping is open to. Fits in ep's padding, costs nothing.
+	sock uint8
 	seen uint32
 }
 
@@ -97,6 +103,10 @@ type natOutbound struct {
 	// current datagram arrived on: a SYNC to a requester that is waiting on a wake goes
 	// out through the socket its own SYNC2 came in on, which its NAT mapping expects.
 	via UDPReplyConn
+	// forward marks the SYNC to the target of a pairing: it leaves from the target's
+	// own socket (sock, see natSlot.sock) and, over IPv6, from the announced IPv6.
+	forward bool
+	sock    uint8
 }
 
 // natWakeWaiter is one requester whose SYNC2 is waiting on a woken target.
@@ -154,6 +164,11 @@ type NATTraversalHandler struct {
 	// pending holds targets that were woken and have not registered yet. Only attempts
 	// in flight are in it, for at most natWakeTimeout each.
 	pending map[[16]byte]*natWakePending
+	// socks are the server sockets PR_NAT arrived on (natSlot.sock - 1 indexes it),
+	// without arrival-address pin, learned by local port. A handful: 2004, udp.port,
+	// the obfuscated and the gossip port.
+	socks      []UDPReplyConn
+	sockByPort map[uint16]uint8
 }
 
 // SetSessionAddrs registers the lookup registerAllowed binds a REGISTER to. Mirrors
@@ -203,6 +218,7 @@ func NewNATTraversalHandler(registrationTTL time.Duration) *NATTraversalHandler 
 		byAddr:              map[natEndpoint][16]byte{},
 		pending:             map[[16]byte]*natWakePending{},
 		announcePortByLocal: map[uint16]uint16{},
+		sockByPort:          map[uint16]uint8{},
 		// Default to the historical open behaviour: pair any registered pair. main.go
 		// overrides this from natTraversal.serverIndependent.
 		serverIndependent: true,
@@ -337,7 +353,7 @@ func (h *NATTraversalHandler) HandlePacket(data []byte, remote *net.UDPAddr, con
 	if localAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok && localAddr != nil && localAddr.Port > 0 {
 		localPort = uint16(localAddr.Port)
 	}
-	h.send(conn, remote, h.processPacketFrom(data, remote, localPort, conn))
+	h.send(conn, conn, remote, h.processPacketFrom(data, remote, localPort, conn))
 }
 
 func (h *NATTraversalHandler) StartCleanup(interval time.Duration) func() {
@@ -371,8 +387,9 @@ func (h *NATTraversalHandler) processPacketFrom(data []byte, remote *net.UDPAddr
 	if len(data) == 0 || remote == nil {
 		return nil
 	}
+	sock := h.socketIndex(conn, localPort)
 	if len(data) == 1 {
-		hash, matched := h.touchByAddr(remote)
+		hash, matched := h.touchByAddr(remote, sock)
 		logging.Debugf(
 			"[module=nat] dir=recv, remote=%s, opcode=KEEPALIVE(1-byte), value=0x%02x, matched=%t",
 			remote.String(), data[0], matched,
@@ -410,11 +427,11 @@ func (h *NATTraversalHandler) processPacketFrom(data []byte, remote *net.UDPAddr
 	}
 	switch opcode {
 	case OpNatRegister:
-		return h.handleRegister(remote, payload, localPort, false)
+		return h.handleRegister(remote, payload, localPort, sock, false)
 	case OpNatRegisterEx:
-		return h.handleRegister(remote, payload, localPort, true)
+		return h.handleRegister(remote, payload, localPort, sock, true)
 	case OpNatKeepAlive:
-		hash, matched := h.touchByAddr(remote)
+		hash, matched := h.touchByAddr(remote, sock)
 		logging.Debugf(
 			"[module=nat] dir=recv, remote=%s, opcode=%s, payloadLen=%d, matched=%t",
 			remote.String(), natOpcodeLabel(OpNatKeepAlive), len(payload), matched,
@@ -433,13 +450,13 @@ func (h *NATTraversalHandler) processPacketFrom(data []byte, remote *net.UDPAddr
 		}
 		return nil
 	case OpNatSync2:
-		return h.handleSync2(remote, payload, conn)
+		return h.handleSync2(remote, payload, conn, sock)
 	default:
 		return nil
 	}
 }
 
-func (h *NATTraversalHandler) handleRegister(remote *net.UDPAddr, payload []byte, localPort uint16, isEx bool) []natOutbound {
+func (h *NATTraversalHandler) handleRegister(remote *net.UDPAddr, payload []byte, localPort uint16, sock uint8, isEx bool) []natOutbound {
 	if len(payload) < 16 {
 		return nil
 	}
@@ -454,7 +471,7 @@ func (h *NATTraversalHandler) handleRegister(remote *net.UDPAddr, payload []byte
 			remote.String(), natOpcodeLabel(OpNatRegister), hash[:], reason)
 		return nil
 	}
-	h.upsert(hash, remote, version)
+	h.upsert(hash, remote, version, sock)
 	// A woken target's REGISTER completes the SYNC2s waiting on it, after the ack.
 	paired := h.completeWake(hash, remote)
 
@@ -489,7 +506,7 @@ func (h *NATTraversalHandler) handleRegister(remote *net.UDPAddr, payload []byte
 	}}, paired...)
 }
 
-func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte, conn UDPReplyConn) []natOutbound {
+func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte, conn UDPReplyConn, sock uint8) []natOutbound {
 	if len(payload) < 36 {
 		return nil
 	}
@@ -506,7 +523,7 @@ func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte, c
 	src, srcFound := h.get(srcHash)
 	if !srcFound || familySlot(src, remote) == nil {
 		if ok, _ := h.registerAllowed(srcHash, remote); ok {
-			h.upsert(srcHash, remote, 0)
+			h.upsert(srcHash, remote, 0, sock)
 			src, _ = h.get(srcHash)
 		}
 	}
@@ -522,7 +539,7 @@ func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte, c
 		int(h.ttl/time.Second),
 	)
 	if !dstOK {
-		// No registration: a target logged in here that asked for it is woken over
+		// No live registration (none, or every candidate past the TTL): a target logged in here that asked for it is woken over
 		// TCP instead, and the answer comes when it registers (or after natWakeTimeout).
 		if h.wakeTarget(src, dstHash, connAck, remote, conn) {
 			return nil
@@ -558,7 +575,8 @@ func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte, c
 
 // pairOutbound builds the two SYNCs that introduce src and dst on a family both have,
 // preferring IPv6, or returns nil when they share none. Both endpoints must share a
-// family: the two firewalled peers punch directly at each other.
+// family: the two firewalled peers punch directly at each other. [0] answers src, [1]
+// is the forward to dst, sent from dst's own socket.
 func pairOutbound(src, dst natClientEntry, connAck []byte, v6Enabled bool) []natOutbound {
 	switch {
 	case v6Enabled && src.v6 != nil && dst.v6 != nil:
@@ -568,8 +586,10 @@ func pairOutbound(src, dst natClientEntry, connAck []byte, v6Enabled bool) []nat
 				packet: buildNATSyncPacketV6(dst.v6.addr, dst.hash, connAck, dst.version),
 			},
 			{
-				to:     cloneUDPAddr(dst.v6.addr),
-				packet: buildNATSyncPacketV6(src.v6.addr, src.hash, connAck, src.version),
+				to:      cloneUDPAddr(dst.v6.addr),
+				packet:  buildNATSyncPacketV6(src.v6.addr, src.hash, connAck, src.version),
+				forward: true,
+				sock:    dst.v6.sock,
 			},
 		}
 	case src.v4 != nil && dst.v4 != nil:
@@ -579,8 +599,10 @@ func pairOutbound(src, dst natClientEntry, connAck []byte, v6Enabled bool) []nat
 				packet: buildNATSyncPacket(dst.v4.addr, dst.hash, connAck, dst.version, src.version),
 			},
 			{
-				to:     cloneUDPAddr(dst.v4.addr),
-				packet: buildNATSyncPacket(src.v4.addr, src.hash, connAck, src.version, dst.version),
+				to:      cloneUDPAddr(dst.v4.addr),
+				packet:  buildNATSyncPacket(src.v4.addr, src.hash, connAck, src.version, dst.version),
+				forward: true,
+				sock:    dst.v4.sock,
 			},
 		}
 	default:
@@ -673,11 +695,12 @@ func (h *NATTraversalHandler) registerAllowed(hash [16]byte, remote *net.UDPAddr
 			}
 		}
 	}
+	// get hands out live candidates only, so an expired one never pins.
 	entry, ok := h.get(hash)
 	if !ok {
 		return true, ""
 	}
-	if c := familySlot(entry, remote); c != nil && time.Since(c.lastSeen) < h.ttl && !c.addr.IP.Equal(remote.IP) {
+	if c := familySlot(entry, remote); c != nil && !c.addr.IP.Equal(remote.IP) {
 		return false, "pinned-to-other-address"
 	}
 	return true, ""
@@ -689,14 +712,14 @@ func sameIPv6Prefix64(a, b net.IP) bool {
 	return a16 != nil && b16 != nil && a.To4() == nil && b.To4() == nil && net.IP(a16[:8]).Equal(net.IP(b16[:8]))
 }
 
-func (h *NATTraversalHandler) upsert(hash [16]byte, remote *net.UDPAddr, version uint8) {
+func (h *NATTraversalHandler) upsert(hash [16]byte, remote *net.UDPAddr, version uint8, sock uint8) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	entry := h.entries[hash] // zero value when absent; preserves the other family slot
 	if version > 0 {
 		entry.version = version
 	}
-	h.setSlotLocked(hash, &entry, remoteIsIPv6(remote), natEndpointOf(remote), h.tick())
+	h.setSlotLocked(hash, &entry, remoteIsIPv6(remote), natEndpointOf(remote), sock, h.tick())
 	h.entries[hash] = entry
 }
 
@@ -708,7 +731,10 @@ func (h *NATTraversalHandler) upsert(hash [16]byte, remote *net.UDPAddr, version
 // The hash is returned so a keepalive can also count as liveness for that user's eD2K TCP
 // session — see SetSessionTouch. Without it the caller has proof the client is alive but
 // no way to say which client.
-func (h *NATTraversalHandler) touchByAddr(remote *net.UDPAddr) (hash [16]byte, matched bool) {
+//
+// A candidate past the TTL does not match even before the sweep removes it: the client
+// gets no PING and re-registers. sock is the socket the keepalive arrived on.
+func (h *NATTraversalHandler) touchByAddr(remote *net.UDPAddr, sock uint8) (hash [16]byte, matched bool) {
 	ep := natEndpointOf(remote)
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -721,16 +747,19 @@ func (h *NATTraversalHandler) touchByAddr(remote *net.UDPAddr) (hash [16]byte, m
 		return hash, false
 	}
 	slot := entry.slot(remoteIsIPv6(remote))
-	if slot.seen == 0 || slot.ep != ep {
+	now := h.tick()
+	if !h.liveSlot(*slot, now) || slot.ep != ep {
 		return hash, false
 	}
-	slot.seen = h.tick()
+	slot.seen = now
+	slot.sock = sock
 	h.entries[owner] = entry
 	return owner, true
 }
 
-// get returns a snapshot of the entry, built fresh, so the caller holds stable values
-// after the lock is released.
+// get returns a snapshot of the entry's live candidates, built fresh, so the caller
+// holds stable values after the lock is released. It reports false when there is none:
+// a candidate past the TTL is gone for pairing even before the sweep removes it.
 func (h *NATTraversalHandler) get(hash [16]byte) (natClientEntry, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -738,7 +767,11 @@ func (h *NATTraversalHandler) get(hash [16]byte) (natClientEntry, bool) {
 	if !ok {
 		return natClientEntry{}, false
 	}
-	return v.snapshot(hash, h.tick(), time.Now()), true
+	snap := h.snapshot(v, hash, h.tick(), time.Now())
+	if snap.v4 == nil && snap.v6 == nil {
+		return natClientEntry{}, false
+	}
+	return snap, true
 }
 
 func (h *NATTraversalHandler) cleanup() {
@@ -746,10 +779,10 @@ func (h *NATTraversalHandler) cleanup() {
 	defer h.mu.Unlock()
 	now := h.tick()
 	for k, entry := range h.entries {
-		if entry.v4.seen != 0 && natAge(now, entry.v4.seen) > h.ttl {
+		if entry.v4.seen != 0 && !h.liveSlot(entry.v4, now) {
 			h.clearSlotLocked(k, &entry, false)
 		}
-		if entry.v6.seen != 0 && natAge(now, entry.v6.seen) > h.ttl {
+		if entry.v6.seen != 0 && !h.liveSlot(entry.v6, now) {
 			h.clearSlotLocked(k, &entry, true)
 		}
 		if entry.v4.seen == 0 && entry.v6.seen == 0 {
@@ -776,10 +809,11 @@ func (h *NATTraversalHandler) candidateCount(hash [16]byte) int {
 		return 0
 	}
 	n := 0
-	if entry.v4.seen != 0 {
+	now := h.tick()
+	if h.liveSlot(entry.v4, now) {
 		n++
 	}
-	if entry.v6.seen != 0 {
+	if h.liveSlot(entry.v6, now) {
 		n++
 	}
 	return n
@@ -823,7 +857,7 @@ func (h *NATTraversalHandler) registrySummary(limit int) string {
 		if i > 0 {
 			b.WriteString("; ")
 		}
-		snap := entry.snapshot(hash, h.tick(), time.Now())
+		snap := h.snapshot(entry, hash, h.tick(), time.Now())
 		b.WriteString(fmt.Sprintf("hash=%x v4=%s v6=%s", hash[:], formatCandidate(snap.v4), formatCandidate(snap.v6)))
 		i++
 		if i >= limit {
@@ -1032,17 +1066,23 @@ func (e *natStoredEntry) slot(v6 bool) *natSlot {
 	return &e.v4
 }
 
-// snapshot builds the natClientEntry form handed out by get. nowTick and now are the
-// same instant as a tick and as a time.
-func (e natStoredEntry) snapshot(hash [16]byte, nowTick uint32, now time.Time) natClientEntry {
+// snapshot builds the natClientEntry form handed out by get, live slots only. nowTick
+// and now are the same instant as a tick and as a time.
+func (h *NATTraversalHandler) snapshot(e natStoredEntry, hash [16]byte, nowTick uint32, now time.Time) natClientEntry {
 	out := natClientEntry{hash: hash, version: e.version}
-	if e.v4.seen != 0 {
-		out.v4 = &natCandidate{addr: e.v4.ep.udpAddr(), lastSeen: now.Add(-natAge(nowTick, e.v4.seen))}
+	if h.liveSlot(e.v4, nowTick) {
+		out.v4 = &natCandidate{addr: e.v4.ep.udpAddr(), lastSeen: now.Add(-natAge(nowTick, e.v4.seen)), sock: e.v4.sock}
 	}
-	if e.v6.seen != 0 {
-		out.v6 = &natCandidate{addr: e.v6.ep.udpAddr(), lastSeen: now.Add(-natAge(nowTick, e.v6.seen))}
+	if h.liveSlot(e.v6, nowTick) {
+		out.v6 = &natCandidate{addr: e.v6.ep.udpAddr(), lastSeen: now.Add(-natAge(nowTick, e.v6.seen)), sock: e.v6.sock}
 	}
 	return out
+}
+
+// liveSlot reports whether a slot holds a candidate younger than the TTL. Every reader
+// goes through it, so a candidate expires at the TTL, not at the next sweep.
+func (h *NATTraversalHandler) liveSlot(s natSlot, nowTick uint32) bool {
+	return s.seen != 0 && natAge(nowTick, s.seen) < h.ttl
 }
 
 // tick is the current time as natSlot.seen counts it: milliseconds since the handler
@@ -1067,7 +1107,7 @@ func natAge(now, seen uint32) time.Duration {
 // An endpoint is one socket, so it belongs to one hash. When another hash holds it,
 // that older registration is stale (a client that restarted with a new hash on the same
 // port) and its slot is cleared: otherwise its keepalives would refresh the wrong entry.
-func (h *NATTraversalHandler) setSlotLocked(hash [16]byte, entry *natStoredEntry, v6 bool, ep natEndpoint, now uint32) {
+func (h *NATTraversalHandler) setSlotLocked(hash [16]byte, entry *natStoredEntry, v6 bool, ep natEndpoint, sock uint8, now uint32) {
 	slot := entry.slot(v6)
 	if slot.seen != 0 && slot.ep != ep && h.byAddr[slot.ep] == hash {
 		delete(h.byAddr, slot.ep)
@@ -1085,6 +1125,7 @@ func (h *NATTraversalHandler) setSlotLocked(hash [16]byte, entry *natStoredEntry
 		}
 	}
 	slot.ep = ep
+	slot.sock = sock
 	slot.seen = now
 	h.byAddr[ep] = hash
 }
@@ -1099,30 +1140,86 @@ func (h *NATTraversalHandler) clearSlotLocked(hash [16]byte, entry *natStoredEnt
 	*slot = natSlot{}
 }
 
-// send writes processPacket's answers, all in plaintext. A datagram with via set
-// leaves from that socket; one back to the sender from the socket it arrived on. Any
-// other is a forward to the second peer of a pairing: the arrival address is the one
-// the *sender* used, not the target, so it goes out from the IPv6 we announce in the
-// REGISTER ack, the address the target was told to keep talking to.
-func (h *NATTraversalHandler) send(conn UDPReplyConn, remote *net.UDPAddr, outs []natOutbound) {
+// send writes processPacket's answers, all in plaintext; the immediate path, completeWake
+// (through it) and expireWake all go through here. conn is the socket the current
+// datagram arrived on and remote its sender (both nil for expireWake).
+//   - via set: a requester waiting on a wake, from the reply conn of its own SYNC2.
+//   - back to the sender, or any other answer: from conn, pinned to the arrival address.
+//   - a forward to the target of a pairing: from the socket the target last REGISTERed
+//     or kept alive on (fallback when unknown) and, over IPv6, from the IPv6 we announce
+//     in the REGISTER ack — the arrival address is the one the *requester* used.
+func (h *NATTraversalHandler) send(conn, fallback UDPReplyConn, remote *net.UDPAddr, outs []natOutbound) {
 	var forwardSrc net.IP // resolved on first use; most datagrams only answer the sender
 	for _, out := range outs {
 		if out.to == nil || len(out.packet) == 0 {
 			continue
 		}
-		if out.packet[0] == PrNat {
-			LogNATRaw("nat", "send", out.to.String(), out.packet)
-		}
 		switch {
 		case out.via != nil:
+			LogNATRaw("nat", "send", out.to.String(), out.packet)
 			_, _ = out.via.WriteToUDP(out.packet, out.to)
-		case sameEndpoint(out.to, remote):
+		case !out.forward || sameEndpoint(out.to, remote):
+			if conn == nil {
+				continue
+			}
+			LogNATRaw("nat", "send", out.to.String(), out.packet)
 			_, _ = conn.WriteToUDP(out.packet, out.to)
 		default:
+			c := h.socketConn(out.sock)
+			if c == nil {
+				c = fallback
+			}
+			if c == nil {
+				continue
+			}
 			if forwardSrc == nil {
 				forwardSrc = h.announcedIPv6()
 			}
-			_, _ = WriteToUDPFrom(conn, out.packet, out.to, forwardSrc)
+			LogNATRaw("nat", "send", out.to.String(), out.packet)
+			_, _ = WriteToUDPFrom(c, out.packet, out.to, forwardSrc)
 		}
 	}
+}
+
+// socketIndex returns conn's natSlot.sock value, learning the socket on first sight. It
+// is keyed by local port; a socket replaced on the same port replaces the entry. 0 when
+// conn is nil, its port unknown, or the table full.
+func (h *NATTraversalHandler) socketIndex(conn UDPReplyConn, localPort uint16) uint8 {
+	if conn == nil || localPort == 0 {
+		return 0
+	}
+	listener := replyConnListener(conn)
+	h.mu.RLock()
+	idx, ok := h.sockByPort[localPort]
+	same := ok && (listener == nil || replyConnListener(h.socks[idx-1]) == listener)
+	h.mu.RUnlock()
+	if same {
+		return idx
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if idx, ok := h.sockByPort[localPort]; ok {
+		h.socks[idx-1] = baseReplyConn(conn)
+		return idx
+	}
+	if len(h.socks) >= 255 {
+		return 0
+	}
+	h.socks = append(h.socks, baseReplyConn(conn))
+	idx = uint8(len(h.socks))
+	h.sockByPort[localPort] = idx
+	return idx
+}
+
+// socketConn returns the socket a natSlot.sock value names, or nil for 0.
+func (h *NATTraversalHandler) socketConn(sock uint8) UDPReplyConn {
+	if sock == 0 {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if int(sock) > len(h.socks) {
+		return nil
+	}
+	return h.socks[sock-1]
 }
