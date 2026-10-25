@@ -1,6 +1,12 @@
 package ed2k
 
-import "testing"
+import (
+	"bytes"
+	"encoding/binary"
+	"testing"
+
+	"enode/storage"
+)
 
 func TestBuildTCPFlags(t *testing.T) {
 	// Only eMule-defined server bits are emitted; the client-side SRVCAP_* bits
@@ -63,5 +69,31 @@ func TestBuildUDPFlags(t *testing.T) {
 	t.Logf("input: ForeignCallback on, output: 0x%x", foreign)
 	if foreign&FlagForeignCallback == 0 || flags&FlagForeignCallback != 0 || foreign&FlagNatRendezvous != 0 {
 		t.Fatalf("FlagForeignCallback not driven by ForeignCallback: 0x%x / 0x%x", foreign, flags)
+	}
+	if foreign&0x100000 == 0 || foreign&0x400000 != 0 {
+		t.Fatalf("foreign callback must be UDP bit 0x100000, not 0x400000: 0x%x", foreign)
+	}
+}
+
+// The foreign callback bit goes out in every status reply, server probes (challenge
+// 0x55AA....) included.
+func TestStatResCarriesForeignCallbackFlag(t *testing.T) {
+	flags := BuildUDPFlags(UDPServerConfig{SupportCrypt: true, NatCallback: true, ForeignCallback: true})
+	rt := NewServerRuntime(TCPRuntimeConfig{Port: 4661}, UDPRuntimeConfig{UDPFlags: flags}, storage.NewMemoryEngine())
+	for _, challenge := range []uint32{0x55AA1234, 0x12345678} {
+		packet, err := rt.buildStatRes(challenge, 0x1111, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw := packet.Bytes()
+		at := bytes.Index(raw, binary.LittleEndian.AppendUint32(nil, challenge))
+		if at < 0 || at+28 > len(raw) {
+			t.Fatalf("challenge 0x%x not found in % x", challenge, raw)
+		}
+		got := binary.LittleEndian.Uint32(raw[at+24:])
+		t.Logf("input: challenge 0x%x, output: UDP flags 0x%x", challenge, got)
+		if got&FlagForeignCallback == 0 {
+			t.Fatalf("challenge 0x%x: flags 0x%x lack 0x100000", challenge, got)
+		}
 	}
 }

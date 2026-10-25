@@ -124,6 +124,10 @@ type UDPRuntimeConfig struct {
 	RateLimitPerIPPerMinute int
 	// BotDetection is udp.botDetection: which UDP queriers are listed as bots.
 	BotDetection BotDetectionConfig
+	// ForeignPerMinute and ForeignBurst limit foreign callback requests per address
+	// (natTraversal.foreignPerMinute / foreignBurst); ForeignPerMinute 0 is off.
+	ForeignPerMinute int
+	ForeignBurst     int
 	// ServerSearch is advertised in the extended OP_SERVER_DESC_RES when
 	// serverSearch.mode is "gossip". An empty URL omits the tags.
 	ServerSearch ServerSearchAdvert
@@ -3038,10 +3042,7 @@ func (s *ServerRuntime) udpOpcodeEnabled(enabled bool, code uint8, remote *net.U
 	// The bot detector sees the query first: the limiter would otherwise hide every
 	// rate above its own budget from it.
 	key := addressKey(remote.IP)
-	if s.bots.record(key, s.udp().BotDetection) {
-		s.blocks.bots.Add(1)
-		logging.Warnf("udp querier looks automated source=%s (observed only, not blocked)", key)
-	}
+	s.observeUDPQuerier(key)
 	if !s.udpLimiter.Allow(key) {
 		s.blocks.rateLimited.Add(1)
 		logging.Debugf("udp opcode rate limited remote=%s opcode=0x%x", remote, code)

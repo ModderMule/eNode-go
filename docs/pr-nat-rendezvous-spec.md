@@ -23,7 +23,7 @@ and a hash registers only from the address of the eD2K session logged in under i
 registry open to any hash let anyone locate a known user's endpoint without being in a
 transfer with them (aMule, andrey23127/ed2k-server#40), so cross-server use is retired. A
 LowID callback to a client of another server uses the foreign callback
-(`lugdunum-nat-callback.local.md`, "Foreign callback (0x400000)").
+(`lugdunum-nat-callback.local.md`, "Foreign callback (0x100000)").
 
 ## Discovery
 
@@ -212,7 +212,7 @@ hash comes from the source list or the hello.
 Retired. `PR_NAT` pairs only clients logged in to this server: a `REGISTER` for a hash with
 no session here is refused, and a `SYNC2` naming one gets `FAILED 0x03`. A LowID callback to
 a client of another server goes through the foreign callback of the target's server (UDP
-flag `0x400000`, see `lugdunum-nat-callback.local.md`). eMuleQt's sweep of up to 8 servers
+flag `0x100000`, see `lugdunum-nat-callback.local.md`). eMuleQt's sweep of up to 8 servers
 for `0x40000` in their UDP flags finds nothing on eNode-go any more.
 
 **Who keeps a standing registration today.** eMuleQt registers only while all of these hold:
@@ -236,9 +236,9 @@ other clients do not speak `PR_NAT`.
 | Address- or port-restricted NAT (most home routers) | works | usually fails until the reverse request | works |
 | Symmetric NAT | fails | fails | fails |
 | IPv6 | yes, preferred when both registered one | no | no |
-| Cross-server | no (retired) | foreign callback, `0x400000` (eNode-go) | no |
+| Cross-server | no (retired) | foreign callback, UDP `0x100000` (eNode-go, ed2k-server) | no |
 | Freshness of the endpoint | the last keepalive, at most a TTL old | the request itself, always fresh | the last `0x9F`, up to 600 s old; fresh with the extension |
-| Waking the target | TCP `OP_NAT_WAKE`, then its `REGISTER`; else its standing UDP mapping | TCP `0x37`, or UDP `0xA7` within 19 s (eNode-go) of its own request; foreign: `0x37`, then the target's `0x9F` | `0x61` over TCP; with the extension `0x37`, then the target's `0x9F` |
+| Waking the target | TCP `OP_NAT_WAKE`, then its `REGISTER`; else its standing UDP mapping | TCP `0x37`, or UDP `0xA7` within 19 s (eNode-go) of its own request; foreign: `0x37`, then the target's `0x9F` (after 3 s its last known port) | `0x61` over TCP; with the extension `0x37`, then the target's `0x9F` |
 | Standing traffic while idle | none with the wake-up; else keepalive every 60 s per family | none | `0x9F` every ~60 s |
 | Server memory per idle client | none with the wake-up (one bool in existing padding); else 146 bytes per single-family client (measured) | none (eNode-go: one bool in existing padding) | one port and timestamp per client |
 | Failure feedback | `FAILED` with a reason | none | `0x62` with a reason |

@@ -40,7 +40,7 @@ func TestServerListenConfigsNatFlags(t *testing.T) {
 	}
 }
 
-// The foreign callback flag (UDP 0x400000) follows natTraversal.foreignCallback, and
+// The foreign callback flag (UDP 0x100000) follows natTraversal.foreignCallback, and
 // only where the Lugdunum callback itself is effective.
 func TestServerListenConfigsForeignCallback(t *testing.T) {
 	off := false
@@ -55,11 +55,17 @@ func TestServerListenConfigsForeignCallback(t *testing.T) {
 		{"no crypt", config.Config{TCP: config.TCPConfig{AllowLowIDs: true}}, false},
 		{"no LowIDs", config.Config{SupportCrypt: true}, false},
 	}
+	if ed2k.FlagForeignCallback != 0x100000 {
+		t.Fatalf("FlagForeignCallback 0x%x, want 0x100000", ed2k.FlagForeignCallback)
+	}
 	for _, tc := range cases {
 		tcpRT, udpRT := buildRuntimeConfigs(tc.cfg, bootDerived{})
 		t.Logf("input: %s, output: udp=0x%x", tc.name, udpRT.UDPFlags)
 		if (udpRT.UDPFlags&ed2k.FlagForeignCallback != 0) != tc.want || tcpRT.Flags&ed2k.FlagForeignCallback != 0 {
 			t.Fatalf("%s: udp=0x%x tcp=0x%x, want foreign=%t on UDP only", tc.name, udpRT.UDPFlags, tcpRT.Flags, tc.want)
+		}
+		if udpRT.ForeignBurst != config.DefaultNATForeignBurst || udpRT.ForeignPerMinute != config.DefaultNATForeignPerMinute {
+			t.Fatalf("%s: foreign limits %d/%d, want defaults", tc.name, udpRT.ForeignBurst, udpRT.ForeignPerMinute)
 		}
 	}
 }

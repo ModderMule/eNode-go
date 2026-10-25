@@ -362,10 +362,16 @@ type NATConfig struct {
 	// key defaults on. See docs/lugdunum-nat-callback.local.md.
 	LugdunumCallback *bool `yaml:"lugdunumCallback"`
 	// ForeignCallback lets a client not logged in here ask for a LowID callback to one
-	// of our LowIDs: obfuscated UDP 0xA6 with requester ID 0, flag 0x400000. Effective
-	// only with the Lugdunum callback. *bool so an absent key defaults on. See
-	// docs/lugdunum-nat-callback.local.md.
+	// of our LowIDs: obfuscated UDP 0xA6 with requester ID 0, UDP flag 0x100000.
+	// Effective only with the Lugdunum callback. *bool so an absent key defaults on.
+	// See docs/lugdunum-nat-callback.local.md.
 	ForeignCallback *bool `yaml:"foreignCallback"`
+	// ForeignBurst and ForeignPerMinute limit foreign callback requests per source
+	// address (IPv4, or IPv6 /64): a burst of ForeignBurst, then ForeignPerMinute per
+	// minute. Pointers so an explicit 0 differs from absent (defaults 10 and 60).
+	// ForeignPerMinute 0 is off; ForeignBurst 0 means a burst of ForeignPerMinute.
+	ForeignBurst     *int `yaml:"foreignBurst"`
+	ForeignPerMinute *int `yaml:"foreignPerMinute"`
 	// TCPWake enables the PR_NAT TCP wake-up: flag 0x200000, and a SYNC2 for a
 	// logged-in client that set login bit 0x200000 and has no registration wakes it
 	// with TCP OP_NAT_WAKE (0x46) instead of failing. Such clients then need no
@@ -381,6 +387,23 @@ func (c NATConfig) IPv6OrDefault() bool { return boolOrDefault(c.IPv6, true) }
 // ForeignCallbackOrDefault reports whether the foreign callback is enabled,
 // defaulting to true (effective only with the Lugdunum callback).
 func (c NATConfig) ForeignCallbackOrDefault() bool { return boolOrDefault(c.ForeignCallback, true) }
+
+// Defaults of natTraversal.foreignBurst and foreignPerMinute, as ed2k-server: a burst
+// of 10, then one per second.
+const (
+	DefaultNATForeignBurst     = 10
+	DefaultNATForeignPerMinute = 60
+)
+
+// ForeignBurstOrDefault resolves natTraversal.foreignBurst.
+func (c NATConfig) ForeignBurstOrDefault() int {
+	return intOrDefault(c.ForeignBurst, DefaultNATForeignBurst)
+}
+
+// ForeignPerMinuteOrDefault resolves natTraversal.foreignPerMinute; 0 is off.
+func (c NATConfig) ForeignPerMinuteOrDefault() int {
+	return intOrDefault(c.ForeignPerMinute, DefaultNATForeignPerMinute)
+}
 
 // LugdunumCallbackOrDefault reports whether the Lugdunum NAT callback is enabled,
 // defaulting to true (effective only with supportCrypt).

@@ -84,3 +84,52 @@ func TestLimiterSetRate(t *testing.T) {
 	var none *Limiter
 	none.SetRate(5)
 }
+
+// Burst apart from the rate: 10 at once, then one per second at 60/min.
+func TestLimiterSeparateBurst(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	l := NewBurstWithClock(60, 10, func() time.Time { return now })
+	n := 0
+	for i := 0; i < 20; i++ {
+		if l.Allow("k") {
+			n++
+		}
+	}
+	now = now.Add(time.Second)
+	a, b := l.Allow("k"), l.Allow("k")
+	now = now.Add(time.Hour)
+	refilled := 0
+	for i := 0; i < 20; i++ {
+		if l.Allow("k") {
+			refilled++
+		}
+	}
+	t.Logf("input: 20 calls, +1 s 2 calls, +1 h 20 calls, burst 10 rate 60/min output: %d, %v %v, %d", n, a, b, refilled)
+	if n != 10 || !a || b || refilled != 10 {
+		t.Fatalf("got %d, %v %v, %d; want 10, true false, 10", n, a, b, refilled)
+	}
+
+	l.SetLimits(60, 3)
+	now = now.Add(time.Hour)
+	capped := 0
+	for i := 0; i < 10; i++ {
+		if l.Allow("k") {
+			capped++
+		}
+	}
+	l.SetRate(120) // burst stays 3
+	now = now.Add(time.Hour)
+	kept := 0
+	for i := 0; i < 10; i++ {
+		if l.Allow("k") {
+			kept++
+		}
+	}
+	t.Logf("input: SetLimits(60,3), then SetRate(120) output: %d, %d", capped, kept)
+	if capped != 3 || kept != 3 {
+		t.Fatalf("got %d, %d; want 3, 3", capped, kept)
+	}
+	if New(5).burst != 5 {
+		t.Fatal("New must keep burst == perMinute")
+	}
+}

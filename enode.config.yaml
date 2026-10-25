@@ -695,9 +695,15 @@ natTraversal:
   lugdunumCallback: true
   # Foreign callback: a client not logged in here sends an obfuscated UDP 0xA6 with
   # requester ID 0 naming one of our LowIDs; we wake it with TCP 0x37 and send the
-  # requester its endpoint (UDP 0xA7) once its UDP 0x9F arrives. Advertises UDP flag
-  # 0x400000. Needs lugdunumCallback. Default on.
+  # requester its endpoint (UDP 0xA7) once its UDP 0x9F arrives, or after 3 s with
+  # its last known UDP port. Advertises UDP flag 0x100000 in every status reply.
+  # Needs lugdunumCallback. Default on.
   foreignCallback: true
+  # Foreign callback requests per source address (IPv4, or IPv6 /64): a burst of
+  # foreignBurst, then foreignPerMinute per minute. foreignPerMinute 0 is off;
+  # foreignBurst 0 means a burst of foreignPerMinute. Defaults 10 and 60.
+  foreignBurst: 10
+  foreignPerMinute: 60
   # PR_NAT TCP wake-up: advertise flag 0x200000 and, when a SYNC2 names a client
   # logged in here that set login bit 0x200000 and has no registration, wake it with
   # TCP OP_NAT_WAKE (0x46) so it registers on demand. Such clients then send no

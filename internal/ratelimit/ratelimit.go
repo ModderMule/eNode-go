@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-// Limiter allows perMinute events per key, with bursts up to perMinute.
+// Limiter allows perMinute events per key, with bursts up to burst (perMinute
+// unless set apart with NewBurst).
 type Limiter struct {
 	now func() time.Time
 	// disabled is read without mu, so a limiter that is off costs one load.
@@ -17,9 +18,12 @@ type Limiter struct {
 
 	mu        sync.Mutex
 	perMinute float64
-	buckets   map[string]*bucket
-	lastGC    time.Time
-	maxIdle   time.Duration
+	burst     float64
+	// burstSet keeps burst apart from perMinute across SetRate.
+	burstSet bool
+	buckets  map[string]*bucket
+	lastGC   time.Time
+	maxIdle  time.Duration
 }
 
 type bucket struct {
@@ -37,12 +41,38 @@ func New(perMinute int) *Limiter {
 func NewWithClock(perMinute int, now func() time.Time) *Limiter {
 	l := &Limiter{
 		perMinute: float64(perMinute),
+		burst:     float64(perMinute),
 		now:       now,
 		buckets:   map[string]*bucket{},
 		maxIdle:   2 * time.Minute,
 	}
 	l.disabled.Store(perMinute <= 0)
 	return l
+}
+
+// NewBurst returns a limiter whose buckets hold burst tokens and refill at perMinute.
+// burst <= 0 means burst == perMinute; perMinute <= 0 allows everything.
+func NewBurst(perMinute, burst int) *Limiter {
+	return NewBurstWithClock(perMinute, burst, time.Now)
+}
+
+// NewBurstWithClock is NewBurst with an injected clock, for tests.
+func NewBurstWithClock(perMinute, burst int, now func() time.Time) *Limiter {
+	l := NewWithClock(perMinute, now)
+	l.setBurstLocked(burst)
+	return l
+}
+
+// SetLimits changes both the refill rate and the burst, as NewBurst takes them. A key
+// keeps the tokens it has left, capped at the new burst.
+func (l *Limiter) SetLimits(perMinute, burst int) {
+	if l == nil {
+		return
+	}
+	l.SetRate(perMinute)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.setBurstLocked(burst)
 }
 
 // SetRate changes the limit to perMinute events per key; perMinute <= 0 allows
@@ -54,6 +84,9 @@ func (l *Limiter) SetRate(perMinute int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.perMinute = float64(perMinute)
+	if !l.burstSet {
+		l.burst = l.perMinute
+	}
 	l.disabled.Store(perMinute <= 0)
 	if perMinute <= 0 {
 		clear(l.buckets)
@@ -71,10 +104,10 @@ func (l *Limiter) Allow(key string) bool {
 	l.gc(now)
 	b, ok := l.buckets[key]
 	if !ok {
-		b = &bucket{tokens: l.perMinute, last: now}
+		b = &bucket{tokens: l.burst, last: now}
 		l.buckets[key] = b
 	}
-	b.tokens = min(l.perMinute, b.tokens+now.Sub(b.last).Minutes()*l.perMinute)
+	b.tokens = min(l.burst, b.tokens+now.Sub(b.last).Minutes()*l.perMinute)
 	b.last = now
 	if b.tokens < 1 {
 		return false
@@ -84,15 +117,33 @@ func (l *Limiter) Allow(key string) bool {
 }
 
 // gc drops buckets idle long enough to be full again; they are indistinguishable
-// from a new one. Runs at most once per maxIdle. Callers hold mu.
+// from a new one. Runs at most once per idle span. Callers hold mu.
 func (l *Limiter) gc(now time.Time) {
-	if now.Sub(l.lastGC) < l.maxIdle {
+	idle := l.maxIdle
+	if l.perMinute > 0 {
+		// A burst above 2 min of refill takes longer to fill up.
+		idle = max(idle, time.Duration(l.burst/l.perMinute*float64(time.Minute)))
+	}
+	if now.Sub(l.lastGC) < idle {
 		return
 	}
 	l.lastGC = now
 	for k, b := range l.buckets {
-		if now.Sub(b.last) >= l.maxIdle {
+		if now.Sub(b.last) >= idle {
 			delete(l.buckets, k)
 		}
+	}
+}
+
+// setBurstLocked sets the bucket capacity; burst <= 0 follows perMinute. Callers
+// hold mu or own l exclusively.
+func (l *Limiter) setBurstLocked(burst int) {
+	l.burstSet = burst > 0
+	l.burst = l.perMinute
+	if l.burstSet {
+		l.burst = float64(burst)
+	}
+	for _, b := range l.buckets {
+		b.tokens = min(b.tokens, l.burst)
 	}
 }

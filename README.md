@@ -36,10 +36,13 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   over its TCP session, so it keeps no standing UDP registration. See
   [`docs/pr-nat-rendezvous-spec.md`](docs/pr-nat-rendezvous-spec.md).
 - Lugdunum LowID↔LowID NAT callback (UDP `0xA6` → `0xA7`/TCP `0x37`), and the foreign
-  callback (`natTraversal.foreignCallback`, default on, UDP flag `0x400000`): a client
+  callback (`natTraversal.foreignCallback`, default on, UDP flag `0x100000`): a client
   logged in to another server asks for a callback to one of our LowIDs with an
   obfuscated `0xA6` (requester ID 0); the target is woken with TCP `0x37` and its UDP
-  `0x9F` endpoint goes back to the requester in `0xA7`.
+  `0x9F` endpoint goes back to the requester in `0xA7` (after 3 s without a `0x9F`, its
+  last known UDP port). Per source address a burst of 10, then 60/min
+  (`natTraversal.foreignBurst`/`foreignPerMinute`), at most 60 distinct targets per
+  10 min; per target 6 wake-ups/min.
 - Files larger than 4 GiB
 - Server-to-server gossip: the Lugdunum `OP_SERVER_LIST_REQ/RES` handshake, so
   `OP_SERVERLIST` is populated from the live network instead of only a static list.
@@ -220,7 +223,9 @@ natTraversal:
   ipv6: true                 # IPv6 hole-punching (dual-stack candidates); needs ipv6.enabled
   tcpWake: true              # Wake a logged-in target over TCP (flag 0x200000, default on)
   lugdunumCallback: true     # Lugdunum LowID↔LowID callback (0xA6/0x37, default on)
-  foreignCallback: true      # Callback for clients of other servers (UDP flag 0x400000, default on)
+  foreignCallback: true      # Callback for clients of other servers (UDP flag 0x100000, default on)
+  foreignBurst: 10           # Foreign requests per source address: burst...
+  foreignPerMinute: 60       # ...then this many per minute (0 = no limit)
   registrationTTLSeconds: 90 # NAT registry TTL (seconds)
 
 ipv6:                        # IPv6 dual-stack; omit the whole block for IPv4-only behaviour

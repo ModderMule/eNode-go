@@ -574,7 +574,7 @@ spans servers and covers IPv6.
 unless **both** hashes are currently logged into it, replying `OP_NAT_FAILED` reason
 `0x03`, and a `REGISTER` for a hash not logged in here. `natTraversal.serverIndependent`
 is ignored. A cross-server LowID callback uses the foreign callback (UDP flag
-`0x400000`, `lugdunum-nat-callback.local.md`). `ST_NAT_PORT` is sent
+`0x100000`, `lugdunum-nat-callback.local.md`). `ST_NAT_PORT` is sent
 whenever `0x40000` or the wake-up flag `0x200000` is; same-server
 LowID↔LowID still works. The gate is family-agnostic — it applies equally to IPv4 and
 IPv6 pairings, before family selection.
@@ -589,7 +589,8 @@ IPv6 pairings, before family selection.
   datagrams (drops them, no ack, nothing stored) and the protocol is IPv4-only.
 - `natTraversal.serverIndependent` — retired, ignored with a warning.
 - `natTraversal.foreignCallback` — foreign callback (default **true**, UDP flag
-  `0x400000`); needs `lugdunumCallback`.
+  `0x100000`); needs `lugdunumCallback`. `natTraversal.foreignBurst` /
+  `foreignPerMinute` limit its requests per source address (default 10, then 60/min).
 - `natTraversal.tcpWake` — TCP wake-up of a logged-in target (default **true**, flag
   `0x200000`); see [`pr-nat-rendezvous-spec.md`](pr-nat-rendezvous-spec.md).
 - `natTraversal.lugdunumCallback` — Lugdunum's LowID↔LowID callback (default **true**).

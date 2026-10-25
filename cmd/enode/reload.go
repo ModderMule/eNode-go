@@ -379,6 +379,8 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		HardFiles: uint32(cfg.Files.HardLimitOrDefault()),
 
 		RateLimitPerIPPerMinute: cfg.UDP.RateLimitPerIPPerMinuteOrDefault(),
+		ForeignPerMinute:        cfg.NAT.ForeignPerMinuteOrDefault(),
+		ForeignBurst:            cfg.NAT.ForeignBurstOrDefault(),
 		BotDetection: ed2k.BotDetectionConfig{
 			Enabled:               cfg.UDP.BotDetection.EnabledOrDefault(),
 			MinQueriesPerMinute:   cfg.UDP.BotDetection.MinQueriesPerMinute,

@@ -51,3 +51,22 @@ func TestNATForeignCallbackDefault(t *testing.T) {
 		t.Fatal("natTraversal.foreignCallback must default on and honour false")
 	}
 }
+
+func TestNATForeignLimitDefaults(t *testing.T) {
+	cfg, err := Load(writeTempConfig(t, "name: t\nnatTraversal:\n  enabled: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := Load(writeTempConfig(t, "name: t\nnatTraversal:\n  foreignBurst: 4\n  foreignPerMinute: 0\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("input: omitted / 4,0, output: %d,%d / %d,%d", cfg.NAT.ForeignBurstOrDefault(), cfg.NAT.ForeignPerMinuteOrDefault(),
+		set.NAT.ForeignBurstOrDefault(), set.NAT.ForeignPerMinuteOrDefault())
+	if cfg.NAT.ForeignBurstOrDefault() != 10 || cfg.NAT.ForeignPerMinuteOrDefault() != 60 {
+		t.Fatal("foreign limits must default to burst 10, 60/min")
+	}
+	if set.NAT.ForeignBurstOrDefault() != 4 || set.NAT.ForeignPerMinuteOrDefault() != 0 {
+		t.Fatal("explicit foreign limits not honoured")
+	}
+}

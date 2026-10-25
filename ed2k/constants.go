@@ -430,8 +430,9 @@ const (
 	// ed2k-server's OP_IPV6_UPDATE bit. Taken on the public network: 0x05DD, 0x1000
 	// (Lugdunum NAT callback), 0x4000 (IPv6), 0x8000 (ed2k-server IPv6 update), 0x10000
 	// (meta search), 0x20000 (ed2k-server LowID hole punch), 0x80000 (FlagServerSearch),
-	// 0x100000 (ed2k-server 0.9.85 two-sided hole punch, andrey23127/ed2k-server#39).
-	// New eNode-go bits go above 0x200000 (FlagNatWake below).
+	// 0x100000 (ed2k-server 0.9.85 two-sided hole punch, andrey23127/ed2k-server#39;
+	// in the UDP word also FlagForeignCallback). 0x400000 is free again. New eNode-go
+	// bits go above 0x200000 (FlagNatWake below).
 	FlagNatRendezvous uint32 = 0x40000
 	// FlagNatWake advertises the PR_NAT TCP wake-up (OpNatWake): this server wakes a
 	// logged-in PR_NAT target that has no registration, so a client that set
@@ -439,11 +440,14 @@ const (
 	// when natTraversal.enabled and natTraversal.tcpWake are on. 0x200000 was the
 	// first bit free everywhere (ed2k-server README bit table, 2026-10-25).
 	FlagNatWake uint32 = 0x200000
-	// FlagForeignCallback (UDP word) advertises the foreign callback: a client not
-	// logged in here sends obfuscated UDP 0xA6 <target LowID><0>[<crypt>], we wake the
+	// FlagForeignCallback (UDP word only) advertises ed2k-server's hole-punch extension
+	// including requests from clients logged in elsewhere (andrey23127/ed2k-server#40):
+	// such a client sends obfuscated UDP 0xA6 <target LowID><0>[<crypt>], we wake the
 	// target with TCP 0x37 and answer the requester with UDP 0xA7 once the target's
-	// OpNatKeepalive arrives. See docs/lugdunum-nat-callback.local.md.
-	FlagForeignCallback uint32 = 0x400000
+	// OpNatKeepalive arrives (or after 3 s with its last known port). Same number as
+	// the login bit SrvCapHolePunchExt. Sent in every status reply, probes included.
+	// Was 0x400000 until 2026-10-26. See docs/lugdunum-nat-callback.local.md.
+	FlagForeignCallback uint32 = 0x100000
 	// FlagMetaSearch advertises that search answers may carry torrent/Usenet/web rows
 	// (FT_META_* tags, docs/meta-search.md). 0x10000 is the next clean bit above
 	// 0x8000; clients ignore unknown bits. Set on both the TCP and UDP word

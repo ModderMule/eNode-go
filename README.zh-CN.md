@@ -24,7 +24,7 @@
 - Lugdunum/eMule 扩展协议
 - gzip 压缩
 - LowID 回调（IPv4；当请求方仅能通过 IPv6 到达时，使用 `OP_CALLBACKREQUESTED_IPV6`）
-- NAT 穿透服务端（`OP_VC_NAT_HEADER`、`OP_NAT_REGISTER`、`OP_NAT_SYNC2`）：双栈 UDP 打洞，支持 LowID↔LowID 与被防火墙隔离的 IPv6↔IPv6 对端（每个客户端保存一个 v4 和一个 v6 候选端点，优先 v6）；由 `natTraversal.ipv6` 控制（默认开启，需 `ipv6.enabled`）。仅为登录到本服务器的客户端配对，并通过 TCP 标志 `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` 及 `OP_SERVERIDENT` 中的 NAT 端口标签对外通告。跨服务器的 LowID 回连使用外部回连（`natTraversal.foreignCallback`，默认开启，UDP 标志 `0x400000`）。详见 [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md) §9。
+- NAT 穿透服务端（`OP_VC_NAT_HEADER`、`OP_NAT_REGISTER`、`OP_NAT_SYNC2`）：双栈 UDP 打洞，支持 LowID↔LowID 与被防火墙隔离的 IPv6↔IPv6 对端（每个客户端保存一个 v4 和一个 v6 候选端点，优先 v6）；由 `natTraversal.ipv6` 控制（默认开启，需 `ipv6.enabled`）。仅为登录到本服务器的客户端配对，并通过 TCP 标志 `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` 及 `OP_SERVERIDENT` 中的 NAT 端口标签对外通告。跨服务器的 LowID 回连使用外部回连（`natTraversal.foreignCallback`，默认开启，UDP 标志 `0x100000`；每个源地址突发 10 次、之后每分钟 60 次，由 `natTraversal.foreignBurst`/`foreignPerMinute` 配置；每个源地址 10 分钟内最多 60 个不同目标；每个目标每分钟最多唤醒 6 次；3 秒内未收到 `0x9F` 时以目标最近已知的 UDP 端口回复 `0xA7`）。详见 [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md) §9。
 - IPv6 双栈：接受 IPv6 登录、记录并校验各客户端的 IPv6、发布 IPv6 源，并在 `OP_SERVERLIST` 中通告 IPv6 对端服务器（兼容 eMuleAI/eMuleQt 的 `CT_MOD_*`）。详见 [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md)。设置 `ipv6.enabled: false` 可恢复纯 IPv4 行为。
 - 支持大于 4 GiB 的文件
 - 管理面板：仅用 Go 标准库（零第三方依赖）通过 HTTP 提供的自包含分页（标签页）HTML。状态页展示实时的客户端 / 文件 / LowID / 对等服务器数量、监听端口、已启用特性、版本与运行时长；其余标签页列出客户端、文件、对等服务器、过滤器、封禁、自动化查询者、拒绝统计、健康状况、运行时、账户以及生效配置（隐藏密钥）。默认开启且仅绑定 `127.0.0.1`；状态页之外的内容需要回环访问或配置 `admin.username` / `admin.password`。详见 [`docs/admin-status-dashboard.md`](docs/admin-status-dashboard.md)。公开的 `GET /healthz` 与 `GET /status` 由 Meta API 的 HTTP 监听端口提供，详见 [`docs/meta-api.md`](docs/meta-api.md#health-and-status)。
@@ -165,7 +165,9 @@ natTraversal:
   ipv6: true                 # IPv6 打洞（双栈候选端点）；需 ipv6.enabled
   tcpWake: true              # 通过 TCP 唤醒已登录的目标（标志 0x200000，默认开启）
   lugdunumCallback: true     # Lugdunum LowID↔LowID 回调（0xA6/0x37，默认开启）
-  foreignCallback: true      # 为其他服务器的客户端回连（UDP 标志 0x400000，默认开启）
+  foreignCallback: true      # 为其他服务器的客户端回连（UDP 标志 0x100000，默认开启）
+  foreignBurst: 10           # 每个源地址的外部回连请求突发上限……
+  foreignPerMinute: 60       # ……之后每分钟上限（0 = 不限）
   registrationTTLSeconds: 90 # NAT 注册表项有效期（秒）
 
 ipv6:                        # IPv6 双栈；整段省略即为仅 IPv4 行为

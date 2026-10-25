@@ -29,7 +29,7 @@ type UDPServerConfig struct {
 	// NatWake advertises FlagNatWake (0x200000) in the UDP flags too, as on the TCP
 	// word. FlagNatRendezvous (0x40000) is TCP only: PR_NAT serves logged-in clients.
 	NatWake bool
-	// ForeignCallback advertises FlagForeignCallback (0x400000): a client not logged
+	// ForeignCallback advertises FlagForeignCallback (0x100000): a client not logged
 	// in here may send the foreign 0xA6 (requester ID 0).
 	ForeignCallback bool
 	// Workers and QueueSize bound the datagram handler pool. Zero means the
