@@ -20,9 +20,14 @@ import (
 // mapping and the server knows the port), else over TCP 0x37 on B's session. The
 // server relays nothing else.
 //
+// Foreign callback (UDP flag 0x400000): a requester not logged in here sends 0xa6
+// <B's ID><0>[<crypt>]. B is woken with TCP 0x37 (ID 0, no hash) and bursts UDP
+// OpNatKeepalive; its source port goes to the requester in UDP 0xa7.
+//
 // Memory: an idle session pays nothing. The capability is one bool in existing
 // padding of tcpClient, and the 19 s window lives in natCallbackState, which only
-// holds clients that sent a request in the last natCallbackWindow.
+// holds clients that sent a request in the last natCallbackWindow. The hole-punch
+// login bit is one more bool in that padding.
 
 // natCallbackWindow is how long after its own 0xa6 a client is answered over UDP.
 // Measured on eserver 17.15: 15 s still got UDP, 23 s got TCP; the eMuleQt design
@@ -35,6 +40,15 @@ const natCallbackWindow = 19 * time.Second
 // IPv4, and a per-address budget would let a few of them silence the rest.
 const natCallbackPerRequesterPerMinute = 60
 
+// Foreign callback limits: per source address (IPv4, or IPv6 /64) and per target
+// LowID. A requester repeats every 5 s up to 3 times.
+const (
+	natForeignPerAddressPerMinute = 20
+	natForeignPerTargetPerMinute  = 10
+	// natForeignMaxPerTarget caps pending requesters per target; the oldest goes.
+	natForeignMaxPerTarget = 4
+)
+
 // natCallbackNoticeFlagHash is OR-ed into the notice's crypt byte when the
 // requester's user hash follows.
 const natCallbackNoticeFlagHash byte = 0x80
@@ -46,6 +60,23 @@ type natCallbackState struct {
 	limiter   *ratelimit.Limiter
 	recent    map[uint32]natCallbackRecent
 	lastSweep time.Time
+
+	// Foreign callback: requesters not logged in here, waiting for their target's
+	// OpNatKeepalive, keyed by target LowID. Only requests of the last window.
+	foreignAddr   *ratelimit.Limiter
+	foreignTarget *ratelimit.Limiter
+	foreign       map[uint32][]natForeignPending
+	foreignSweep  time.Time
+}
+
+// natForeignPending is a foreign requester: where its 0xa6 came from, its crypt
+// bits and the socket it reached, which the 0xa7 leaves from.
+type natForeignPending struct {
+	ipv4  uint32
+	port  uint16
+	crypt byte
+	at    time.Time
+	conn  UDPReplyConn
 }
 
 // natCallbackRecent is a client that sent an accepted 0xa6: the address its
@@ -136,6 +167,10 @@ func (s *ServerRuntime) udpNatCallbackRequest(b *Buffer, remote *net.UDPAddr, co
 	if err != nil {
 		return
 	}
+	if requesterID == 0 {
+		s.udpForeignCallbackRequest(b, remote, conn, srcIPv4, targetID)
+		return
+	}
 	requester, ok := s.natCallbackPeer(requesterID)
 	if !ok || requester.ipv4 != srcIPv4 {
 		// The requester ID must be a LowID session logged in from this IPv4. That
@@ -188,13 +223,108 @@ func (s *ServerRuntime) udpNatCallbackRequest(b *Buffer, remote *net.UDPAddr, co
 	_ = target.client.writePacket(packet)
 }
 
+// foreignCallbackEnabled reports whether this server takes the foreign 0xa6
+// (requester ID 0). The advertised UDP flag is the switch.
+func (s *ServerRuntime) foreignCallbackEnabled() bool {
+	return s.natCallbackEnabled() && s.udp().UDPFlags&FlagForeignCallback != 0
+}
+
+// udpForeignCallbackRequest handles 0xa6 <target ID 4><0 4>[<crypt 1>] from a client
+// not logged in here. The obfuscation key is derived per source IP, so a decrypted
+// request proves the requester's address. The target is woken with TCP 0x37
+// (requester ID 0, no hash); the requester gets UDP 0xa7 once the target's
+// OpNatKeepalive arrives. Every refusal is silent.
+func (s *ServerRuntime) udpForeignCallbackRequest(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, srcIPv4, targetID uint32) {
+	if !s.foreignCallbackEnabled() {
+		return
+	}
+	// A client connected here uses the normal request with its own ID.
+	if s.hasConnectionFrom(remote.IP) {
+		logging.Debugf("foreign callback from a connected address ignored remote=%s", remote)
+		return
+	}
+	var crypt byte
+	if b.Remaining() > 0 {
+		crypt, _ = b.GetUInt8()
+	}
+	if !s.natCallback.allowForeignAddress(addressKey(remote.IP)) {
+		s.blocks.rateLimited.Add(1)
+		logging.Debugf("foreign callback rate limited remote=%s", remote)
+		return
+	}
+	target, ok := s.natCallbackPeer(targetID)
+	if !ok || !target.natt || !target.holePunch {
+		logging.Debugf("foreign callback target not capable remote=%s target=%d", remote, targetID)
+		return
+	}
+	// After the target check, so made-up IDs cannot grow the limiter.
+	if !s.natCallback.allowForeignTarget(targetID) {
+		s.blocks.rateLimited.Add(1)
+		logging.Debugf("foreign callback target rate limited remote=%s target=%d", remote, targetID)
+		return
+	}
+	port := uint16(remote.Port)
+	s.natCallback.addForeign(targetID, natForeignPending{ipv4: srcIPv4, port: port, crypt: crypt & 0x07, at: time.Now(), conn: conn})
+	if s.parking.Load() != nil {
+		return
+	}
+	packet, err := BuildNatCallbackRequestedPacket(srcIPv4, port, 0, crypt&0x07, nil)
+	if err != nil {
+		return
+	}
+	_ = target.client.writePacket(packet)
+}
+
+// udpNatKeepalive handles OpNatKeepalive <user hash 16>, accepted only obfuscated and
+// from the IPv4 of the session logged in under that hash. Its source is the target's
+// UDP endpoint: every foreign requester waiting for that LowID gets UDP 0xa7 with it.
+// Without one pending it is a plain keepalive and ignored.
+func (s *ServerRuntime) udpNatKeepalive(b *Buffer, remote *net.UDPAddr, obfuscated bool, module string) {
+	if !obfuscated || !s.foreignCallbackEnabled() {
+		return
+	}
+	srcIPv4, ok := IPv4ToUint32LE(NormalizeIP(remote.IP))
+	if !ok || remote.Port <= 0 || remote.Port > 0xffff {
+		return
+	}
+	hash := b.Get(16)
+	if len(hash) != 16 {
+		return
+	}
+	c := s.sessionByHash(hash)
+	if c == nil {
+		return
+	}
+	c.infoMu.RLock()
+	id := c.info.ID
+	c.infoMu.RUnlock()
+	target, ok := s.natCallbackPeer(id)
+	if !ok || target.client != c || target.ipv4 != srcIPv4 {
+		logging.Debugf("nat keepalive not from the session remote=%s", remote)
+		return
+	}
+	for _, p := range s.natCallback.takeForeign(id, time.Now()) {
+		notice := BuildNatCallbackNotice(srcIPv4, uint16(remote.Port), id, target.crypt&0x07, nil)
+		s.sendNatCallbackUDP(p.conn, natCallbackRecent{ipv4: p.ipv4, port: p.port}, notice, module)
+	}
+}
+
+// hasConnectionFrom reports whether a TCP connection from ip's address is open here.
+func (s *ServerRuntime) hasConnectionFrom(ip net.IP) bool {
+	key := addressKey(NormalizeIP(ip))
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+	return s.connsPerIP[key] > 0
+}
+
 // natCallbackPeerView is what the callback reads from a session, copied under its lock.
 type natCallbackPeerView struct {
-	client *tcpClient
-	ipv4   uint32
-	crypt  byte
-	natt   bool
-	hash   []byte
+	client    *tcpClient
+	ipv4      uint32
+	crypt     byte
+	natt      bool
+	holePunch bool
+	hash      []byte
 }
 
 // natCallbackPeer returns the logged-in LowID session holding id. Its IPv4 is the
@@ -221,11 +351,12 @@ func (s *ServerRuntime) natCallbackPeer(id uint32) (natCallbackPeerView, bool) {
 		ipv4 = p
 	}
 	return natCallbackPeerView{
-		client: c,
-		ipv4:   ipv4,
-		crypt:  c.info.CryptOptions,
-		natt:   c.nattCapable,
-		hash:   append([]byte(nil), c.info.Hash...),
+		client:    c,
+		ipv4:      ipv4,
+		crypt:     c.info.CryptOptions,
+		natt:      c.nattCapable,
+		holePunch: c.holePunchExt,
+		hash:      append([]byte(nil), c.info.Hash...),
 	}, true
 }
 
@@ -326,4 +457,80 @@ func (n *natCallbackState) recentFor(id uint32, now time.Time) (natCallbackRecen
 		return natCallbackRecent{}, false
 	}
 	return r, true
+}
+
+func (n *natCallbackState) allowForeignAddress(key string) bool {
+	n.mu.Lock()
+	if n.foreignAddr == nil {
+		n.foreignAddr = ratelimit.New(natForeignPerAddressPerMinute)
+	}
+	l := n.foreignAddr
+	n.mu.Unlock()
+	return l.Allow(key)
+}
+
+func (n *natCallbackState) allowForeignTarget(target uint32) bool {
+	n.mu.Lock()
+	if n.foreignTarget == nil {
+		n.foreignTarget = ratelimit.New(natForeignPerTargetPerMinute)
+	}
+	l := n.foreignTarget
+	n.mu.Unlock()
+	return l.Allow(strconv.FormatUint(uint64(target), 10))
+}
+
+// addForeign records a foreign requester for target. The same requester (address
+// and port) only refreshes its entry; past natForeignMaxPerTarget the oldest goes.
+// Stale entries are swept at most once per window, as in remember.
+func (n *natCallbackState) addForeign(target uint32, p natForeignPending) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.foreign == nil {
+		n.foreign = map[uint32][]natForeignPending{}
+	}
+	if p.at.Sub(n.foreignSweep) >= natCallbackWindow {
+		for k, list := range n.foreign {
+			if list = liveForeign(list, p.at); len(list) == 0 {
+				delete(n.foreign, k)
+			} else {
+				n.foreign[k] = list
+			}
+		}
+		n.foreignSweep = p.at
+	}
+	list := n.foreign[target]
+	for i, e := range list {
+		if e.ipv4 == p.ipv4 && e.port == p.port {
+			// Kept in arrival order, so the refreshed one moves to the end.
+			list = append(list[:i:i], list[i+1:]...)
+			break
+		}
+	}
+	if len(list) >= natForeignMaxPerTarget {
+		list = list[len(list)-natForeignMaxPerTarget+1:]
+	}
+	n.foreign[target] = append(list, p)
+}
+
+// takeForeign removes and returns the live requesters waiting for target.
+func (n *natCallbackState) takeForeign(target uint32, now time.Time) []natForeignPending {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	list, ok := n.foreign[target]
+	if !ok {
+		return nil
+	}
+	delete(n.foreign, target)
+	return liveForeign(list, now)
+}
+
+// liveForeign drops entries older than natCallbackWindow, in place.
+func liveForeign(list []natForeignPending, now time.Time) []natForeignPending {
+	live := list[:0]
+	for _, e := range list {
+		if now.Sub(e.at) <= natCallbackWindow {
+			live = append(live, e)
+		}
+	}
+	return live
 }

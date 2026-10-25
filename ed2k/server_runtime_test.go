@@ -119,6 +119,8 @@ func TestUDPObfuscatedListenerAnswersNATInPlaintext(t *testing.T) {
 
 	hashA := bytes.Repeat([]byte{0xa1}, 16)
 	hashB := bytes.Repeat([]byte{0xb2}, 16)
+	natSessionAt(rt, hashA, net.IPv4(127, 0, 0, 1))
+	natSessionAt(rt, hashB, net.IPv4(127, 0, 0, 1))
 	read := func(c *net.UDPConn, what string) []byte {
 		t.Helper()
 		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -171,6 +173,7 @@ func TestUDPPlainNATRegisterReplyIsPlaintext(t *testing.T) {
 	for i := range hash {
 		hash[i] = byte(i + 1)
 	}
+	natSessionAt(rt, hash[:], net.IPv4(127, 0, 0, 1))
 	req := encodeNATPacket(OpNatRegister, hash[:])
 	remote := clientConn.LocalAddr().(*net.UDPAddr)
 	handler(req, remote, serverConn)
@@ -225,6 +228,7 @@ func TestNATKeepaliveReplyUsesSameUDPListenerPort(t *testing.T) {
 	for i := range hash {
 		hash[i] = byte(0xa0 + i)
 	}
+	natSessionAt(rt, hash[:], net.IPv4(127, 0, 0, 1))
 
 	readNAT := func(timeout time.Duration) (uint8, *net.UDPAddr) {
 		t.Helper()

@@ -42,7 +42,7 @@ const (
 const (
 	natFailReasonNotRegistered        uint8 = 0x01 // the target hash is not registered
 	natFailReasonNoCommonFamily       uint8 = 0x02 // src and dst share no address family
-	natFailReasonRendezvousRestricted uint8 = 0x03 // server-independent off and a peer is not logged in here
+	natFailReasonRendezvousRestricted uint8 = 0x03 // a peer is not logged in here
 )
 
 type NATTraversalConfig struct {
@@ -143,11 +143,9 @@ type NATTraversalHandler struct {
 	announcePort        uint16
 	announcePortByLocal map[uint16]uint16
 	ipv6Enabled         bool
-	// serverIndependent, when true (default), pairs any two registered hashes
-	// regardless of eD2K login — cross-server / serverless rendezvous. When false,
-	// isLocalMember gates SYNC2 to hashes currently logged into this server.
-	serverIndependent bool
-	isLocalMember     func(hash [16]byte) bool
+	// isLocalMember gates SYNC2 to hashes currently logged into this server. nil only
+	// on a standalone handler (natsim, tests); ServerRuntime.SetNATHandler always sets it.
+	isLocalMember func(hash [16]byte) bool
 	// sessionTouch, when set, is called with a user hash whose PR_NAT keepalive just
 	// arrived, so the eD2K TCP session for that user can have its idle deadline extended.
 	// A hook rather than a direct dependency because NATTraversalHandler must stay usable
@@ -219,9 +217,6 @@ func NewNATTraversalHandler(registrationTTL time.Duration) *NATTraversalHandler 
 		pending:             map[[16]byte]*natWakePending{},
 		announcePortByLocal: map[uint16]uint16{},
 		sockByPort:          map[uint16]uint8{},
-		// Default to the historical open behaviour: pair any registered pair. main.go
-		// overrides this from natTraversal.serverIndependent.
-		serverIndependent: true,
 	}
 }
 
@@ -305,22 +300,9 @@ func (h *NATTraversalHandler) isIPv6Enabled() bool {
 	return h.ipv6Enabled
 }
 
-// SetServerIndependent toggles cross-server / serverless rendezvous. When true (the
-// default) SYNC2 pairs any two registered hashes; when false pairing is restricted to
-// hashes SetLocalMembership reports as logged into this server, and a non-local peer
-// gets OP_NAT_FAILED reason 0x03. See docs/ipv6-client-implementation-spec.md §9.
-func (h *NATTraversalHandler) SetServerIndependent(enabled bool) {
-	if h == nil {
-		return
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.serverIndependent = enabled
-}
-
-// SetLocalMembership installs the predicate used, when server-independent rendezvous
-// is off, to decide whether a user hash is currently logged into this server. A nil
-// predicate makes the restricted mode refuse every pairing (fail closed).
+// SetLocalMembership installs the predicate that decides whether a user hash is
+// logged into this server. SYNC2 pairs only two such hashes; a non-local peer gets
+// OP_NAT_FAILED reason 0x03. nil (standalone handler) skips the gate.
 func (h *NATTraversalHandler) SetLocalMembership(member func(hash [16]byte) bool) {
 	if h == nil {
 		return
@@ -330,12 +312,11 @@ func (h *NATTraversalHandler) SetLocalMembership(member func(hash [16]byte) bool
 	h.isLocalMember = member
 }
 
-// rendezvousGate returns the current server-independent flag and the membership
-// predicate under a single read lock, so handleSync2 sees a consistent pair.
-func (h *NATTraversalHandler) rendezvousGate() (bool, func(hash [16]byte) bool) {
+// localMember returns the membership predicate under the read lock.
+func (h *NATTraversalHandler) localMember() func(hash [16]byte) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.serverIndependent, h.isLocalMember
+	return h.isLocalMember
 }
 
 // HandlePacket answers one PR_NAT datagram. PR_NAT is plaintext on every listener:
@@ -547,16 +528,13 @@ func (h *NATTraversalHandler) handleSync2(remote *net.UDPAddr, payload []byte, c
 		return []natOutbound{h.natFailed(remote, dstHash, natFailReasonNotRegistered)}
 	}
 
-	// Server-independent gate (family-agnostic, applied before family selection):
-	// when off, only pair hashes currently logged into this server. A nil predicate
-	// fails closed. When on (default) the check is skipped, keeping the open path
-	// free of any login coupling.
-	if serverIndependent, member := h.rendezvousGate(); !serverIndependent {
-		srcLocal := member != nil && member(srcHash)
-		dstLocal := member != nil && member(dstHash)
+	// Login gate (family-agnostic, before family selection): only pair hashes logged
+	// into this server. Skipped only on a standalone handler without a predicate.
+	if member := h.localMember(); member != nil {
+		srcLocal, dstLocal := member(srcHash), member(dstHash)
 		if !srcLocal || !dstLocal {
 			logging.Debugf(
-				"[module=nat] dir=recv, remote=%s, opcode=%s, restricted=server-independent-off, srcLocal=%t, dstLocal=%t",
+				"[module=nat] dir=recv, remote=%s, opcode=%s, restricted=not-local, srcLocal=%t, dstLocal=%t",
 				remote.String(), natOpcodeLabel(OpNatSync2), srcLocal, dstLocal,
 			)
 			return []natOutbound{h.natFailed(remote, dstHash, natFailReasonRendezvousRestricted)}
@@ -665,45 +643,42 @@ func (h *NATTraversalHandler) natFailed(remote *net.UDPAddr, targetHash [16]byte
 
 // registerAllowed decides whether remote may become hash's candidate. A user hash is
 // public (every OP_HELLO and source list carries it), so an unchecked REGISTER let
-// anyone point a victim's candidate at themselves: SYNC2 then sent the victim's peers
-// there, and the victim's own keepalives stopped matching while the attacker's kept
-// its stale TCP session alive.
+// anyone point a victim's candidate at themselves, or locate a known user's endpoint.
 //
-//   - Logged in here: the REGISTER must come from that session's address — the IPv4
-//     exactly, or the IPv6's /64 (privacy addresses rotate within it). A session with
-//     no address in the datagram's family falls to the next rule.
-//   - Otherwise (server-independent rendezvous): a live candidate is not replaced
-//     from a different IP until it expires; the same IP may change port, as a NAT
-//     rebinding does.
+// Only a hash logged in here may register, and only from that session's address:
+// the IPv4 exactly, or the IPv6's /64 (privacy addresses rotate within it). A session
+// with no address in the datagram's family is refused. A standalone handler (no
+// lookup: natsim, tests) only keeps a live candidate from moving to another IP.
 func (h *NATTraversalHandler) registerAllowed(hash [16]byte, remote *net.UDPAddr) (bool, string) {
 	h.mu.RLock()
 	lookup := h.sessionAddrs
 	h.mu.RUnlock()
-	if lookup != nil {
-		if v4, v6, local := lookup(hash); local {
-			switch {
-			case remoteIsIPv6(remote) && v6 != nil:
-				if !sameIPv6Prefix64(v6, remote.IP) {
-					return false, "not-session-address"
-				}
-				return true, ""
-			case !remoteIsIPv6(remote) && v4 != nil:
-				if !v4.Equal(remote.IP) {
-					return false, "not-session-address"
-				}
-				return true, ""
+	if lookup == nil {
+		// get hands out live candidates only, so an expired one never pins.
+		if entry, ok := h.get(hash); ok {
+			if c := familySlot(entry, remote); c != nil && !c.addr.IP.Equal(remote.IP) {
+				return false, "pinned-to-other-address"
 			}
 		}
-	}
-	// get hands out live candidates only, so an expired one never pins.
-	entry, ok := h.get(hash)
-	if !ok {
 		return true, ""
 	}
-	if c := familySlot(entry, remote); c != nil && !c.addr.IP.Equal(remote.IP) {
-		return false, "pinned-to-other-address"
+	v4, v6, local := lookup(hash)
+	if !local {
+		return false, "not-logged-in"
 	}
-	return true, ""
+	switch {
+	case remoteIsIPv6(remote) && v6 != nil:
+		if !sameIPv6Prefix64(v6, remote.IP) {
+			return false, "not-session-address"
+		}
+		return true, ""
+	case !remoteIsIPv6(remote) && v4 != nil:
+		if !v4.Equal(remote.IP) {
+			return false, "not-session-address"
+		}
+		return true, ""
+	}
+	return false, "no-session-address-in-family"
 }
 
 // sameIPv6Prefix64 reports whether two IPv6 addresses share their /64.

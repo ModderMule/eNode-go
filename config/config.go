@@ -349,11 +349,9 @@ type NATConfig struct {
 	// defaults on; effective only when NAT and top-level ipv6 are also enabled. See
 	// docs/ipv6-client-implementation-spec.md §9.
 	IPv6 *bool `yaml:"ipv6"`
-	// ServerIndependent enables cross-server / serverless LowID↔LowID rendezvous: the
-	// server pairs two registered clients regardless of which eD2K server (if any)
-	// they are logged into, and advertises the capability. *bool so an absent key
-	// defaults on. When off, pairing is restricted to clients currently logged into
-	// this server. See docs/ipv6-client-implementation-spec.md §9.
+	// ServerIndependent is retired and ignored: PR_NAT pairs only clients logged in
+	// here. Still parsed so old configs load; a set key logs a warning. Cross-server
+	// LowID callbacks use ForeignCallback.
 	ServerIndependent      *bool `yaml:"serverIndependent"`
 	RegistrationTTLSeconds int   `yaml:"registrationTTLSeconds"`
 	// LugdunumCallback enables Lugdunum eserver's LowID-to-LowID NAT callback on this
@@ -363,6 +361,11 @@ type NATConfig struct {
 	// supportCrypt, since the request is only accepted obfuscated. *bool so an absent
 	// key defaults on. See docs/lugdunum-nat-callback.local.md.
 	LugdunumCallback *bool `yaml:"lugdunumCallback"`
+	// ForeignCallback lets a client not logged in here ask for a LowID callback to one
+	// of our LowIDs: obfuscated UDP 0xA6 with requester ID 0, flag 0x400000. Effective
+	// only with the Lugdunum callback. *bool so an absent key defaults on. See
+	// docs/lugdunum-nat-callback.local.md.
+	ForeignCallback *bool `yaml:"foreignCallback"`
 	// TCPWake enables the PR_NAT TCP wake-up: flag 0x200000, and a SYNC2 for a
 	// logged-in client that set login bit 0x200000 and has no registration wakes it
 	// with TCP OP_NAT_WAKE (0x46) instead of failing. Such clients then need no
@@ -375,9 +378,9 @@ type NATConfig struct {
 // (subject to the top-level ipv6.enabled and natTraversal.enabled gates).
 func (c NATConfig) IPv6OrDefault() bool { return boolOrDefault(c.IPv6, true) }
 
-// ServerIndependentOrDefault reports whether server-independent (cross-server /
-// serverless) rendezvous is enabled, defaulting to true.
-func (c NATConfig) ServerIndependentOrDefault() bool { return boolOrDefault(c.ServerIndependent, true) }
+// ForeignCallbackOrDefault reports whether the foreign callback is enabled,
+// defaulting to true (effective only with the Lugdunum callback).
+func (c NATConfig) ForeignCallbackOrDefault() bool { return boolOrDefault(c.ForeignCallback, true) }
 
 // LugdunumCallbackOrDefault reports whether the Lugdunum NAT callback is enabled,
 // defaulting to true (effective only with supportCrypt).

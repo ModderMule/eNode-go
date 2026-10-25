@@ -47,9 +47,32 @@ func TestNATRegisterBoundToLocalSession(t *testing.T) {
 	}
 }
 
-// A hash not logged in here (server-independent rendezvous) has no session to check
-// against, so the first live registration holds until it expires: another IP cannot
-// take it over, the same IP may change port.
+// natSessionAt logs a session in under hash from ip, so PR_NAT accepts the hash.
+func natSessionAt(rt *ServerRuntime, hash []byte, ip net.IP) *tcpClient {
+	c := newTCPClient(rt, &mockConn{remote: &net.TCPAddr{IP: ip, Port: 50000}}, false)
+	rt.registerSession(hash, c)
+	return c
+}
+
+// PR_NAT serves only clients logged in here: a REGISTER for any other hash is
+// refused, so the rendezvous cannot locate a user by hash.
+func TestNATRegisterRefusesNotLoggedIn(t *testing.T) {
+	rt := NewServerRuntime(TCPRuntimeConfig{Address: "127.0.0.1", Port: 4661}, UDPRuntimeConfig{}, storage.NewMemoryEngine())
+	nat := NewNATTraversalHandler(time.Minute)
+	rt.SetNATHandler(nat)
+	var hash [16]byte
+	copy(hash[:], "remote-user-hash")
+	from := &net.UDPAddr{IP: net.ParseIP("198.51.100.30"), Port: 4000}
+	outs := nat.processPacket(encodeNATPacket(OpNatRegister, hash[:]), from, 2004)
+	t.Logf("input: REGISTER for a hash not logged in, output: candidate=%q outs=%d", natRegistered(nat, hash), len(outs))
+	if natRegistered(nat, hash) != "" {
+		t.Fatal("a REGISTER for a hash not logged in here was accepted")
+	}
+}
+
+// A standalone handler (no runtime: natsim, tests) has no session to check against,
+// so the first live registration holds until it expires: another IP cannot take it
+// over, the same IP may change port.
 func TestNATRegisterPinsRemoteHash(t *testing.T) {
 	nat := NewNATTraversalHandler(200 * time.Millisecond)
 	var hash [16]byte

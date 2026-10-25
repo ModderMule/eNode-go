@@ -133,9 +133,9 @@ A dual-stack client with a routable IPv4 still gets a HighID as usual.
   consumed by type and skipped (a `TAGTYPE_HASH` tag is 16 bytes). This is
   informational — you still reach the server on the same address you connected to.
 - **NAT-rendezvous capability.** `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` (was `0x8000`, which ed2k-server uses for `OP_IPV6_UPDATE`) in the flags
-  word signals the server offers **server-independent** (cross-server / serverless)
-  PR_NAT hole-punch rendezvous (§9): it will pair two registered clients regardless
-  of which eD2K server, if any, they are logged into. When set, `OP_SERVERIDENT` also
+  word (TCP only since 2026-10-26) signals the server offers PR_NAT hole-punch
+  rendezvous (§9) to clients logged in to it. Cross-server use is retired; see
+  [`pr-nat-rendezvous-spec.md`](pr-nat-rendezvous-spec.md). When set, `OP_SERVERIDENT` also
   carries `ST_NAT_PORT (0x9D)`, a `TAGTYPE_UINT16` tag with the server's NAT-rendezvous
   UDP port (so you need not assume the default `2004`). Both are absent when the
   operator has turned the feature off; then only same-server LowID↔LowID is served.
@@ -490,9 +490,8 @@ PING              (s→c, 0xE2)   (empty)
   there is no separate EX form for v6.
 - `FAILED` reason codes: `0x01` = target hash not registered; `0x02` = the two peers
   share no address family (e.g. a v4-only peer and a v6-only peer — they cannot
-  punch); `0x03` = rendezvous restricted — the server has server-independent rendezvous
-  turned off and one of the two peers is not logged into it (see *Cross-server /
-  serverless rendezvous* below).
+  punch); `0x03` = rendezvous restricted — one of the two peers is not logged into this
+  server (see *Cross-server / serverless rendezvous* below).
 
 ### Dual-stack candidate model
 
@@ -571,10 +570,11 @@ This is orthogonal to and independent of the eMuleAI **eServer buddy** relay
 mechanism the eD2K server takes no part in. `PR_NAT` is the server-mediated path that
 spans servers and covers IPv6.
 
-**Gate.** `natTraversal.serverIndependent` (default **true**) controls this. When on,
-the server pairs any two registered hashes and advertises `0x40000`. When off, it drops
-`0x40000` and refuses a `SYNC2` for a registered target unless **both** hashes are
-currently logged into it, replying `OP_NAT_FAILED` reason `0x03`. `ST_NAT_PORT` is sent
+**Retired 2026-10-26.** The server now always refuses a `SYNC2` for a registered target
+unless **both** hashes are currently logged into it, replying `OP_NAT_FAILED` reason
+`0x03`, and a `REGISTER` for a hash not logged in here. `natTraversal.serverIndependent`
+is ignored. A cross-server LowID callback uses the foreign callback (UDP flag
+`0x400000`, `lugdunum-nat-callback.local.md`). `ST_NAT_PORT` is sent
 whenever `0x40000` or the wake-up flag `0x200000` is; same-server
 LowID↔LowID still works. The gate is family-agnostic — it applies equally to IPv4 and
 IPv6 pairings, before family selection.
@@ -587,9 +587,9 @@ IPv6 pairings, before family selection.
 - `natTraversal.ipv6` — dual-stack hole-punching (default **true**). Effective only
   when `ipv6.enabled` is also on. When off, the server **declines** IPv6 `PR_NAT`
   datagrams (drops them, no ack, nothing stored) and the protocol is IPv4-only.
-- `natTraversal.serverIndependent` — cross-server / serverless rendezvous (default
-  **true**). When off, pairing is restricted to clients logged into this server
-  (`OP_NAT_FAILED` reason `0x03` otherwise) and `0x40000` is not advertised.
+- `natTraversal.serverIndependent` — retired, ignored with a warning.
+- `natTraversal.foreignCallback` — foreign callback (default **true**, UDP flag
+  `0x400000`); needs `lugdunumCallback`.
 - `natTraversal.tcpWake` — TCP wake-up of a logged-in target (default **true**, flag
   `0x200000`); see [`pr-nat-rendezvous-spec.md`](pr-nat-rendezvous-spec.md).
 - `natTraversal.lugdunumCallback` — Lugdunum's LowID↔LowID callback (default **true**).

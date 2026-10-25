@@ -210,7 +210,7 @@ func natLogin(t *testing.T, serverFlags, loginFlags uint32, remote string) (*tcp
 		Hash:        []byte("1111111111111111"),
 		AllowLowIDs: true,
 		Flags:       serverFlags,
-	}, UDPRuntimeConfig{TCPPortObf: 4665}, storage.NewMemoryEngine())
+	}, UDPRuntimeConfig{TCPPortObf: 4665, UDPFlags: FlagForeignCallback}, storage.NewMemoryEngine())
 	rt.firewallProbe = func(*tcpClient) bool { return true }
 	client, conn := newReflectClient(t, rt, remote)
 	items := loginItems(bytes.Repeat([]byte{0x5a}, 16), 0, 4662)
@@ -448,5 +448,282 @@ func TestNatCallbackRateLimitPerRequester(t *testing.T) {
 	}
 	if other == overBudget {
 		t.Fatal("C on the same IP was limited by A's budget")
+	}
+}
+
+// natCallbackKey is the UDP key the rigs give ip.
+func natCallbackKey(ip net.IP) uint32 {
+	return deriveUDPKey(LegacyUDPSecret(0x12345678), ip)
+}
+
+// foreignRig is a server offering the foreign callback with one LowID target T (5)
+// that set 0x1000 and 0x100000, and a requester socket R that is not logged in.
+type foreignRig struct {
+	*natRig
+	r *net.UDPConn
+}
+
+func newForeignRig(t *testing.T, tcpFlags, udpFlags uint32) *foreignRig {
+	t.Helper()
+	rt := NewServerRuntime(TCPRuntimeConfig{Port: 4661, AllowLowIDs: true, Flags: tcpFlags},
+		UDPRuntimeConfig{UDPServerKey: 0x12345678, UDPFlags: udpFlags}, storage.NewMemoryEngine())
+	n := &natRig{rt: rt, handler: rt.UDPHandler(true)}
+	var err error
+	if n.server, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { n.server.Close() })
+	n.b, n.bTCP, n.bUDP = natSession(t, rt, 5, true, 0x6b)
+	n.b.holePunchExt = true
+	rt.registerSession(n.b.info.Hash, n.b)
+	r, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close() })
+	return &foreignRig{natRig: n, r: r}
+}
+
+// foreign sends 0xa6 <target><0>[extra] from remote, obfuscated with remote's key
+// unless plain.
+func (f *foreignRig) foreign(remote *net.UDPAddr, target uint32, plain bool, extra ...byte) {
+	payload := []byte{PrED2K, OpNatCallbackRequest}
+	payload = binary.LittleEndian.AppendUint32(payload, target)
+	payload = binary.LittleEndian.AppendUint32(payload, 0)
+	payload = append(payload, extra...)
+	data := payload
+	if !plain {
+		data = encryptClientToServer(payload, natCallbackKey(remote.IP))
+	}
+	f.handler(data, remote, f.server)
+}
+
+// keepalive sends OpNatKeepalive <hash> from conn, obfuscated unless plain.
+func (f *foreignRig) keepalive(conn *net.UDPConn, hash []byte, plain bool) {
+	payload := append([]byte{PrED2K, OpNatKeepalive}, hash...)
+	data := payload
+	if !plain {
+		data = encryptClientToServer(payload, natCallbackKey(net.IPv4(127, 0, 0, 1)))
+	}
+	f.handler(data, conn.LocalAddr().(*net.UDPAddr), f.server)
+}
+
+func (f *foreignRig) rAddr() *net.UDPAddr { return f.r.LocalAddr().(*net.UDPAddr) }
+
+// natPacketCount counts framed packets with opcode in a captured TCP stream.
+func natPacketCount(raw []byte, opcode byte) int {
+	n := 0
+	for off := 0; off+6 <= len(raw); {
+		size := int(binary.LittleEndian.Uint32(raw[off+1 : off+5]))
+		if size < 1 || off+5+size > len(raw) {
+			break
+		}
+		if raw[off+5] == opcode {
+			n++
+		}
+		off += 5 + size
+	}
+	return n
+}
+
+// A foreign request wakes T with TCP 0x37 naming R's datagram source, ID 0 and no
+// hash; the optional 9th byte is R's crypt bits (low 3 only), absent means 0. R hears
+// nothing until T's keepalive.
+func TestForeignCallbackWakesTarget(t *testing.T) {
+	f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
+	loop, _ := IPv4ToUint32LE(net.IPv4(127, 0, 0, 1))
+	rPort := uint16(f.rAddr().Port)
+
+	f.foreign(f.rAddr(), 5, false)
+	notice := payloadOfOpcode(t, f.bTCP.written(), OpNatCallbackRequested)
+	t.Logf("input: 8-byte foreign 0xa6 for 5, output: T gets TCP 0x37 % x", notice)
+	if want := BuildNatCallbackNotice(loop, rPort, 0, 0, nil); len(notice) != 11 || !bytes.Equal(notice, want) {
+		t.Fatalf("0x37 % x, want % x", notice, want)
+	}
+
+	f2 := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
+	f2.foreign(f2.rAddr(), 5, false, 0xff)
+	notice = payloadOfOpcode(t, f2.bTCP.written(), OpNatCallbackRequested)
+	t.Logf("input: 9-byte foreign 0xa6 crypt=0xff, output: T gets TCP 0x37 % x", notice)
+	if want := BuildNatCallbackNotice(loop, uint16(f2.rAddr().Port), 0, 0x07, nil); len(notice) != 11 || !bytes.Equal(notice, want) {
+		t.Fatalf("0x37 % x, want % x", notice, want)
+	}
+	if got := readUDP(f.r); got != nil {
+		t.Fatalf("R got UDP % x before the keepalive", got)
+	}
+}
+
+func TestForeignCallbackRefusals(t *testing.T) {
+	cases := []struct {
+		name               string
+		tcpFlags, udpFlags uint32
+		plain, connected   bool
+		natt, holePunch    bool
+		target             uint32
+	}{
+		{"plaintext", FlagNatCallback, FlagForeignCallback, true, false, true, true, 5},
+		{"foreign callback off", FlagNatCallback, 0, false, false, true, true, 5},
+		{"lugdunum callback off", 0, FlagForeignCallback, false, false, true, true, 5},
+		{"requester connected here", FlagNatCallback, FlagForeignCallback, false, true, true, true, 5},
+		{"target without 0x100000", FlagNatCallback, FlagForeignCallback, false, false, true, false, 5},
+		{"target without 0x1000", FlagNatCallback, FlagForeignCallback, false, false, false, true, 5},
+		{"unknown target", FlagNatCallback, FlagForeignCallback, false, false, true, true, 7},
+	}
+	for _, tc := range cases {
+		f := newForeignRig(t, tc.tcpFlags, tc.udpFlags)
+		f.b.nattCapable, f.b.holePunchExt = tc.natt, tc.holePunch
+		if tc.connected {
+			f.rt.acquireConnSlot(addressKey(net.IPv4(127, 0, 0, 1)))
+		}
+		f.foreign(f.rAddr(), tc.target, tc.plain)
+		f.keepalive(f.bUDP, f.b.info.Hash, false)
+		tcp, udp := f.bTCP.written(), readUDP(f.r)
+		t.Logf("input: %s, output: tcp=%d bytes udp=%d bytes", tc.name, len(tcp), len(udp))
+		if len(tcp) != 0 || udp != nil {
+			t.Fatalf("%s: a notice was sent", tc.name)
+		}
+	}
+}
+
+// Per source address 20/min over all targets, per target 10/min over all requesters.
+func TestForeignCallbackRateLimits(t *testing.T) {
+	f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
+	targets := []*captureConn{f.bTCP}
+	for _, id := range []uint32{7, 9} {
+		c, conn, _ := natSession(t, f.rt, id, true, byte(id))
+		c.holePunchExt = true
+		targets = append(targets, conn)
+	}
+	wakes := func() int {
+		n := 0
+		for _, c := range targets {
+			n += natPacketCount(c.written(), OpNatCallbackRequested)
+		}
+		return n
+	}
+	for i := 0; i < natForeignPerAddressPerMinute+1; i++ {
+		f.foreign(f.rAddr(), []uint32{5, 7, 9}[i%3], false)
+	}
+	perAddress := wakes()
+	t.Logf("input: %d requests from one address over 3 targets, output: %d wakes", natForeignPerAddressPerMinute+1, perAddress)
+	if perAddress != natForeignPerAddressPerMinute {
+		t.Fatalf("per-address limit: %d wakes, want %d", perAddress, natForeignPerAddressPerMinute)
+	}
+
+	g := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
+	for i := 0; i < natForeignPerTargetPerMinute+1; i++ {
+		g.foreign(&net.UDPAddr{IP: net.IPv4(127, 0, 1, byte(i+1)), Port: 4672}, 5, false)
+	}
+	perTarget := natPacketCount(g.bTCP.written(), OpNatCallbackRequested)
+	t.Logf("input: %d requesters for one target, output: %d wakes", natForeignPerTargetPerMinute+1, perTarget)
+	if perTarget != natForeignPerTargetPerMinute {
+		t.Fatalf("per-target limit: %d wakes, want %d", perTarget, natForeignPerTargetPerMinute)
+	}
+}
+
+// T's keepalive reports its UDP endpoint: R gets UDP 0xa7 under its own key with T's
+// IP, the keepalive's source port, T's LowID, T's crypt bits and no hash. The entry
+// is then gone.
+func TestNatKeepaliveDeliversForeignNotice(t *testing.T) {
+	f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
+	loop, _ := IPv4ToUint32LE(net.IPv4(127, 0, 0, 1))
+	tPort := uint16(f.bUDP.LocalAddr().(*net.UDPAddr).Port)
+
+	f.foreign(f.rAddr(), 5, false, 0x03)
+	f.keepalive(f.bUDP, f.b.info.Hash, false)
+	raw := readUDP(f.r)
+	if raw == nil {
+		t.Fatal("R got no UDP 0xa7")
+	}
+	pt := decryptServerReply(t, raw, natCallbackKey(net.IPv4(127, 0, 0, 1)))
+	t.Logf("input: T keepalive from port %d, output: R gets marker=0x%02x % x", tPort, raw[0], pt)
+	want := append([]byte{PrED2K, OpNatCallbackRequestedUDP}, BuildNatCallbackNotice(loop, tPort, 5, 0x03, nil)...)
+	if !bytes.Equal(pt, want) {
+		t.Fatalf("0xa7 % x, want % x", pt, want)
+	}
+	f.keepalive(f.bUDP, f.b.info.Hash, false)
+	if got := readUDP(f.r); got != nil {
+		t.Fatalf("second keepalive sent R % x again", got)
+	}
+}
+
+func TestNatKeepaliveRefusals(t *testing.T) {
+	f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
+	f.foreign(f.rAddr(), 5, false)
+
+	f.keepalive(f.bUDP, f.b.info.Hash, true)
+	plain := readUDP(f.r)
+	f.keepalive(f.bUDP, bytes.Repeat([]byte{0x77}, 16), false)
+	wrongHash := readUDP(f.r)
+	f.b.peerIP = net.IPv4(10, 0, 0, 1)
+	f.keepalive(f.bUDP, f.b.info.Hash, false)
+	wrongIP := readUDP(f.r)
+	f.b.peerIP = net.IPv4(127, 0, 0, 1)
+	t.Logf("input: plain / unknown hash / wrong IP keepalive, output: R got %d / %d / %d bytes", len(plain), len(wrongHash), len(wrongIP))
+	if plain != nil || wrongHash != nil || wrongIP != nil {
+		t.Fatal("a bad keepalive reached R")
+	}
+	f.keepalive(f.bUDP, f.b.info.Hash, false)
+	if readUDP(f.r) == nil {
+		t.Fatal("bad keepalives consumed the pending entry")
+	}
+}
+
+// Pending entries live natCallbackWindow (19 s); a target holds at most 4, the oldest
+// going first, and a repeat from the same requester only refreshes its entry.
+func TestForeignCallbackPendingExpiresAndCaps(t *testing.T) {
+	var n natCallbackState
+	now := time.Now()
+	n.addForeign(5, natForeignPending{ipv4: 1, port: 1, at: now.Add(-20 * time.Second)})
+	stale := n.takeForeign(5, now)
+	t.Logf("input: entry 20 s old, output: %d live", len(stale))
+	if len(stale) != 0 {
+		t.Fatalf("stale entry delivered: %v", stale)
+	}
+
+	for i := 1; i <= 5; i++ {
+		n.addForeign(6, natForeignPending{ipv4: uint32(i), port: 1, at: now})
+	}
+	n.addForeign(6, natForeignPending{ipv4: 3, port: 1, crypt: 1, at: now})
+	got := n.takeForeign(6, now)
+	var ips []uint32
+	for _, e := range got {
+		ips = append(ips, e.ipv4)
+	}
+	t.Logf("input: 5 requesters, then 3 again, output: %v", ips)
+	if len(got) != natForeignMaxPerTarget || ips[0] != 2 || ips[3] != 3 || got[3].crypt != 1 {
+		t.Fatalf("pending %v, want [2 4 5 3] with 3 refreshed", ips)
+	}
+	if again := n.takeForeign(6, now); len(again) != 0 {
+		t.Fatalf("entries not dropped after take: %v", again)
+	}
+
+	n.addForeign(7, natForeignPending{ipv4: 9, port: 1, at: now})
+	n.addForeign(8, natForeignPending{ipv4: 9, port: 1, at: now.Add(natCallbackWindow + time.Second)})
+	_, kept := n.foreign[7]
+	t.Logf("input: add after a window, output: old target kept=%t", kept)
+	if kept {
+		t.Fatal("sweep left a stale target")
+	}
+}
+
+// Login bit 0x100000 is stored only when the server offers the foreign callback.
+func TestLoginHolePunchExtBit(t *testing.T) {
+	for _, tc := range []struct {
+		server, login uint32
+		want          bool
+	}{
+		{FlagNatCallback | FlagTcpObfusc, SrvCapNatTraversal | SrvCapHolePunchExt | FlagSupportCrypt, true},
+		{FlagNatCallback | FlagTcpObfusc, SrvCapNatTraversal | FlagSupportCrypt, false},
+		{FlagTcpObfusc, SrvCapHolePunchExt | FlagSupportCrypt, false},
+	} {
+		c, _ := natLogin(t, tc.server, tc.login, "203.0.113.9")
+		c.infoMu.RLock()
+		got := c.holePunchExt
+		c.infoMu.RUnlock()
+		t.Logf("input: server=0x%x login=0x%x, output: holePunchExt=%t", tc.server, tc.login, got)
+		if got != tc.want {
+			t.Fatalf("server=0x%x login=0x%x: holePunchExt=%t, want %t", tc.server, tc.login, got, tc.want)
+		}
 	}
 }

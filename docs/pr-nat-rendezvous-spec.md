@@ -18,24 +18,27 @@ it observed it, in one step. Both then punch towards each other. The server take
 what follows; the data path between the peers (a stream over UDP, or a TCP connection over a
 punched IPv6 path) is up to the clients.
 
-The registry is keyed by user hash, not by eD2K login. Two clients logged in to different
-servers, or to none, can meet through any server that offers `PR_NAT`.
+`PR_NAT` pairs only clients logged in to this server. The registry is keyed by user hash,
+and a hash registers only from the address of the eD2K session logged in under it. A
+registry open to any hash let anyone locate a known user's endpoint without being in a
+transfer with them (aMule, andrey23127/ed2k-server#40), so cross-server use is retired. A
+LowID callback to a client of another server uses the foreign callback
+(`lugdunum-nat-callback.local.md`, "Foreign callback (0x400000)").
 
 ## Discovery
 
 | Signal | Where | Meaning |
 | --- | --- | --- |
-| `0x40000` (`SRV_TCPFLG_NAT_RENDEZVOUS`) | TCP flags (`OP_IDCHANGE`), UDP flags (`OP_GLOBSERVSTATRES`) | the server runs `PR_NAT` and pairs any two registered hashes |
+| `0x40000` (`SRV_TCPFLG_NAT_RENDEZVOUS`) | TCP flags (`OP_IDCHANGE`) | the server runs `PR_NAT` for clients logged in to it |
 | `0x200000` (`SRV_TCPFLG_NAT_WAKE`) | TCP flags, UDP flags | the server wakes a logged-in target over TCP ([Waking a local target](#waking-a-local-target)) |
 | `ST_NAT_PORT` (`0x9D`, uint16) | `OP_SERVERIDENT` tag | the rendezvous UDP port; default `2004` when absent |
 | `0x200000` (`SRVCAP_NAT_WAKE`) | client login `CT_SERVER_FLAGS` | wake me; I keep no standing registration |
 
-eNode-go sends `0x40000` when `natTraversal.enabled` and `natTraversal.serverIndependent`
-are on, and `0x200000` when `natTraversal.enabled` and `natTraversal.tcpWake` are on (also
-with `serverIndependent` off, because the wake pairs clients logged in to it). It sends
-`ST_NAT_PORT` whenever it sends either flag. With both flags off it still runs the service
-for pairs logged in to it, but advertises nothing, so clients that wait for a flag do not
-use it.
+eNode-go sends `0x40000` (TCP word only) when `natTraversal.enabled` is on, and `0x200000`
+when `natTraversal.enabled` and `natTraversal.tcpWake` are on. It sends `ST_NAT_PORT`
+whenever it sends either flag. The UDP flags no longer carry `0x40000`: a client only needs
+it for the server it is logged in to, and sees that one's TCP word. The old key
+`natTraversal.serverIndependent` is ignored with a warning.
 
 `0x40000` was `0x8000` before 2026-10-20 (ed2k-server took `0x8000` for `OP_IPV6_UPDATE`).
 A server implementing `PR_NAT` must use `0x40000`. The `OP_IDCHANGE` bit table in the
@@ -110,8 +113,7 @@ login bit.
 - **`FAILED` reasons.** `0x01`: the target hash is not registered (no live candidate), or a
   wake-up for it timed out, also one that started because the peers shared no family.
   `0x02`: the two peers share no address family and no wake-up is possible. `0x03`: the
-  server pairs only clients logged in to it (`serverIndependent` off), and one of the two
-  is not. A target with no live candidate gets `0x01`, not `0x03`, because that check comes
+  server pairs only clients logged in to it, and one of the two is not. A target with no live candidate gets `0x01`, not `0x03`, because that check comes
   first.
 
 ## Server behaviour
@@ -152,8 +154,8 @@ that sends nothing over TCP for hours is not reaped. An unmatched keepalive gets
    subject to the REGISTER checks. A requester therefore needs no standing registration.
 2. If the target hash has no live candidate, the server tries to wake it (below). If it
    cannot, the answer is `FAILED 0x01` to the requester.
-3. With `serverIndependent` off, both hashes of a registered target must be logged in to
-   this server, else `FAILED 0x03`.
+3. Both hashes of a registered target must be logged in to this server, else
+   `FAILED 0x03`.
 4. The server picks a family both peers have, **preferring IPv6**. If there is none, it
    tries to wake the target for the requester's families, else `FAILED 0x02`.
 5. It sends the requester a `SYNC` with the target's endpoint and hash, and the target one
@@ -182,7 +184,7 @@ on every family you can offer and keep each candidate alive:
    that wakes you is unsolicited from your NAT's point of view, and it only gets in through
    that mapping. [RFC 4787](https://www.rfc-editor.org/rfc/rfc4787) (REQ-5) asks NATs to
    keep an idle UDP mapping for at least 2 minutes and recommends 5, so 60 s is inside it;
-   some home routers drop mappings after 30–60 s anyway. Behind those a foreign target can
+   some home routers drop mappings after 30–60 s anyway. Behind those a registered target can
    miss a `SYNC`; a shorter interval trades traffic for reach (see "The other two, for
    comparison").
 3. If keepalives stop being answered with `PING`, register again. The server lost the
@@ -207,25 +209,11 @@ hash comes from the source list or the hello.
 
 ## Cross-server use
 
-A client logged in to another server can use an eNode-go server as its rendezvous. It needs
-the same standing registration as a local client, for the same reason. The server has no
-other way to reach it: it has no TCP session with the client to wake it, and the `SYNC`
-forward reaches the client only through the UDP mapping that the keepalives hold open. Only
-the target role needs this. A requester's `SYNC2` registers it on the spot.
-
-Both peers must use the **same** rendezvous server. eNode-go servers do not share their
-registries. Nothing in eD2K tells a requester which server a foreign target registered with.
-A target would have to publish the pair (user hash, rendezvous `ip:port`) through Kad or
-source exchange, and no client does that yet.
-
-eMuleQt registers, and is woken, only on its own server. As a requester for a peer on
-another server it sweeps: it sends `SYNC2` to its own server, then to up to 8 listed servers
-whose UDP flags carry `0x40000`, 2 per server, 4 s apart. That finds a target only when the
-target is logged in to, or registered with, one of the swept servers. It ignores a `SYNC`
-for a hash it did not ask for.
-
-Clients logged in to the rendezvous server need no standing registration when it offers the
-wake-up. Only foreign targets keep one.
+Retired. `PR_NAT` pairs only clients logged in to this server: a `REGISTER` for a hash with
+no session here is refused, and a `SYNC2` naming one gets `FAILED 0x03`. A LowID callback to
+a client of another server goes through the foreign callback of the target's server (UDP
+flag `0x400000`, see `lugdunum-nat-callback.local.md`). eMuleQt's sweep of up to 8 servers
+for `0x40000` in their UDP flags finds nothing on eNode-go any more.
 
 **Who keeps a standing registration today.** eMuleQt registers only while all of these hold:
 NAT traversal on, firewalled (eD2K LowID and Kad not open), a public IPv6 it trusts (its only
@@ -248,9 +236,9 @@ other clients do not speak `PR_NAT`.
 | Address- or port-restricted NAT (most home routers) | works | usually fails until the reverse request | works |
 | Symmetric NAT | fails | fails | fails |
 | IPv6 | yes, preferred when both registered one | no | no |
-| Cross-server | yes (same rendezvous server; eMuleQt sweeps up to 8 servers as requester) | no | no |
+| Cross-server | no (retired) | foreign callback, `0x400000` (eNode-go) | no |
 | Freshness of the endpoint | the last keepalive, at most a TTL old | the request itself, always fresh | the last `0x9F`, up to 600 s old; fresh with the extension |
-| Waking the target | logged in here: TCP `OP_NAT_WAKE`, then its `REGISTER`; foreign: its standing UDP mapping | TCP `0x37`, or UDP `0xA7` within 19 s (eNode-go) of its own request | `0x61` over TCP; with the extension `0x37`, then the target's `0x9F` |
+| Waking the target | TCP `OP_NAT_WAKE`, then its `REGISTER`; else its standing UDP mapping | TCP `0x37`, or UDP `0xA7` within 19 s (eNode-go) of its own request; foreign: `0x37`, then the target's `0x9F` | `0x61` over TCP; with the extension `0x37`, then the target's `0x9F` |
 | Standing traffic while idle | none with the wake-up; else keepalive every 60 s per family | none | `0x9F` every ~60 s |
 | Server memory per idle client | none with the wake-up (one bool in existing padding); else 146 bytes per single-family client (measured) | none (eNode-go: one bool in existing padding) | one port and timestamp per client |
 | Failure feedback | `FAILED` with a reason | none | `0x62` with a reason |
@@ -262,7 +250,8 @@ What follows from the table:
 - `PR_NAT` and ed2k-server's punch solve the restricted-NAT case, because both peers punch.
   Lugdunum's callback does not, unless the target answers with its own request (aMule and
   eMuleQt do).
-- `PR_NAT` is the only scheme that covers IPv6 firewalls and peers on different servers.
+- `PR_NAT` is the only scheme that covers IPv6 firewalls. Only the foreign callback reaches
+  a peer on a different server, by its LowID on that server.
 - Lugdunum's callback and `PR_NAT` with the wake-up have no standing traffic and no
   per-client state. Lugdunum's callback is the only one most clients speak.
 - On eNode-go, eMuleQt tries `PR_NAT` first when it knows the peer's hash, and Lugdunum's
@@ -358,7 +347,7 @@ With a 60 s keepalive the `PR_NAT` endpoint is at most a minute old, and the 90 
 it is never used once older than that. The keepalive also holds the
 client's NAT mapping open, and that is the trade-off of the 60 s interval: RFC 4787 asks
 routers to keep an idle UDP mapping for at least 2 minutes, but some drop it after 30–60 s.
-Behind such a router a foreign target's `SYNC` can arrive after the mapping is gone. The
+Behind such a router a registered target's `SYNC` can arrive after the mapping is gone. The
 answered `PING` helps: many routers keep a mapping that saw traffic both ways longer.
 Targets logged in to the rendezvous server are not affected; the wake-up gives them a fresh
 mapping for each attempt.
@@ -396,9 +385,8 @@ is logged in to it over the eD2K TCP session, so the target needs no standing re
 6. **Timeout.** If no `REGISTER` in a family the requester has arrives within 3 s, every
    waiting requester gets `FAILED 0x01`. A requester treats it like any `FAILED` and tries another path.
 7. **Limits.** At most 4096 targets wait at once; beyond that a SYNC2 fails at once, as
-   without the wake. A wake needs the target's TCP session, so it is never sent for a foreign
-   target, and in restricted mode (`serverIndependent` off) only for a requester logged in
-   here too.
+   without the wake. A wake needs the target's TCP session, and is sent only for a requester
+   logged in here too.
 8. **Abuse.** A SYNC2 is UDP, so its source can be forged. The worst a forger gets is one
    7-byte TCP packet to a target and its `REGISTER`, one wait per target at a time (with at
    most one extra wake per newly requested family), and a `FAILED` or, if the target
@@ -413,8 +401,7 @@ The target's registration then lives one TTL like any other and is not kept aliv
 
 - [ ] Envelope with LE size; BE endpoint fields.
 - [ ] Per-hash registry, one candidate per family, observed source only, TTL with sweep.
-- [ ] REGISTER checks: session address when logged in here, no takeover of a live candidate
-      from another IP.
+- [ ] REGISTER checks: the hash is logged in here, from that session's address.
 - [ ] Ack with the server's own public endpoint per family (`0xE4` / `0xEC`).
 - [ ] Keepalive matched by source IP and port, through an index; `PING` on a match; counts as
       session activity.
@@ -424,7 +411,8 @@ The target's registration then lives one TTL like any other and is not kept aliv
 - [ ] Treat a candidate past the TTL as gone on every read, not only at the sweep.
 - [ ] Forward to the target from the socket its candidate arrived on, and to an IPv6 target
       from the announced IPv6 address; answer the requester from its SYNC2's socket.
-- [ ] Advertise `0x40000` only when unrestricted pairing is on, in the TCP and UDP flags.
+- [ ] `SYNC2` pairs only two hashes logged in here (`FAILED 0x03` otherwise).
+- [ ] Advertise `0x40000` in the TCP flags only.
 - [ ] Wake-up: `0x200000` in both flag words and `ST_NAT_PORT`; remember the login bit; on a
       SYNC2 for an unregistered local target send `OP_NAT_WAKE`, pair on its `REGISTER`,
       `FAILED 0x01` after 3 s; dedupe repeats; cap the waiting entries.

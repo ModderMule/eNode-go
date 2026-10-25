@@ -30,12 +30,16 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
 - NAT traversal server (`OP_VC_NAT_HEADER`, `OP_NAT_REGISTER`, `OP_NAT_SYNC2`):
   dual-stack UDP hole-punching for LowID↔LowID and firewalled IPv6↔IPv6 peers (a v4
   and a v6 candidate per client, v6 preferred); gated by `natTraversal.ipv6` (default
-  on). The registry is login-independent, so `natTraversal.serverIndependent` (default
-  on) pairs clients across **different servers or no server** — cross-server /
-  serverless LowID↔LowID — advertised via `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` + an
-  `OP_SERVERIDENT` NAT-port tag. `natTraversal.tcpWake` (default on, flag `0x200000`)
-  wakes a target logged in here over its TCP session, so it keeps no standing UDP
-  registration. See [`docs/pr-nat-rendezvous-spec.md`](docs/pr-nat-rendezvous-spec.md).
+  on). Pairs only clients logged in to this server, advertised via
+  `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` + an `OP_SERVERIDENT` NAT-port tag.
+  `natTraversal.tcpWake` (default on, flag `0x200000`) wakes a target logged in here
+  over its TCP session, so it keeps no standing UDP registration. See
+  [`docs/pr-nat-rendezvous-spec.md`](docs/pr-nat-rendezvous-spec.md).
+- Lugdunum LowID↔LowID NAT callback (UDP `0xA6` → `0xA7`/TCP `0x37`), and the foreign
+  callback (`natTraversal.foreignCallback`, default on, UDP flag `0x400000`): a client
+  logged in to another server asks for a callback to one of our LowIDs with an
+  obfuscated `0xA6` (requester ID 0); the target is woken with TCP `0x37` and its UDP
+  `0x9F` endpoint goes back to the requester in `0xA7`.
 - Files larger than 4 GiB
 - Server-to-server gossip: the Lugdunum `OP_SERVER_LIST_REQ/RES` handshake, so
   `OP_SERVERLIST` is populated from the live network instead of only a static list.
@@ -214,9 +218,9 @@ natTraversal:
   enabled: true              # Enable NAT traversal service
   port: 2004                 # NAT traversal UDP port
   ipv6: true                 # IPv6 hole-punching (dual-stack candidates); needs ipv6.enabled
-  serverIndependent: true    # Cross-server / serverless LowID↔LowID rendezvous (default on)
   tcpWake: true              # Wake a logged-in target over TCP (flag 0x200000, default on)
   lugdunumCallback: true     # Lugdunum LowID↔LowID callback (0xA6/0x37, default on)
+  foreignCallback: true      # Callback for clients of other servers (UDP flag 0x400000, default on)
   registrationTTLSeconds: 90 # NAT registry TTL (seconds)
 
 ipv6:                        # IPv6 dual-stack; omit the whole block for IPv4-only behaviour

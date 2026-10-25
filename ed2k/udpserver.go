@@ -26,11 +26,12 @@ type UDPServerConfig struct {
 	// NatCallback advertises FlagNatCallback (0x1000) in the UDP flags, as Lugdunum
 	// does (its UDP word is 0x17fb).
 	NatCallback bool
-	// NatRendezvous and NatWake advertise FlagNatRendezvous (0x40000) and FlagNatWake
-	// (0x200000) in the UDP flags too, as on the TCP word, so a client that only saw
-	// the server's status reply knows it offers PR_NAT.
-	NatRendezvous bool
-	NatWake       bool
+	// NatWake advertises FlagNatWake (0x200000) in the UDP flags too, as on the TCP
+	// word. FlagNatRendezvous (0x40000) is TCP only: PR_NAT serves logged-in clients.
+	NatWake bool
+	// ForeignCallback advertises FlagForeignCallback (0x400000): a client not logged
+	// in here may send the foreign 0xA6 (requester ID 0).
+	ForeignCallback bool
 	// Workers and QueueSize bound the datagram handler pool. Zero means the
 	// defaults below.
 	Workers   int
@@ -62,11 +63,11 @@ func BuildUDPFlags(cfg UDPServerConfig) uint32 {
 	if cfg.NatCallback {
 		flags += FlagNatCallback
 	}
-	if cfg.NatRendezvous {
-		flags += FlagNatRendezvous
-	}
 	if cfg.NatWake {
 		flags += FlagNatWake
+	}
+	if cfg.ForeignCallback {
+		flags += FlagForeignCallback
 	}
 	return flags
 }

@@ -267,10 +267,11 @@ func serverListenConfigs(cfg config.Config) (ed2k.TCPServerConfig, ed2k.UDPServe
 	// The Lugdunum NAT callback request is accepted only obfuscated, and only a
 	// LowID can be its target, so it is offered only when both are possible.
 	natCallback := cfg.NAT.LugdunumCallbackOrDefault() && cfg.SupportCrypt && cfg.TCP.AllowLowIDs
-	// Server-independent (cross-server / serverless) PR_NAT rendezvous is effective
-	// only when the NAT service itself is enabled. It drives the FlagNatRendezvous
-	// advertisement and, with the wake, the OP_SERVERIDENT NAT-port tag.
-	natRendezvous := cfg.NAT.Enabled && cfg.NAT.ServerIndependentOrDefault()
+	// A client not logged in here may ask for a callback to one of our LowIDs.
+	foreignCallback := natCallback && cfg.NAT.ForeignCallbackOrDefault()
+	// TCP flag 0x40000: PR_NAT rendezvous for clients logged in here. With the wake,
+	// it also drives the OP_SERVERIDENT NAT-port tag.
+	natRendezvous := cfg.NAT.Enabled
 	// The TCP wake-up pairs clients logged in here, so it needs only the service.
 	natWake := cfg.NAT.Enabled && cfg.NAT.TCPWakeOrDefault()
 	tcpCfg := ed2k.TCPServerConfig{
@@ -289,15 +290,15 @@ func serverListenConfigs(cfg config.Config) (ed2k.TCPServerConfig, ed2k.UDPServe
 		RelatedSearch:  cfg.TCP.RelatedSearch.EnabledOrDefault(),
 	}
 	udpCfg := ed2k.UDPServerConfig{
-		Address:       cfg.Address,
-		Port:          cfg.UDP.Port,
-		GetSources:    cfg.UDP.GetSources,
-		GetFiles:      cfg.UDP.GetFiles,
-		SupportCrypt:  cfg.SupportCrypt,
-		DualStack:     dualStack,
-		NatCallback:   natCallback,
-		NatRendezvous: natRendezvous,
-		NatWake:       natWake,
+		Address:         cfg.Address,
+		Port:            cfg.UDP.Port,
+		GetSources:      cfg.UDP.GetSources,
+		GetFiles:        cfg.UDP.GetFiles,
+		SupportCrypt:    cfg.SupportCrypt,
+		DualStack:       dualStack,
+		NatCallback:     natCallback,
+		ForeignCallback: foreignCallback,
+		NatWake:         natWake,
 	}
 	return tcpCfg, udpCfg
 }
@@ -313,12 +314,12 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		udpFlags |= ed2k.FlagMetaSearch
 	}
 	// ed2k.FlagServerSearch is deliberately not set, even when the service is
-	// advertised: the original eserver stops naming a peer that sets it. The
-	// description reply's tag is the whole advertisement. See the constant.
+	// advertised: the description reply's tag is the whole advertisement. See the
+	// constant.
 	dualStack := cfg.IPv6.EnabledOrDefault()
 	natRendezvousPort := uint16(0)
-	// The port is needed by every client that may use PR_NAT here: with
-	// server-independent rendezvous, or to answer a wake.
+	// The port is needed by every client that may use PR_NAT here: to register, or
+	// to answer a wake.
 	if tcpCfg.NatRendezvous || tcpCfg.NatWake {
 		natRendezvousPort = cfg.NAT.Port
 	}
@@ -423,21 +424,20 @@ func buildAdminStatic(cfg config.Config, d bootDerived) admin.StaticInfo {
 		natPort = cfg.NAT.Port
 	}
 	return admin.StaticInfo{
-		Name:              cfg.Name,
-		Description:       cfg.Description,
-		Version:           ed2k.ENodeVersionStr,
-		Engine:            cfg.Storage.Engine,
-		AdvertisedIP:      d.advertisedIP,
-		AdvertisedIPv6:    ipv6String(d.serverIPv6),
-		TCPPort:           cfg.TCP.Port,
-		TCPPortObf:        tcpObf,
-		UDPPort:           cfg.UDP.Port,
-		UDPPortObf:        udpObf,
-		NATPort:           natPort,
-		Crypt:             cfg.SupportCrypt,
-		IPv6:              cfg.IPv6.EnabledOrDefault(),
-		NAT:               cfg.NAT.Enabled,
-		ServerIndependent: cfg.NAT.Enabled && cfg.NAT.ServerIndependentOrDefault(),
+		Name:           cfg.Name,
+		Description:    cfg.Description,
+		Version:        ed2k.ENodeVersionStr,
+		Engine:         cfg.Storage.Engine,
+		AdvertisedIP:   d.advertisedIP,
+		AdvertisedIPv6: ipv6String(d.serverIPv6),
+		TCPPort:        cfg.TCP.Port,
+		TCPPortObf:     tcpObf,
+		UDPPort:        cfg.UDP.Port,
+		UDPPortObf:     udpObf,
+		NATPort:        natPort,
+		Crypt:          cfg.SupportCrypt,
+		IPv6:           cfg.IPv6.EnabledOrDefault(),
+		NAT:            cfg.NAT.Enabled,
 	}
 }
 

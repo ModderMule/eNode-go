@@ -130,6 +130,12 @@ const (
 	OpNatCallbackRequested    uint8 = 0x37
 )
 
+// OpNatKeepalive is UDP 0x9f client→server, obfuscated: <user hash 16>. ed2k-server
+// uses it as a NAT keepalive; a foreign callback target bursts it after a TCP 0x37 so
+// the server learns its UDP endpoint. 0x9f is free in the PR_ED2K UDP space
+// (0x9e OP_INVALID_LOWID, 0xa0 OP_SERVER_LIST_REQ).
+const OpNatKeepalive uint8 = 0x9f
+
 // OpNatWake is the PR_NAT TCP wake-up (docs/pr-nat-rendezvous-spec.md): server→client
 // on the eD2K session, payload <families 1> (NatWakeIPv4 | NatWakeIPv6). The client
 // answers with one PR_NAT REGISTER per family. Sent only to a session that set
@@ -417,39 +423,37 @@ const (
 	// when natTraversal.lugdunumCallback is on. Clients use the callback only when this
 	// bit is set and OP_IDCHANGE is 24 bytes long.
 	FlagNatCallback uint32 = 0x1000
-	// FlagNatRendezvous advertises that this server offers server-independent
-	// (cross-server / serverless) PR_NAT hole-punch rendezvous — it will pair two
-	// registered clients regardless of which eD2K server (if any) they are logged
-	// into. Was 0x8000 until 2026-10-20; moved because ed2k-server (0.9.83+) sets
-	// 0x8000 for "accepts OP_IPV6_UPDATE (0x63)" and aMule reads it that way. Taken
-	// on the public network: 0x05DD, 0x1000 (Lugdunum NAT callback), 0x4000 (IPv6),
-	// 0x8000 (ed2k-server IPv6 update), 0x10000 (meta search), 0x20000 (ed2k-server
-	// LowID hole punch). 0x40000 is the next clean bit. Clients ignore unknown bits. Advertised only when
-	// natTraversal.serverIndependent is on. See docs/ipv6-client-implementation-spec.md §9.
-	// Also taken since: 0x80000 (FlagServerSearch below) and 0x100000 (ed2k-server
-	// 0.9.85 two-sided hole punch, server and client bit, andrey23127/ed2k-server#39).
+	// FlagNatRendezvous (TCP word only) advertises PR_NAT hole-punch rendezvous for
+	// clients logged in to this server; set when natTraversal.enabled. It no longer
+	// pairs clients of other servers (aMule, andrey23127/ed2k-server#40): a cross-server
+	// LowID callback uses FlagForeignCallback. Was 0x8000 until 2026-10-20; moved off
+	// ed2k-server's OP_IPV6_UPDATE bit. Taken on the public network: 0x05DD, 0x1000
+	// (Lugdunum NAT callback), 0x4000 (IPv6), 0x8000 (ed2k-server IPv6 update), 0x10000
+	// (meta search), 0x20000 (ed2k-server LowID hole punch), 0x80000 (FlagServerSearch),
+	// 0x100000 (ed2k-server 0.9.85 two-sided hole punch, andrey23127/ed2k-server#39).
 	// New eNode-go bits go above 0x200000 (FlagNatWake below).
 	FlagNatRendezvous uint32 = 0x40000
 	// FlagNatWake advertises the PR_NAT TCP wake-up (OpNatWake): this server wakes a
 	// logged-in PR_NAT target that has no registration, so a client that set
 	// SrvCapNatWake needs no standing PR_NAT keepalive. Set on the TCP and UDP words
-	// when natTraversal.enabled and natTraversal.tcpWake are on, also with
-	// serverIndependent off. 0x200000 was the first bit free everywhere (ed2k-server
-	// README bit table, 2026-10-25).
+	// when natTraversal.enabled and natTraversal.tcpWake are on. 0x200000 was the
+	// first bit free everywhere (ed2k-server README bit table, 2026-10-25).
 	FlagNatWake uint32 = 0x200000
+	// FlagForeignCallback (UDP word) advertises the foreign callback: a client not
+	// logged in here sends obfuscated UDP 0xA6 <target LowID><0>[<crypt>], we wake the
+	// target with TCP 0x37 and answer the requester with UDP 0xA7 once the target's
+	// OpNatKeepalive arrives. See docs/lugdunum-nat-callback.local.md.
+	FlagForeignCallback uint32 = 0x400000
 	// FlagMetaSearch advertises that search answers may carry torrent/Usenet/web rows
 	// (FT_META_* tags, docs/meta-search.md). 0x10000 is the next clean bit above
 	// 0x8000; clients ignore unknown bits. Set on both the TCP and UDP word
 	// when a catalogue daemon is configured.
 	FlagMetaSearch uint32 = 0x10000
 	// FlagServerSearch is the contract's bit (enodemeta/tags) for "this server offers
-	// server-to-server search" (docs/server-search.md). It is reserved and NEVER SENT.
-	// Measured against eserver 17.14 on 2026-10-07 (tests/interop,
-	// TestGossipPropagatesThroughEserver): a peer that sets 0x20000 in the UDP flags
-	// word of its status reply is still held and pinged, but eserver answers every
-	// peer-list request with an empty list from then on, so the peer and everything
-	// behind it drop out of the mesh. With the bit clear and the ST_SERVER_SEARCH tags
-	// still sent, the same case passes. The tags alone are the advertisement.
+	// server-to-server search" (docs/server-search.md). It is reserved and not sent:
+	// the ST_SERVER_SEARCH tags alone are the advertisement. (An earlier note here
+	// said eserver 17.14 empties its peer lists for a peer that sets this bit. That
+	// was wrong: eserver ignores unknown UDP flag bits, docs/server-gossip.md §8.)
 	// Was 0x20000 until 2026-10-20; moved off ed2k-server's LowID hole-punch bit and
 	// above FlagNatRendezvous (0x40000).
 	FlagServerSearch uint32 = 0x80000
@@ -470,6 +474,10 @@ const (
 	// "wake me with OpNatWake, I keep no standing registration". Same value as
 	// FlagNatWake, as ed2k-server pairs its 0x100000 bits.
 	SrvCapNatWake uint32 = 0x200000
+	// SrvCapHolePunchExt is ed2k-server's hole-punch extension login bit
+	// (andrey23127/ed2k-server#39): after a TCP 0x37 the client bursts UDP
+	// OpNatKeepalive to the server. Required of a foreign callback target.
+	SrvCapHolePunchExt uint32 = 0x100000
 )
 
 const (

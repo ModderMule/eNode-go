@@ -732,44 +732,10 @@ func hashKey(h []byte) [16]byte {
 	return k
 }
 
-// TestNATSync2ServerIndependentPairsNonLocal proves the default (server-independent
-// on): two clients neither of which is a local member still pair — the open,
-// cross-server / serverless path with no login coupling.
-func TestNATSync2ServerIndependentPairsNonLocal(t *testing.T) {
-	handler := NewNATTraversalHandler(time.Minute)
-	// serverIndependent defaults on; install a membership predicate that says NO one
-	// is local, to prove the gate is skipped entirely in the open path.
-	handler.SetLocalMembership(func([16]byte) bool { return false })
-	localPort := uint16(2004)
-	remoteA := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
-	remoteB := &net.UDPAddr{IP: net.ParseIP("10.0.0.2"), Port: 40002}
-	hashA := bytes.Repeat([]byte{0x11}, 16)
-	hashB := bytes.Repeat([]byte{0x22}, 16)
-
-	handler.processPacket(encodeNATPacket(OpNatRegister, hashA), remoteA, localPort)
-	handler.processPacket(encodeNATPacket(OpNatRegister, hashB), remoteB, localPort)
-
-	connAck := []byte{0xaa, 0xbb, 0xcc, 0xdd}
-	sync2 := append(append(append([]byte(nil), hashA...), connAck...), hashB...)
-	outs := handler.processPacket(encodeNATPacket(OpNatSync2, sync2), remoteA, localPort)
-	t.Logf("input: server-independent=ON, no local members, SYNC2 A->B; output: %d outbound", len(outs))
-	if len(outs) != 2 {
-		t.Fatalf("sync2 responses=%d want 2 (open path pairs regardless of login)", len(outs))
-	}
-	for _, out := range outs {
-		opcode, _, ok := decodeNATPacket(out.packet)
-		if !ok || opcode != OpNatSync {
-			t.Fatalf("to %s: opcode=%s want OP_NAT_SYNC", out.to, natOpcodeLabel(opcode))
-		}
-	}
-}
-
-// TestNATSync2RestrictedRefusesNonLocal pins the "off" gate: with server-independent
-// disabled, a SYNC2 whose target is not logged into this server is refused with
+// TestNATSync2RestrictedRefusesNonLocal pins the login gate: a SYNC2 whose target is not logged into this server is refused with
 // OP_NAT_FAILED reason 0x03 and nothing is paired.
 func TestNATSync2RestrictedRefusesNonLocal(t *testing.T) {
 	handler := NewNATTraversalHandler(time.Minute)
-	handler.SetServerIndependent(false)
 	localPort := uint16(2004)
 	remoteA := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
 	remoteB := &net.UDPAddr{IP: net.ParseIP("10.0.0.2"), Port: 40002}
@@ -791,7 +757,7 @@ func TestNATSync2RestrictedRefusesNonLocal(t *testing.T) {
 	if !ok {
 		t.Fatalf("bad failed packet")
 	}
-	t.Logf("input: server-independent=OFF, dst not local, SYNC2 A->B; output: opcode=%s payload=% x", natOpcodeLabel(opcode), payload)
+	t.Logf("input: dst not local, SYNC2 A->B; output: opcode=%s payload=% x", natOpcodeLabel(opcode), payload)
 	if opcode != OpNatFailed {
 		t.Fatalf("opcode=%#x want OP_NAT_FAILED", opcode)
 	}
@@ -803,12 +769,10 @@ func TestNATSync2RestrictedRefusesNonLocal(t *testing.T) {
 	}
 }
 
-// TestNATSync2RestrictedAllowsLocal pins that with server-independent off, a pair
-// both logged into this server still hole-punches (same-server LowID↔LowID keeps
+// TestNATSync2RestrictedAllowsLocal pins that a pair both logged into this server still hole-punches (same-server LowID↔LowID keeps
 // working).
 func TestNATSync2RestrictedAllowsLocal(t *testing.T) {
 	handler := NewNATTraversalHandler(time.Minute)
-	handler.SetServerIndependent(false)
 	localPort := uint16(2004)
 	remoteA := &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40001}
 	remoteB := &net.UDPAddr{IP: net.ParseIP("10.0.0.2"), Port: 40002}
@@ -823,7 +787,7 @@ func TestNATSync2RestrictedAllowsLocal(t *testing.T) {
 	connAck := []byte{0xaa, 0xbb, 0xcc, 0xdd}
 	sync2 := append(append(append([]byte(nil), hashA...), connAck...), hashB...)
 	outs := handler.processPacket(encodeNATPacket(OpNatSync2, sync2), remoteA, localPort)
-	t.Logf("input: server-independent=OFF, both local, SYNC2 A->B; output: %d outbound", len(outs))
+	t.Logf("input: both local, SYNC2 A->B; output: %d outbound", len(outs))
 	if len(outs) != 2 {
 		t.Fatalf("sync2 responses=%d want 2 (both local -> paired)", len(outs))
 	}
@@ -836,12 +800,11 @@ func TestNATSync2RestrictedAllowsLocal(t *testing.T) {
 }
 
 // TestNATSync2RestrictedFamilyAgnostic confirms the gate runs before family selection:
-// with server-independent off and both peers local over IPv6, the pair is served
+// with both peers local over IPv6, the pair is served
 // OP_NAT_SYNC_IPV6 — the restriction is orthogonal to the address family.
 func TestNATSync2RestrictedFamilyAgnostic(t *testing.T) {
 	handler := NewNATTraversalHandler(time.Minute)
 	handler.SetIPv6Enabled(true)
-	handler.SetServerIndependent(false)
 	localPort := uint16(2004)
 	hashA := bytes.Repeat([]byte{0x11}, 16)
 	hashB := bytes.Repeat([]byte{0x22}, 16)
@@ -855,7 +818,7 @@ func TestNATSync2RestrictedFamilyAgnostic(t *testing.T) {
 	connAck := []byte{0xaa, 0xbb, 0xcc, 0xdd}
 	sync2 := append(append(append([]byte(nil), hashA...), connAck...), hashB...)
 	outs := handler.processPacket(encodeNATPacket(OpNatSync2, sync2), aV6, localPort)
-	t.Logf("input: server-independent=OFF, both local over v6, SYNC2 A->B; output: %d outbound", len(outs))
+	t.Logf("input: both local over v6, SYNC2 A->B; output: %d outbound", len(outs))
 	if len(outs) != 2 {
 		t.Fatalf("sync2 responses=%d want 2 (both local v6 -> paired)", len(outs))
 	}

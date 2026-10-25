@@ -33,8 +33,8 @@ func TestBuildTCPFlagsSupportCryptDrivesObfuscation(t *testing.T) {
 }
 
 func TestBuildTCPFlagsNatRendezvous(t *testing.T) {
-	// FlagNatRendezvous (0x40000) advertises server-independent PR_NAT rendezvous and
-	// is orthogonal to the other bits. It must stay off ed2k-server's 0x8000
+	// FlagNatRendezvous (0x40000) advertises PR_NAT for logged-in clients and is
+	// orthogonal to the other bits. It must stay off ed2k-server's 0x8000
 	// (accepts OP_IPV6_UPDATE) and 0x20000 (LowID hole punch), and off FlagServerSearch.
 	if FlagNatRendezvous == 0x8000 || FlagNatRendezvous == 0x20000 || FlagNatRendezvous == FlagServerSearch {
 		t.Fatalf("FlagNatRendezvous 0x%05x collides with an ed2k-server flag", FlagNatRendezvous)
@@ -59,4 +59,9 @@ func TestBuildUDPFlags(t *testing.T) {
 		t.Fatalf("flags mismatch: got 0x%x expected 0x%x", flags, expected)
 	}
 	t.Logf("SRV_UDPFLG word = 0x%04x", flags)
+	foreign := BuildUDPFlags(UDPServerConfig{ForeignCallback: true})
+	t.Logf("input: ForeignCallback on, output: 0x%x", foreign)
+	if foreign&FlagForeignCallback == 0 || flags&FlagForeignCallback != 0 || foreign&FlagNatRendezvous != 0 {
+		t.Fatalf("FlagForeignCallback not driven by ForeignCallback: 0x%x / 0x%x", foreign, flags)
+	}
 }

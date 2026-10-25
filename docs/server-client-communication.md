@@ -38,7 +38,7 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_SEARCHRESULT` | `0x33` | Server -> Client | Search results list, followed by a single "more results available" byte. |
 | `OP_CALLBACKREQUESTED` | `0x35` | Server -> LowID client | Notify LowID client to connect back. |
 | `OP_CALLBACKFAILED` | `0x36` | Server -> Client | Callback target unavailable/failure. |
-| `OP_NAT_CALLBACKREQUESTED` | `0x37` | Server -> LowID client | Lugdunum NAT callback notice, TCP fallback for UDP `0xa7`; see [`lugdunum-nat-callback.local.md`](lugdunum-nat-callback.local.md#enode-go). |
+| `OP_NAT_CALLBACKREQUESTED` | `0x37` | Server -> LowID client | Lugdunum NAT callback notice, TCP fallback for UDP `0xa7`; see [`lugdunum-nat-callback.local.md`](lugdunum-nat-callback.local.md#enode-go). For a foreign callback: requester ID 0, no hash; the target answers with UDP `0x9f` bursts. |
 | `OP_NAT_WAKE` | `0x46` | Server -> Client | PR_NAT wake-up: `families(uint8)` (`0x01` IPv4, `0x02` IPv6). Sent to a session that set login bit `0x200000` when a SYNC2 names it and it has no registration; the client answers with one PR_NAT `REGISTER` per family. See [`pr-nat-rendezvous-spec.md`](pr-nat-rendezvous-spec.md#waking-a-local-target). |
 | `OP_GETSOURCES_IPV6` | `0x24` | Client -> Server | IPv6 tag-block source query (opt-in); payload as `OP_GETSOURCES2`. |
 | `OP_FOUNDSOURCES_IPV6` | `0x25` | Server -> Client | IPv6 tag-block source response (per source: `id+port+tagCount+tags`). |
@@ -418,8 +418,9 @@ gated opcode — see [Login precondition](#login-precondition).
 | `OP_GLOBSEARCHRES` | `0x99` | Server -> Client | UDP search results response. |
 | `OP_GLOBGETSOURCES_IPV6` | `0xa5` | Client -> Server | IPv6 tag-block UDP source query (opt-in); payload as `OP_GLOBGETSOURCES2`. |
 | `OP_GLOBFOUNDSOURCES_IPV6` | `0xa6` | Server -> Client | IPv6 tag-block UDP source response. |
-| `OP_NAT_CALLBACKREQUEST` | `0xa6` | Client -> Server | Lugdunum NAT callback request, obfuscated only: `<targetID 4><requesterID 4>`. Same value as the row above, other direction. |
-| `OP_NAT_CALLBACKREQUESTED_UDP` | `0xa7` | Server -> Client | Lugdunum NAT callback notice: `<requesterIP 4><requesterUDPPort 2><requesterID 4><cryptFlags 1>[<userHash 16>]`. Same value as `OP_SERVER_LIST_REQ_IPV6`, which only travels between servers. |
+| `OP_NAT_CALLBACKREQUEST` | `0xa6` | Client -> Server | Lugdunum NAT callback request, obfuscated only: `<targetID 4><requesterID 4>`. Same value as the row above, other direction. **Foreign callback** (UDP flag `0x400000`): a client not logged in here sends `<targetLowID 4><0 4>[<cryptOptions 1>]`; the target (login bits `0x1000` and `0x100000`) is woken with TCP `0x37`. Limited to 20/min per source address and 10/min per target. |
+| `OP_NAT_CALLBACKREQUESTED_UDP` | `0xa7` | Server -> Client | Lugdunum NAT callback notice: `<requesterIP 4><requesterUDPPort 2><requesterID 4><cryptFlags 1>[<userHash 16>]`. Same value as `OP_SERVER_LIST_REQ_IPV6`, which only travels between servers. For a foreign callback it goes to the requester and names the target: `<targetIP 4><targetUDPPort 2><targetLowID 4><targetCrypt 1>`, no hash. |
+| `OP_NAT_KEEPALIVE` | `0x9f` | Client -> Server | Obfuscated only: `<userHash 16>`, from the IPv4 of the session logged in under that hash. A foreign callback target bursts it after a TCP `0x37`; its source port goes to each pending requester in UDP `0xa7`. Without a pending requester it is ignored (ed2k-server's NAT keepalive). |
 | `OP_SERVER_LIST_REQ` | `0xa0` | Server <-> Server | Gossip: "register me", `<ip 4><port 2>` + optional `<challenge 4>`. |
 | `OP_SERVER_LIST_RES` | `0xa1` | Server <-> Server | Gossip: peer list, `<count 1>` then count × (`<ip 4><port 2>`). |
 | `OP_SERVER_LIST_REQ2` | `0xa4` | Server <-> Server | Gossip: explicit list request, empty payload. |
@@ -437,12 +438,13 @@ candidates per client hash (one IPv4, one IPv6 — the observed source of each r
 and, when pairing, prefers IPv6 when both peers have a v6 candidate, else IPv4. All
 endpoint fields are **big-endian**. IPv6 hole-punching is gated by `natTraversal.ipv6`
 (default on, needs `ipv6.enabled`); when off, IPv6 `PR_NAT` datagrams are declined and
-the family is IPv4-only. The registry is keyed by user hash and is **login-independent**:
-`natTraversal.serverIndependent` (default on) makes the server pair two registered
-clients regardless of which eD2K server (if any) they are on — cross-server / serverless
-LowID↔LowID — and advertise it via `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` in the TCP and
-UDP flags plus a `ST_NAT_PORT (0x9d)` uint16 tag in `OP_SERVERIDENT`; when off, pairing is
-restricted to clients logged into this server (`OP_NAT_FAILED` reason `0x03`).
+the family is IPv4-only. The registry is keyed by user hash but serves only clients
+logged in here: a `REGISTER` must come from the address of the session logged in under
+that hash, and a `SYNC2` pairs only two such hashes (`OP_NAT_FAILED` reason `0x03`
+otherwise). Advertised by `SRV_TCPFLG_NAT_RENDEZVOUS (0x40000)` in the TCP flags plus a
+`ST_NAT_PORT (0x9d)` uint16 tag in `OP_SERVERIDENT`. Cross-server use is retired
+(`natTraversal.serverIndependent` is ignored); a LowID callback to a client of another
+server uses the foreign callback (UDP `0xa6` with requester ID 0, below).
 `natTraversal.tcpWake` (default on) adds flag `0x200000` and the TCP wake-up
 (`OP_NAT_WAKE`, above), so clients logged in here keep no standing registration. PR_NAT is
 plaintext on every port, the obfuscated one included. Full protocol + byte-exact layouts:
@@ -457,7 +459,7 @@ plaintext on every port, the obfuscated one included. Full protocol + byte-exact
 | `OP_NAT_SYNC` | `0xe1` | NAT Server -> Client | v4 peer endpoint exchange (`peerIP(4, BE)+peerPort(2, BE)+peerHash(16)+connAck(4)`). |
 | `OP_NAT_SYNC_IPV6` | `0xed` | NAT Server -> Client | v6 peer endpoint exchange (`peerIPv6(16)+peerPort(2, BE)+peerHash(16)+connAck(4)+version(1)`). |
 | `OP_NAT_PING` | `0xe2` | NAT Server -> Client | NAT keepalive ACK ping (empty payload) after accepted keepalive. |
-| `OP_NAT_FAILED` | `0xe5` | NAT Server -> Client | Pairing failed (`reason(1) + targetHash(16)`; reason `0x01` = target not registered, `0x02` = no common address family, `0x03` = rendezvous restricted — server-independent off and a peer not logged in here). |
+| `OP_NAT_FAILED` | `0xe5` | NAT Server -> Client | Pairing failed (`reason(1) + targetHash(16)`; reason `0x01` = target not registered, `0x02` = no common address family, `0x03` = rendezvous restricted — a peer not logged in here). |
 | `OP_NAT_KEEPALIVE` | `0xe6` | Client -> NAT Server | NAT keepalive with NAT envelope; refreshes `lastSeen`, extends the matching eD2K session's read deadline (see below), and receives `OP_NAT_PING` when endpoint is registered. |
 | keepalive (non-`PR_NAT`, legacy) | n/a | Client -> NAT Server | Legacy raw 1-byte UDP heartbeat; still accepted and receives `OP_NAT_PING` when endpoint is registered. |
 

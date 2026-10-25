@@ -25,25 +25,29 @@ func TestNATIPv6HonoursExplicitFalse(t *testing.T) {
 	}
 }
 
-func TestNATServerIndependentDefaultsEnabled(t *testing.T) {
-	// natTraversal.serverIndependent omitted must default to true.
-	cfg, err := Load(writeTempConfig(t, "name: t\nnatTraversal:\n  enabled: true\n  port: 2004\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("natTraversal.serverIndependent omitted -> ServerIndependentOrDefault()=%v", cfg.NAT.ServerIndependentOrDefault())
-	if !cfg.NAT.ServerIndependentOrDefault() {
-		t.Fatal("natTraversal.serverIndependent should default to enabled")
-	}
-}
-
-func TestNATServerIndependentHonoursExplicitFalse(t *testing.T) {
+// natTraversal.serverIndependent is retired: an old config that sets it still loads.
+func TestNATServerIndependentKeyIgnored(t *testing.T) {
 	cfg, err := Load(writeTempConfig(t, "name: t\nnatTraversal:\n  enabled: true\n  port: 2004\n  serverIndependent: false\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("natTraversal.serverIndependent: false -> ServerIndependentOrDefault()=%v", cfg.NAT.ServerIndependentOrDefault())
-	if cfg.NAT.ServerIndependentOrDefault() {
-		t.Fatal("natTraversal.serverIndependent: false must restrict rendezvous to logged-in clients")
+	t.Logf("input: serverIndependent: false, output: loaded, key set=%t", cfg.NAT.ServerIndependent != nil)
+	if cfg.NAT.ServerIndependent == nil || !cfg.NAT.Enabled {
+		t.Fatal("old config with serverIndependent must still load")
+	}
+}
+
+func TestNATForeignCallbackDefault(t *testing.T) {
+	cfg, err := Load(writeTempConfig(t, "name: t\nnatTraversal:\n  enabled: true\n  port: 2004\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	off, err := Load(writeTempConfig(t, "name: t\nnatTraversal:\n  foreignCallback: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("input: omitted / false, output: %t / %t", cfg.NAT.ForeignCallbackOrDefault(), off.NAT.ForeignCallbackOrDefault())
+	if !cfg.NAT.ForeignCallbackOrDefault() || off.NAT.ForeignCallbackOrDefault() {
+		t.Fatal("natTraversal.foreignCallback must default on and honour false")
 	}
 }

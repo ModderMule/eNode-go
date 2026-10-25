@@ -140,7 +140,6 @@ func TestNatWakeRefusals(t *testing.T) {
 		}},
 		{"restricted, requester not local", func(h *NATTraversalHandler) {
 			h.SetSessionWake((&wakeRecorder{accept: true}).wake)
-			h.SetServerIndependent(false)
 			h.SetLocalMembership(func(hash [16]byte) bool { return hash[0] == 0xb2 })
 		}},
 	}
@@ -202,7 +201,7 @@ func TestNatWakeThroughRuntime(t *testing.T) {
 	b.natWakeCapable = true
 	b.infoMu.Unlock()
 	rt.registerSession(b.info.Hash, b)
-	_ = a
+	rt.registerSession(a.info.Hash, a)
 
 	sync2 := sync2Payload(bytes.Repeat([]byte{0x5a}, 16), bytes.Repeat([]byte{0x6b}, 16), 3)
 	handler(encodeNATPacket(OpNatSync2, sync2), aUDP.LocalAddr().(*net.UDPAddr), server)
@@ -229,12 +228,12 @@ func TestNatWakeThroughRuntime(t *testing.T) {
 }
 
 func TestBuildFlagsNatRendezvousAndWake(t *testing.T) {
-	udp := BuildUDPFlags(UDPServerConfig{NatRendezvous: true, NatWake: true})
+	udp := BuildUDPFlags(UDPServerConfig{NatWake: true})
 	tcp := BuildTCPFlags(TCPServerConfig{NatRendezvous: true, NatWake: true})
 	off := BuildUDPFlags(UDPServerConfig{})
 	t.Logf("input: rendezvous+wake on, output: udp=0x%x tcp=0x%x, off: udp=0x%x", udp, tcp, off)
-	if udp&FlagNatRendezvous == 0 || udp&FlagNatWake == 0 || tcp&FlagNatWake == 0 || off&(FlagNatRendezvous|FlagNatWake) != 0 {
-		t.Fatal("UDP/TCP flags do not follow NatRendezvous/NatWake")
+	if udp&FlagNatRendezvous != 0 || udp&FlagNatWake == 0 || tcp&(FlagNatRendezvous|FlagNatWake) != FlagNatRendezvous|FlagNatWake || off&FlagNatWake != 0 {
+		t.Fatal("flags do not follow NatRendezvous/NatWake (0x40000 is TCP only)")
 	}
 }
 

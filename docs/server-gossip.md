@@ -285,9 +285,8 @@ the rest is derived from `ENodeVersionStr` so a release carries it. See §8 and
 **Two further tags ride on our reply when `serverSearch.mode` is `gossip`:**
 `ST_SERVER_SEARCH` (`0xA0`, the base URL of the server-to-server search service) and
 `ST_SERVER_SEARCH_FP` (`0xA1`, its certificate pin), after the tags above. The UDP flags
-word is left alone: setting the contract's `FlagServerSearch` (`0x80000`, was `0x20000`) makes eserver
-17.14 answer every peer-list request with an empty list, measured in
-`TestGossipPropagatesThroughEserver`, so the bit is reserved and never sent. We read both
+word is left alone: the contract's `FlagServerSearch` (`0x80000`, was `0x20000`) is reserved
+and not sent, because the tags already are the advertisement. We read both
 tags from a peer's reply, only once it has passed the admission test, and afresh each time: a
 peer that stops sending them stops being called. A reader that does not know the tags
 skips them, and the reply without them is byte-identical to before. See
@@ -572,6 +571,29 @@ Sending `GossipVersionStr` (§3) fixed all three at once. Both interop cases now
 eserver's `server.met` instead of reporting it, and the propagation case is live. §5 of the
 interop doc has the detail; the address-level derivation is in
 `eserver-working-flag-disassembly.local.md`.
+
+### eserver ignores unknown bits in a peer's UDP flags
+
+> ❗ **Correction (2026-10-26).** This doc used to say that setting `0x20000` in the UDP
+> flags of our status reply made eserver 17.14 answer every peer-list request with an empty
+> list. That was wrong. The note was written on 2026-10-07, the day the reply-port bug in
+> §1 was found. That bug kept us out of eserver's `working` set in most runs, which empties
+> its peer lists. The bug, not the flag bit, caused the failure.
+
+**Code.** In both 17.14 x86_64 (`0x004315c0`) and 17.15 x86_64 (`pingreply`, `0x00431f90`),
+the `0x97` handler copies the UDP flags dword (payload offset `0x18`) into the peer struct
+at `+0x104` without checking it. The only later readers are the `sverbose` trace
+(`udpflags=0x%x`) and `saveServers`, which writes the word to `server.met`. Neither the
+version check in `servdescreply` nor the `working` filter in `CommonList` reads it.
+
+**Measured (2026-10-26).** Our UDP flags were temporarily forced to include
+`0x20000 | 0x100000`. With eserver 17.14 (the rig's default i686 build) and with 17.15,
+eserver logged `udpflags=0x52573b`, reported `1 working servers`, and both
+`TestGossipWithLugdunumEserver` and `TestGossipPropagatesThroughEserver` passed. The second
+test checks that eserver names us to other servers.
+
+So a server can put any bit in the UDP flags of every status reply, including the reply to
+a peer's `0x55AA` probe. It needs no clients-only exception.
 
 ### Client-facing regression
 

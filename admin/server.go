@@ -56,10 +56,9 @@ type StaticInfo struct {
 	UDPPortObf uint16
 	NATPort    uint16
 
-	Crypt             bool
-	IPv6              bool
-	NAT               bool
-	ServerIndependent bool
+	Crypt bool
+	IPv6  bool
+	NAT   bool
 
 	// Accounts is set by SetAccounts: the Meta API has accounts to manage.
 	Accounts bool

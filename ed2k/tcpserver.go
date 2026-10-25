@@ -24,8 +24,8 @@ type TCPServerConfig struct {
 	// advertisement — a dual-stack server is exactly the one that supports IPv6.
 	// False reproduces the original IPv4-only behaviour exactly.
 	DualStack bool
-	// NatRendezvous advertises FlagNatRendezvous (0x40000): this server offers
-	// server-independent (cross-server / serverless) PR_NAT hole-punch rendezvous.
+	// NatRendezvous advertises FlagNatRendezvous (0x40000): this server offers PR_NAT
+	// hole-punch rendezvous to clients logged in to it.
 	NatRendezvous bool
 	// NatCallback advertises FlagNatCallback (0x1000): this server speaks
 	// Lugdunum's UDP 0xA6 NAT callback. See docs/lugdunum-nat-callback.local.md.

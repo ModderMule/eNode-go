@@ -110,6 +110,9 @@ func run(ctx context.Context, configPath string) error {
 		return fmt.Errorf("config logLevel invalid: %w", err)
 	}
 	logging.Infof("welcome: enode starting (config=%s)", configPath)
+	if cfg.NAT.ServerIndependent != nil {
+		logging.Warnf("natTraversal.serverIndependent is retired and ignored: PR_NAT pairs only clients logged in here")
+	}
 	// The memory guard: a soft GC limit, and cache shedding near it. Caches register
 	// as they are built. See docs/memory-guard.md.
 	memGuard := memguard.New(cfg.Memory)
@@ -585,13 +588,7 @@ func run(ctx context.Context, configPath string) error {
 		if cfg.Gossip.EnabledOrDefault() && cfg.UDP.PortGossip != 0 && cfg.UDP.PortGossip != cfg.UDP.PortObfuscated {
 			natHandler.SetRegisterEndpointForLocalPort(cfg.UDP.PortGossip, cfg.UDP.PortGossip)
 		}
-		// Server-independent (cross-server / serverless) rendezvous. When off, the
-		// membership predicate restricts SYNC2 pairing to user hashes currently logged
-		// into this server (Storage.IsConnected, backed by a by-hash index).
-		natHandler.SetServerIndependent(cfg.NAT.ServerIndependentOrDefault())
-		natHandler.SetLocalMembership(func(h [16]byte) bool {
-			return runtime.Storage.IsConnected(storage.ClientInfo{Hash: h[:]})
-		})
+		// SetNATHandler binds PR_NAT to clients logged in here (REGISTER and SYNC2).
 		runtime.SetNATHandler(natHandler)
 		effectiveIP := cfg.DynIP
 		if effectiveIP == "" {

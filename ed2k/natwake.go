@@ -70,7 +70,7 @@ func (h *NATTraversalHandler) wakeTarget(src natClientEntry, dstHash [16]byte, c
 	h.mu.RLock()
 	wake := h.sessionWake
 	lookup := h.sessionAddrs
-	serverIndependent, member := h.serverIndependent, h.isLocalMember
+	member := h.isLocalMember
 	v6Enabled := h.ipv6Enabled
 	h.mu.RUnlock()
 	if wake == nil || src.hash == dstHash {
@@ -95,9 +95,9 @@ func (h *NATTraversalHandler) wakeTarget(src natClientEntry, dstHash [16]byte, c
 	if families == 0 {
 		return false
 	}
-	// With server-independent rendezvous off, both peers must be logged in here. The
-	// target is (it has a session to wake); the requester is checked here.
-	if !serverIndependent && (member == nil || !member(src.hash)) {
+	// Both peers must be logged in here. The target is (it has a session to wake);
+	// the requester is checked here. No predicate only on a standalone handler.
+	if member != nil && !member(src.hash) {
 		return false
 	}
 	waiter := natWakeWaiter{hash: src.hash, connAck: connAck, remote: cloneUDPAddr(remote), conn: conn}

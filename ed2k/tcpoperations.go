@@ -426,8 +426,8 @@ func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
 	if len(conf.IPv6) == 16 {
 		tags = append(tags, Tag{Type: TypeHash, Code: TagModSvrIPv6, Data: conf.IPv6})
 	}
-	// Advertise the NAT-rendezvous UDP port so a client can REGISTER/SYNC2 for
-	// server-independent hole-punching without assuming the default port. Same
+	// Advertise the NAT-rendezvous UDP port so a client can REGISTER/SYNC2 without
+	// assuming the default port. Same
 	// backward-compatible tag loop as the IPv6 tag above — a legacy client ignores it.
 	if conf.NatPort != 0 {
 		tags = append(tags, Tag{Type: TypeUint16, Code: TagNatPort, Data: conf.NatPort})

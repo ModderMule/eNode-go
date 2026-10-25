@@ -141,11 +141,11 @@ eserver still reads 17.7 or above, and the interop suite passes against eserver
 17.14 with the tags present.
 
 **No flag bit is sent.** The contract reserves `FlagServerSearch` (`0x80000`, was `0x20000`)
-for the UDP flags word, and eNode-go never sets it: measured against eserver
-17.14, a peer that sets that bit is still held and pinged, but eserver answers
-every peer-list request with an empty list from then on, so the peer drops out
-of the mesh (`TestGossipPropagatesThroughEserver`). The tag alone marks a server
-that offers the service.
+for the UDP flags word, and eNode-go does not set it: the tag alone marks a
+server that offers the service. An earlier version of this doc said eserver
+17.14 stops naming a peer that sets the bit. That was wrong: eserver ignores
+unknown UDP flag bits. See [server-gossip.md](server-gossip.md) §8, "eserver
+ignores unknown bits in a peer's UDP flags".
 
 **A discovered server is dialled at its gossip address.** The URL in the tag is
 the peer's own claim. Its port, host header and TLS name are used, but the

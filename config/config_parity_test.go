@@ -22,6 +22,10 @@ const (
 // config.StatsBoostConfig.
 var localOnlyConfigKeys = []string{"statsBoost"}
 
+// retiredConfigKeys are still parsed, so old configs load, but ignored and no longer
+// shipped.
+var retiredConfigKeys = []string{"natTraversal.serverIndependent"}
+
 // dropLocalOnlyKeys removes localOnlyConfigKeys and their children from paths.
 func dropLocalOnlyKeys(paths map[string]bool) map[string]bool {
 	for p := range paths {
@@ -43,6 +47,9 @@ func TestShippedConfigDocumentsEveryKey(t *testing.T) {
 	structPaths := map[string]bool{}
 	collectStructPaths(reflect.TypeOf(Config{}), "", structPaths)
 	dropLocalOnlyKeys(structPaths)
+	for _, k := range retiredConfigKeys {
+		delete(structPaths, k)
+	}
 	shipped := readYAMLKeyPaths(t, shippedConfigPath)
 
 	t.Logf("config struct declares %d key paths", len(structPaths))

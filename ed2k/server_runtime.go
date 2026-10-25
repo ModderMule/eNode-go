@@ -357,6 +357,8 @@ func (s *ServerRuntime) SetNATHandler(handler *NATTraversalHandler) {
 	handler.SetSessionTouch(s.TouchSessionByHash)
 	handler.SetSessionAddrs(s.sessionAddrs)
 	handler.SetSessionWake(s.wakeNatSession)
+	// PR_NAT pairs only clients logged in here.
+	handler.SetLocalMembership(func(h [16]byte) bool { return s.sessionByHash(h[:]) != nil })
 }
 
 // sessionAddrs reports the addresses of the session logged in under hash: the
@@ -620,6 +622,9 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 		// that one only ever goes from this server to a client.
 		case OpNatCallbackRequest:
 			s.udpNatCallbackRequest(b, remote, conn, obfuscated, module)
+		// A foreign callback target's keepalive burst after a TCP 0x37.
+		case OpNatKeepalive:
+			s.udpNatKeepalive(b, remote, obfuscated, module)
 		case OpServerDescReq:
 			if len(data) < 6 {
 				s.udpServDescResOld(remote, conn, crypt, module)
@@ -748,6 +753,10 @@ type tcpClient struct {
 	// UDP worker through sessionsByHash, so written and read under infoMu. Also in the
 	// padding, so a session stays the same size.
 	natWakeCapable bool
+	// holePunchExt is set at login when the foreign callback is on and the client sent
+	// SrvCapHolePunchExt (0x100000): it bursts UDP OpNatKeepalive after a TCP 0x37, so
+	// it may be a foreign callback target. Under infoMu; in the padding too.
+	holePunchExt bool
 	// ed3kID is the ed3k node ID the client sent as CT_ED3K at login, or nil. Read
 	// and written under infoMu.
 	ed3kID []byte
@@ -1299,6 +1308,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	c.metaCapable = loginFlags(req.Tags)&SrvCapMetaSearch != 0
 	c.nattCapable = c.server.natCallbackEnabled() && loginFlags(req.Tags)&SrvCapNatTraversal != 0
 	c.natWakeCapable = c.server.natWakeEnabled() && loginFlags(req.Tags)&SrvCapNatWake != 0
+	c.holePunchExt = c.server.foreignCallbackEnabled() && loginFlags(req.Tags)&SrvCapHolePunchExt != 0
 	c.nick, c.software = loginNick(req.Tags), loginSoftware(req.Tags)
 	c.ed3kID = loginEd3k(req.Tags)
 	c.info.IPv6 = v6Bytes
