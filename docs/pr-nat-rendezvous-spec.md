@@ -173,7 +173,10 @@ login carried bit `0x200000`), keep nothing: answer `OP_NAT_WAKE` as in
 [Waking a local target](#waking-a-local-target). Anywhere else, while firewalled, register
 on every family you can offer and keep each candidate alive:
 
-1. Send `REGISTER` (or `REGISTER_EX`) from your UDP socket, every 5 s until acked.
+1. Send `REGISTER` (or `REGISTER_EX`) from your UDP socket, every 5 s until acked. A
+   refused one gets no answer, so back off: eMuleQt slows to one a minute after 6
+   unanswered. On the ack, move this family's later `PR_NAT` traffic to the ack's address
+   and port (the parts that are non-zero), and accept frames from there too.
 2. Then send `KEEPALIVE` well inside the TTL. eMuleQt sends one every 60 s for a 90 s TTL.
    The keepalive keeps both the server's candidate and your NAT's mapping open. The `SYNC`
    that wakes you is unsolicited from your NAT's point of view, and it only gets in through
@@ -185,7 +188,8 @@ on every family you can offer and keep each candidate alive:
 3. If keepalives stop being answered with `PING`, register again. The server lost the
    registration, or your NAT gave you a new port and a keepalive from it matches nothing.
    eMuleQt registers again after 65 s without a `PING`, that is after one unanswered
-   keepalive. On eNode-go v0.5.1 and older, whose TTL is 30 s, each keepalive finds the
+   keepalive, and does so at the default endpoint (server address, `ST_NAT_PORT`), since
+   the learned one may be what broke. On eNode-go v0.5.1 and older, whose TTL is 30 s, each keepalive finds the
    candidate expired and the client registers again, so it is unregistered for about half
    of each minute there.
 
@@ -224,9 +228,12 @@ Clients logged in to the rendezvous server need no standing registration when it
 wake-up. Only foreign targets keep one.
 
 **Who keeps a standing registration today.** eMuleQt registers only while all of these hold:
-NAT traversal on, firewalled (eD2K LowID and Kad not open), a public IPv6 it trusts, and a
-server with `0x40000`. It then keeps a candidate per family it has, with a keepalive every
-60 s, for the whole session. On a server with `0x200000` it keeps none. eMule, aMule and
+NAT traversal on, firewalled (eD2K LowID and Kad not open), a public IPv6 it trusts (its only
+data path is TCP over IPv6, so an IPv4-only LowID never takes part), and a server with
+`0x40000`. It then registers IPv4, plus IPv6 when the server has one, with a keepalive every
+60 s, for the whole session. On a server with `0x200000` it keeps none: it sets the login bit
+whenever NAT traversal is on, also before it trusts an IPv6, and ignores a wake while it has
+no data path (the requester then gets `FAILED 0x01` after the 3 s wake timeout). eMule, aMule and
 other clients do not speak `PR_NAT`.
 
 ## Comparison with the other two schemes
@@ -362,7 +369,8 @@ Implemented in eNode-go after v0.5.1 (`ed2k/natwake.go`) and eMuleQt after v0.6.
 for `PR_NAT` what ed2k-server's extension does with `0x37`: the server reaches a target that
 is logged in to it over the eD2K TCP session, so the target needs no standing registration.
 
-1. **Login.** The client sets `SRVCAP_NAT_WAKE` (`0x200000`) in `CT_SERVER_FLAGS`. The server
+1. **Login.** The client sets `SRVCAP_NAT_WAKE` (`0x200000`) in `CT_SERVER_FLAGS` (eMuleQt:
+   whenever NAT traversal is on, so a data path found after login needs no new login). The server
    remembers it per session (eNode-go: one bool in existing padding, so a session does not
    grow) and advertises `0x200000` in its TCP and UDP flags. A client keeps no standing
    registration only when both are set.
@@ -380,8 +388,8 @@ is logged in to it over the eD2K TCP session, so the target needs no standing re
 5. **Pairing.** A `REGISTER` from the target in a requested family completes the wait: the
    server sends the ack, then the two `SYNC`s as for any SYNC2, preferring IPv6. The
    target's two `REGISTER`s race, so when IPv6 was asked for and the IPv4 one arrives first,
-   the server waits up to 500 ms more for the IPv6 one, then pairs on what it has (measured
-   in eMuleQt's natnet rig: the IPv4 one came first, 1 ms ahead). The requester's `SYNC`
+   the server waits up to 500 ms more for the IPv6 one, then pairs on what it has (eMuleQt
+   sends IPv6 first, but the IPv4 one can still arrive first). The requester's `SYNC`
    leaves from the socket and address its SYNC2 arrived on, which its NAT mapping expects,
    and the target's from the socket its `REGISTER` arrived on. This holds also when the
    pairing comes after the 500 ms wait or at the timeout.
@@ -427,8 +435,9 @@ The target's registration then lives one TTL like any other and is not kept aliv
 - [ ] Wake-up: set login bit `0x200000`; on a server with the flag keep no registration,
       answer `OP_NAT_WAKE` with one `REGISTER` per family, and send an empty `OP_OFFERFILES`
       after 20 min of TCP silence.
-- [ ] While firewalled: `REGISTER` per family from the peer-facing UDP socket; keepalive
-      inside the TTL; re-register when pings stop.
+- [ ] While firewalled: `REGISTER` per family from the peer-facing UDP socket, backing off
+      when unanswered; follow the ack's endpoint; keepalive inside the TTL; re-register at
+      the default endpoint when pings stop.
 - [ ] `SYNC2` with a fresh `connAck`; repeat a few times; handle `SYNC`, `SYNC_EX`,
       `SYNC_IPV6` and `FAILED`.
 - [ ] Punch on `SYNC` from both sides; match the peer by `connAck` or an equivalent check.
