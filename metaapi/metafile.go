@@ -124,6 +124,14 @@ func (f *Fetcher) Stats() *FetchStats { return &f.stats }
 // CacheBytes is how many bytes the cache holds.
 func (f *Fetcher) CacheBytes() int64 { return f.cache.size() }
 
+// CacheLen is how many metafiles the cache holds.
+func (f *Fetcher) CacheLen() int { return f.cache.len() }
+
+// ShedCache gives cache memory back under pressure: it drops expired metafiles, then
+// the least recently used until at most keep (0..1) of the bytes remain, and returns
+// the bytes dropped.
+func (f *Fetcher) ShedCache(keep float64) int64 { return f.cache.shed(keep, f.now()) }
+
 // Kinds are the MetaKinds whose metafiles can be served, by enabled network.
 func (f *Fetcher) Kinds() []metav1.MetaKind {
 	var out []metav1.MetaKind
@@ -420,6 +428,33 @@ func (c *byteCache) size() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.bytes
+}
+
+func (c *byteCache) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.order.Len()
+}
+
+// shed drops expired items, then the least recently used until at most keep of the
+// bytes held on entry remain.
+func (c *byteCache) shed(keep float64, now time.Time) int64 {
+	keep = min(max(keep, 0), 1)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	before := c.bytes
+	for el := c.order.Back(); el != nil; {
+		prev := el.Prev()
+		if now.After(el.Value.(*cacheItem).expires) {
+			c.remove(el)
+		}
+		el = prev
+	}
+	target := int64(float64(before) * keep)
+	for c.bytes > target && c.order.Len() > 0 {
+		c.remove(c.order.Back())
+	}
+	return before - c.bytes
 }
 
 // remove drops one element. Callers hold mu.

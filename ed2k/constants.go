@@ -387,11 +387,15 @@ const (
 )
 
 const (
-	FlagZlib          uint32 = 0x0001
-	FlagIPInLogin     uint32 = 0x0002
-	FlagAuxPort       uint32 = 0x0004
-	FlagNewTags       uint32 = 0x0008
-	FlagUnicode       uint32 = 0x0010
+	FlagZlib      uint32 = 0x0001
+	FlagIPInLogin uint32 = 0x0002
+	FlagAuxPort   uint32 = 0x0004
+	FlagNewTags   uint32 = 0x0008
+	FlagUnicode   uint32 = 0x0010
+	// FlagRelatedSearch is SRV_TCPFLG_RELATEDSEARCH (srchybrid/Server.h:40): the server
+	// answers `related::HASH` searches. eMule and eMuleQt offer "Search related files"
+	// only on a server that sets it; Lugdunum's TCP word 0x17f9 includes it.
+	FlagRelatedSearch uint32 = 0x0040
 	FlagLargeFiles    uint32 = 0x0100
 	FlagSupportCrypt  uint32 = 0x0200
 	FlagRequestCrypt  uint32 = 0x0400

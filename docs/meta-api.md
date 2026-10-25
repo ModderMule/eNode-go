@@ -219,11 +219,14 @@ A web entry may carry `size` 0 and `total_size` 0: a stream, whose size is not k
 leaves it out.
 
 **Cache.** Each network's answer is fetched in chunks of 100 releases and cached per
-network, search and chunk (`search.cache`, 2000 chunks, 600 s). Paging forward and
+network, search and chunk (`search.cache`: 2000 chunks, 256 MiB `maxBytes` estimated
+from the entries' strings, 600 s; least recently used first when either bound is
+reached). Paging forward and
 repeated searches cost no daemon call, and pages stay stable for the TTL. This cache
 is separate from the eD2K search cache (`metaSearch.cache`), so deep paging cannot
 evict what eD2K searches rely on. Keywords are compared case-insensitively and in
-any order.
+any order. Under memory pressure the memory guard sheds this cache and the metafile
+cache before their TTL (see [memory-guard.md](memory-guard.md)).
 
 The web network's entries are of several kinds (amendment 27): web link sets, and
 the eD2K files (`META_KIND_ED2K`), torrents (`BT_V1`, `BT_V2`) and link containers

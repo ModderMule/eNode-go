@@ -12,6 +12,7 @@ import (
 	"enode/contentfilter"
 	"enode/ed2k"
 	"enode/logging"
+	"enode/memguard"
 	"enode/meta"
 	"enode/storage"
 )
@@ -54,6 +55,7 @@ type reloader struct {
 	applied  config.Config
 	derived  bootDerived
 
+	memGuard *memguard.Guard
 	runtime  *ed2k.ServerRuntime
 	engine   storage.Engine
 	content  *contentfilter.Filter
@@ -140,6 +142,7 @@ func (r *reloader) Reload() (admin.ReloadResult, error) {
 		warnStatsBoost(effective)
 	}
 	r.applyMetaSearch(old, effective)
+	r.memGuard.Reload(effective.Memory)
 	if added := missingServers(old.Servers, effective.Servers); len(added) > 0 {
 		seedServers(r.engine, added)
 	}
@@ -283,6 +286,7 @@ func serverListenConfigs(cfg config.Config) (ed2k.TCPServerConfig, ed2k.UDPServe
 		NatRendezvous:  natRendezvous,
 		NatCallback:    natCallback,
 		NatWake:        natWake,
+		RelatedSearch:  cfg.TCP.RelatedSearch.EnabledOrDefault(),
 	}
 	udpCfg := ed2k.UDPServerConfig{
 		Address:       cfg.Address,
@@ -351,6 +355,8 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		CounterCacheTTL:   time.Duration(cfg.Storage.CountCacheSecondsOrDefault()) * time.Second,
 		MoreResultsMax:    moreResultsMax(cfg.TCP.MoreResults),
 		MoreResultsTTL:    cfg.TCP.MoreResults.TTLOrDefault(),
+		RelatedSearch:     cfg.TCP.RelatedSearch.EnabledOrDefault(),
+		RelatedMinClients: cfg.TCP.RelatedSearch.MinClientsOrDefault(),
 	}
 	udp := ed2k.UDPRuntimeConfig{
 		Name:        cfg.Name,

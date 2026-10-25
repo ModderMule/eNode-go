@@ -157,6 +157,9 @@ func manticoreNode(expr *SearchExpr) mNode {
 			return mPruned
 		}
 		return mNode{filter: attr + " " + sqlOperators[op] + " ?", args: []any{clampInt64(expr.ValueUint)}}
+	case SearchHash:
+		// A point lookup the database's hash index answers directly.
+		return mUnsupported
 	case SearchAnd, SearchOr, SearchAndNot:
 		return combineManticoreNodes(expr.Kind, manticoreNode(expr.Left), manticoreNode(expr.Right))
 	default:

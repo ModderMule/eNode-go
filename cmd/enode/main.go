@@ -21,6 +21,7 @@ import (
 	"enode/ed2k"
 	"enode/internal/handoff"
 	"enode/logging"
+	"enode/memguard"
 	"enode/meta"
 	"enode/netfilter"
 	"enode/spamfilter"
@@ -109,6 +110,10 @@ func run(ctx context.Context, configPath string) error {
 		return fmt.Errorf("config logLevel invalid: %w", err)
 	}
 	logging.Infof("welcome: enode starting (config=%s)", configPath)
+	// The memory guard: a soft GC limit, and cache shedding near it. Caches register
+	// as they are built. See docs/memory-guard.md.
+	memGuard := memguard.New(cfg.Memory)
+	memGuard.Start(ctx)
 	// The config exactly as the file had it, before dynIp is replaced by its resolved
 	// value below: a config reload compares the file against this.
 	bootFileCfg := cfg
@@ -286,6 +291,7 @@ func run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("meta api: %w", err)
 	}
+	registerMemoryCaches(memGuard, metaSearcher, metaAPI)
 
 	// The ed3k index node, built before the runtime for the same reason: both
 	// OP_SERVERIDENT and the description reply advertise its link. Its socket is
@@ -516,6 +522,7 @@ func run(ctx context.Context, configPath string) error {
 			spam:       spamDetector,
 			configPath: absConfigPath(configPath),
 			config:     func() config.Config { return cfg },
+			memGuard:   memGuard,
 		}
 		adminSrv.SetViews(views)
 		if err := adminSrv.Start(); err != nil {
@@ -677,6 +684,7 @@ func run(ctx context.Context, configPath string) error {
 		content:      contentFilter,
 		adminSrv:     adminSrv,
 		metaSearcher: metaSearcher,
+		memGuard:     memGuard,
 		udpCfg:       udpCfg,
 		mainConn:     udpConn,
 		obfConn:      obfUDPConn,

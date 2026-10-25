@@ -241,3 +241,20 @@ func TestByteCacheEvictsBySize(t *testing.T) {
 		t.Fatalf("an entry larger than the cache was stored")
 	}
 }
+
+func TestByteCacheShedDropsExpiredThenOldest(t *testing.T) {
+	c := newByteCache(1000, time.Minute)
+	now := time.Now()
+	c.put("old", &metav1.MetaFile{Content: bytes.Repeat([]byte{'x'}, 100)}, now.Add(-2*time.Minute))
+	for _, k := range []string{"a", "b", "c", "d"} {
+		c.put(k, &metav1.MetaFile{Content: bytes.Repeat([]byte{'x'}, 100)}, now)
+	}
+	freed := c.shed(0.5, now)
+	_, hasA := c.get("a", now)
+	_, hasD := c.get("d", now)
+	t.Logf("input: 5×100B (one expired), shed keep=0.5; output: freed=%d size=%d len=%d a=%v d=%v",
+		freed, c.size(), c.len(), hasA, hasD)
+	if freed != 300 || c.size() != 200 || hasA || !hasD {
+		t.Fatalf("freed=%d size=%d a=%v d=%v, want 300 freed (expired + 2 oldest), 200 kept, d kept", freed, c.size(), hasA, hasD)
+	}
+}

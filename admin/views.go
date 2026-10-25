@@ -345,6 +345,33 @@ type RuntimeView struct {
 	BytesPerFile uint64 `json:"bytesPerFile"`
 	// Storage lists the storage engine's settings.
 	Storage []KeyValue `json:"storage"`
+	// Memory is the memory guard; nil when the process runs without one.
+	Memory *MemoryGuardView `json:"memory,omitempty"`
+}
+
+// MemoryGuardView is the memory guard: its soft limit, what it has shed, and the
+// caches it watches. See docs/memory-guard.md.
+type MemoryGuardView struct {
+	Enabled bool `json:"enabled"`
+	// Limit is the soft memory limit in bytes, 0 = none (nothing is shed).
+	Limit int64 `json:"limit"`
+	// Source is where Limit came from: config, GOMEMLIMIT, cgroup, ram, none or off.
+	Source        string `json:"source"`
+	ShedAtPercent int    `json:"shedAtPercent"`
+	KeepPercent   int    `json:"keepPercent"`
+	// LiveHeap is the heap the last GC cycle marked live, as the guard last saw it.
+	LiveHeap      int64             `json:"liveHeap"`
+	Sheds         uint64            `json:"sheds"`
+	LastShed      string            `json:"lastShed"`
+	LastShedBytes int64             `json:"lastShedBytes"`
+	Caches        []MemoryCacheView `json:"caches"`
+}
+
+// MemoryCacheView is one cache the memory guard sheds.
+type MemoryCacheView struct {
+	Name    string `json:"name"`
+	Entries int    `json:"entries"`
+	Bytes   int64  `json:"bytes"`
 }
 
 // KeyValue is one labelled value.

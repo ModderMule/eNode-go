@@ -341,6 +341,50 @@ IPv6 is additive and opt-in; classic packets are byte-identical to before. See
 full IPv6 wire formats (login `CT_MOD_IP_V6 0xAE` tag, the `0xFFFFFFFF` source
 sentinel, `CT_MOD_SVR_IP_V6 0xAF` in `OP_SERVERIDENT`, and `SRV_*FLG_IPV6 0x4000`).
 
+### Hash and related search
+
+Two string terms of `OP_SEARCHREQUEST` have a meaning of their own, as on Lugdunum
+17.15 (`Is_ed2k_search`, `Is_related_search`):
+
+**Search by file hash.** A term in one of these forms becomes a hash leaf
+(`storage.ParseHashTerm`); a size of 0 means any size and text after the 32 hex digits
+is ignored:
+
+| Term | Matches |
+|---|---|
+| `ed2k::HASH` | the hash, any size (what eMule sends for a pasted ed2k link, `srchybrid/Scanner.l:157-176`) |
+| `ed2k:SIZE:HASH` | the hash at that size |
+| `ed2k://\|file\|NAME\|SIZE\|HASH\|…`, `<a href= ed2k://\|file\|…` | the hash at that size |
+| `magnet:?xt=ed2k:HASH`, `magnet:?xt=urn:ed2k:HASH`, `magnet:?xt=urn:ed2khash:HASH` | the hash, any size |
+
+The leaf is a per-file predicate in the ordinary tree, so it combines with AND, OR,
+NOT and the search window's filters. It is answered over TCP and over UDP
+(`OP_GLOBSEARCHREQ`, `…REQ2`, `…REQ3`), by every storage engine. Web front ends use it
+to ask each server about one file; ed2k.shortypower.org (ed2k-stats) is an example.
+
+**Related search.** `related::HASH[::HASH…]` or `related:SIZE:HASH`, up to 32 files,
+is sent by eMule's and eMuleQt's "Search related files". They offer that command only
+on a server that sets `SRV_TCPFLG_RELATEDSEARCH 0x40` (`srchybrid/Server.h:40`), which
+eNode advertises while `tcp.relatedSearch.enabled` is on (the default). The answer is
+the files that the online users sharing the given files also share, most shared
+first, then by sources; the given files themselves are left out and filters AND-ed with
+the term still apply.
+- Nothing is returned unless at least `tcp.relatedSearch.minClients` (default 5) online
+  users share the given files, so one user's share list is never shown on its own.
+  The value 5 is the one Lugdunum's author gave (quoted in
+  `srchybrid/SearchResultsWnd.cpp:1666`).
+- At most 500 of those users are walked.
+- It is TCP only, as on Lugdunum: a UDP global search for `related::` gets no reply,
+  and with the feature off a TCP one gets an empty result page.
+- Meta and mirrored rows are not merged in; they have no users to relate.
+
+```yaml
+tcp:
+  relatedSearch:
+    enabled: true
+    minClients: 5
+```
+
 ### Client -> Server TCP opcodes not handled
 
 These reach the default branch in `handleED2K` (`ed2k/server_runtime.go`) and are

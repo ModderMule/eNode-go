@@ -16,6 +16,14 @@ const (
 	SearchString
 	SearchUInt32
 	SearchUInt64
+	// SearchHash is a file-hash leaf parsed from an `ed2k::<hash>` term (see
+	// ParseHashTerm): ValueString holds the raw 16-byte hash, ValueUint the size or 0
+	// for any size.
+	SearchHash
+	// SearchRelated is a `related::<hash>` term (see ParseRelatedTerm), its seeds in
+	// Related. It matches every file: the related lookup itself is not a per-file
+	// predicate and runs outside the engines' FindBySearch (see FindRelated).
+	SearchRelated
 )
 
 type SearchExpr struct {
@@ -26,6 +34,8 @@ type SearchExpr struct {
 	ValueUint   uint64
 	Left        *SearchExpr
 	Right       *SearchExpr
+	// Related holds the seed files of a SearchRelated leaf.
+	Related []FileKey
 }
 
 const (
@@ -188,6 +198,12 @@ func buildSearchNode(expr *SearchExpr, dialect string) whereNode {
 			return prunedNode
 		}
 		return whereNode{sql: "(" + col + " " + sqlOperators[op] + " ?)", args: []any{expr.ValueUint}}
+	case SearchHash:
+		// Served by the hash_size index; the same in both dialects.
+		if expr.ValueUint == 0 {
+			return whereNode{sql: "(f.hash = ?)", args: []any{[]byte(expr.ValueString)}}
+		}
+		return whereNode{sql: "(f.hash = ? AND f.size = ?)", args: []any{[]byte(expr.ValueString), expr.ValueUint}}
 	case SearchAnd, SearchOr, SearchAndNot:
 		return combineWhereNodes(expr.Kind, buildSearchNode(expr.Left, dialect), buildSearchNode(expr.Right, dialect))
 	default:
@@ -292,6 +308,8 @@ func (sm *searchMatcher) matchNode(expr *SearchExpr, file File, lowerName string
 			return false, true
 		}
 		return CompareSearchValue(op, have, expr.ValueUint), false
+	case SearchHash:
+		return matchHashLeaf(expr, file), false
 	case SearchAnd, SearchOr, SearchAndNot:
 		leftMatch, leftPrune := sm.matchNode(expr.Left, file, lowerName)
 		rightMatch, rightPrune := sm.matchNode(expr.Right, file, lowerName)
@@ -629,6 +647,9 @@ func searchAnchor(expr *SearchExpr, minTok int) (anchored, scan, prune bool) {
 			return false, false, true
 		}
 		return false, false, false
+	case SearchHash:
+		// A point lookup on the hash index: anchored, never a scan.
+		return true, false, false
 	case SearchAnd, SearchOr, SearchAndNot:
 		la, ls, lp := searchAnchor(expr.Left, minTok)
 		ra, rs, rp := searchAnchor(expr.Right, minTok)

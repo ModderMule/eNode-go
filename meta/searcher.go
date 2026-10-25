@@ -332,7 +332,7 @@ func (s *Searcher) buildState(cfg config.MetaSearchConfig, old *searcherState) (
 	case old != nil && cfg.Cache == s.cfg.Cache:
 		state.cache = old.cache
 	case cfg.Cache.Enabled:
-		state.cache = NewCache(cfg.Cache.MaxEntries, cfg.Cache.MaxRowsPerEntry, time.Duration(cfg.Cache.TTLSeconds)*time.Second)
+		state.cache = NewCache(CacheLimits{MaxEntries: cfg.Cache.MaxEntries, MaxBytes: cfg.Cache.MaxBytes}, cfg.Cache.MaxRowsPerEntry, time.Duration(cfg.Cache.TTLSeconds)*time.Second)
 	}
 	if old != nil && cfg.UDPMaxConcurrent == s.cfg.UDPMaxConcurrent {
 		state.udpSlots = old.udpSlots

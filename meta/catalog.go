@@ -52,14 +52,16 @@ type CatalogConfig struct {
 	// Timeout bounds the daemon calls of one chunk.
 	Timeout    time.Duration
 	MaxEntries int
-	TTL        time.Duration
+	// MaxBytes bounds the chunks' estimated bytes (ChunkBytes); 0 = no byte bound.
+	MaxBytes int64
+	TTL      time.Duration
 }
 
 // EnableCatalog turns on SearchCatalog, with a chunk cache of its own: MetaApi paging
 // must not evict the entries eD2K searches rely on, and the eD2K cache keeps lossy
 // storage.File rows keyed without most of SearchRequest's filters.
 func (s *Searcher) EnableCatalog(cfg CatalogConfig) {
-	s.catalog = NewValueCache[Chunk](cfg.MaxEntries, cfg.TTL, nil)
+	s.catalog = NewValueCache(CacheLimits{MaxEntries: cfg.MaxEntries, MaxBytes: cfg.MaxBytes}, cfg.TTL, nil, ChunkBytes)
 	s.catalogTimeout = cfg.Timeout
 }
 

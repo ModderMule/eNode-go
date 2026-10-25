@@ -81,6 +81,8 @@ type Config struct {
 
 	Storage StorageConfig `yaml:"storage"`
 	Debug   DebugConfig   `yaml:"debug"`
+	// Memory is the memory guard: GC soft limit and cache shedding.
+	Memory MemoryConfig `yaml:"memory"`
 
 	// StatsBoost is deliberately absent from the published enode.config.yaml and
 	// only carried by local configs; see StatsBoostConfig.
@@ -152,6 +154,37 @@ type TCPConfig struct {
 	MaxLowID            uint32 `yaml:"maxLowID"`
 	// MoreResults bounds the search results a session keeps for OP_QUERY_MORE_RESULT.
 	MoreResults MoreResultsConfig `yaml:"moreResults"`
+	// RelatedSearch answers Lugdunum's related search over TCP.
+	RelatedSearch RelatedSearchConfig `yaml:"relatedSearch"`
+}
+
+// RelatedSearchConfig controls Lugdunum's related search: for a `related::HASH`
+// search the server returns the files that the users sharing HASH also share, most
+// common first. eMule and eMuleQt only offer "Search related files" on a server that
+// advertises SRV_TCPFLG_RELATEDSEARCH, which Enabled also controls. Pointers so an
+// explicit false or 0 differs from absent.
+type RelatedSearchConfig struct {
+	// Enabled answers related searches and advertises the capability. Default true.
+	Enabled *bool `yaml:"enabled"`
+	// MinClients is how many online users must share the searched files before
+	// anything is returned, so one user's share list is never shown on its own.
+	// Lugdunum's author gives 5 for his server. 0 or less is the default.
+	MinClients *int `yaml:"minClients"`
+}
+
+// DefaultRelatedSearchMinClients is the default of tcp.relatedSearch.minClients.
+const DefaultRelatedSearchMinClients = 5
+
+// EnabledOrDefault resolves tcp.relatedSearch.enabled.
+func (c RelatedSearchConfig) EnabledOrDefault() bool { return boolOrDefault(c.Enabled, true) }
+
+// MinClientsOrDefault resolves tcp.relatedSearch.minClients; 0 or less is the default.
+func (c RelatedSearchConfig) MinClientsOrDefault() int {
+	n := intOrDefault(c.MinClients, DefaultRelatedSearchMinClients)
+	if n <= 0 {
+		return DefaultRelatedSearchMinClients
+	}
+	return n
 }
 
 // MoreResultsConfig bounds the tail of a search a session keeps after its first page,
@@ -744,7 +777,10 @@ type MetaCacheConfig struct {
 	MaxEntries int `yaml:"maxEntries"`
 	// MaxRowsPerEntry caps what one cached query keeps.
 	MaxRowsPerEntry int `yaml:"maxRowsPerEntry"`
-	TTLSeconds      int `yaml:"ttlSeconds"`
+	// MaxBytes bounds the estimated bytes of all cached rows, least recently used
+	// evicted. Default 256 MiB.
+	MaxBytes   int64 `yaml:"maxBytes"`
+	TTLSeconds int   `yaml:"ttlSeconds"`
 }
 
 // boolOrDefault returns *p, or def when p is nil. The *bool pattern lets an absent
@@ -1189,6 +1225,9 @@ func setDefaults(cfg *Config) error {
 		return fmt.Errorf("statsBoost.users (%d), statsBoost.lowIDUsers (%d) and statsBoost.files (%d) must not be negative",
 			b.Users, b.LowIDUsers, b.Files)
 	}
+	if err := setMemoryDefaults(&cfg.Memory); err != nil {
+		return err
+	}
 	if err := setMetaSearchDefaults(&cfg.MetaSearch); err != nil {
 		return err
 	}
@@ -1371,6 +1410,9 @@ const (
 	DefaultUsenetNamePrefix  = "[usenet] "
 	DefaultKadNamePrefix     = "[kad] "
 	DefaultWebNamePrefix     = "[web] "
+	// DefaultMetaCacheMaxBytes is the byte bound of metaSearch.cache and
+	// metaApi.search.cache.
+	DefaultMetaCacheMaxBytes = 256 << 20
 	// maxMetaUDPResults bounds maxUDPResults: each row is one datagram answering one
 	// unauthenticated request.
 	maxMetaUDPResults = 50
@@ -1406,6 +1448,9 @@ func setMetaSearchDefaults(c *MetaSearchConfig) error {
 	}
 	if c.Cache.MaxRowsPerEntry <= 0 {
 		c.Cache.MaxRowsPerEntry = 100
+	}
+	if c.Cache.MaxBytes <= 0 {
+		c.Cache.MaxBytes = DefaultMetaCacheMaxBytes
 	}
 	if c.Cache.TTLSeconds <= 0 {
 		c.Cache.TTLSeconds = 600

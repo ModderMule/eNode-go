@@ -63,7 +63,7 @@ type ServerSearchServe struct {
 	// browse calls. 0 asks for none.
 	BrowseMinIntervalSeconds int `yaml:"browseMinIntervalSeconds"`
 	// Cache holds search answers so that paging one is stable.
-	Cache     MetaAPISearchCacheConfig    `yaml:"cache"`
+	Cache     ServerSearchCacheConfig     `yaml:"cache"`
 	RateLimit ServerSearchRateLimitConfig `yaml:"rateLimit"`
 }
 
@@ -95,8 +95,8 @@ type ServerSearchLiveConfig struct {
 	// TimeoutMs bounds one peer's answer; a slower peer is left out.
 	TimeoutMs int `yaml:"timeoutMs"`
 	// MaxResults caps the files taken from one peer for one search.
-	MaxResults int                      `yaml:"maxResults"`
-	Cache      MetaAPISearchCacheConfig `yaml:"cache"`
+	MaxResults int                     `yaml:"maxResults"`
+	Cache      ServerSearchCacheConfig `yaml:"cache"`
 }
 
 // ServerSearchMirror keeps a copy of each peer's catalogue in memory by browsing
@@ -281,4 +281,11 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// ServerSearchCacheConfig caches answers of the server-to-server search, bounded by
+// entry count.
+type ServerSearchCacheConfig struct {
+	MaxEntries int `yaml:"maxEntries"`
+	TTLSeconds int `yaml:"ttlSeconds"`
 }

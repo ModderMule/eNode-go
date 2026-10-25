@@ -44,6 +44,7 @@
   而不会覆盖他人的记录。缺少有效大小的记录会被直接拒绝，因为它永远无法被提供下载。
   详见 [`docs/server-client-communication.md`](docs/server-client-communication.md#file-identity)。
 - eD2K 搜索中的 Torrent、Usenet、Kad 与网页结果：每次 TCP 与 UDP 搜索的关键词会通过 `MetaIngest` 服务（兼容 gRPC，基于共享契约 [`enodemeta`](https://github.com/ModderMule/enodemeta)）转发给 torrent-crawler / usenet-crawler / kademlia-crawler / web-crawler 守护进程，其结果合并进同一个回复中。Torrent、Usenet 与网页条目使用伪哈希与 `FT_META_*` 标签，Kad 条目是真实的 eD2K 文件；所有条目都在文件名前加上前缀（`[torrent] ` / `[usenet] ` / `[kad] ` / `[web] `），便于普通客户端区分。每个网络、其订阅源以及结果缓存均为可选项，默认关闭。详见 [`docs/meta-search.md`](docs/meta-search.md)。
+- 按文件哈希搜索与相关文件搜索，行为与 Lugdunum 一致：`ed2k::<hash>` 搜索词（eMule 粘贴 ed2k 链接时发送的内容，也是 ed2k.shortypower.org 等网页前端向各服务器查询时使用的格式）可通过 TCP 与 UDP 找到该文件；`related::<hash>`（eMule 的“搜索相关文件”）返回共享该文件的用户还共享的其他文件，前提是至少有 `tcp.relatedSearch.minClients`（默认 5）个用户共享该文件。详见 [`docs/server-client-communication.md`](docs/server-client-communication.md#hash-and-related-search)。
 - ed3k 索引节点（可选，默认关闭）：服务器同时作为 ed3k（eD2K 的 QUIC 后继网络）的索引节点运行，
   不承担 Kad 路由职责。它把每个文件的来源、关键词与评论保存在所配置的存储引擎中
   （memory、MySQL、MongoDB，关键词搜索可用 Manticore），中转打洞请求，并通过 `OP_SERVERIDENT`

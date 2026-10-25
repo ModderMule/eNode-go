@@ -204,8 +204,16 @@ metaSearch:
     enabled: false
     maxEntries: 1000
     maxRowsPerEntry: 100
+    maxBytes: 268435456             # 256 MiB of cached rows (estimated)
     ttlSeconds: 600
 ```
+
+The cache is bounded twice: by `maxEntries` queries and by `maxBytes`, an estimate of
+the heap its rows hold (struct sizes plus string bytes, within a few percent of the
+measured heap). The least recently used query goes first when either is reached. A
+single answer larger than `maxBytes` is served but not kept. When memory runs short,
+the memory guard (`memory:`, see [memory-guard.md](memory-guard.md)) can drop entries
+before their TTL.
 
 The server refuses to start in these cases:
 

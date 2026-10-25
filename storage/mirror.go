@@ -1,6 +1,9 @@
 package storage
 
-import "sync"
+import (
+	"slices"
+	"sync"
+)
 
 // Mirror is a searchable in-memory copy of files that other servers reported:
 // what a walk of their catalogues returned. It is kept apart from every Engine
@@ -19,11 +22,13 @@ type Mirror struct {
 	maxFiles int
 
 	files map[string]uint32
-	recs  fileSlab
-	refs  [][]mirrorRef
-	names nameIndex
-	free  []uint32
-	count int
+	// byHash lists the ids of each hash's files, one per size, for hash searches.
+	byHash map[[hashLen]byte][]uint32
+	recs   fileSlab
+	refs   [][]mirrorRef
+	names  nameIndex
+	free   []uint32
+	count  int
 }
 
 // mirrorRef is one origin's claim on a file.
@@ -36,7 +41,7 @@ type mirrorRef struct {
 
 // NewMirror returns a mirror that holds at most maxFiles files.
 func NewMirror(maxFiles int) *Mirror {
-	return &Mirror{maxFiles: maxFiles, files: map[string]uint32{}, names: newNameIndex()}
+	return &Mirror{maxFiles: maxFiles, files: map[string]uint32{}, byHash: map[[hashLen]byte][]uint32{}, names: newNameIndex()}
 }
 
 // Put records that origin reported files during walk. It returns how many were
@@ -63,6 +68,8 @@ func (m *Mirror) Put(origin, walk uint32, files []File) int {
 			}
 			id = m.allocLocked()
 			m.files[key] = id
+			hk := hashArray(f.Hash)
+			m.byHash[hk] = append(m.byHash[hk], id)
 			m.count++
 			f.Hash = append([]byte(nil), f.Hash...)
 			*m.recs.at(id) = f
@@ -101,7 +108,7 @@ func (m *Mirror) Drop(origin uint32) int {
 // origins report are the largest any of them gave: nothing says their users
 // differ, so they are not added up.
 func (m *Mirror) Search(expr *SearchExpr, limit int) []File {
-	if expr == nil || limit <= 0 {
+	if expr == nil || limit <= 0 || searchPrunes(expr) {
 		return nil
 	}
 	m.mu.RLock()
@@ -114,7 +121,7 @@ func (m *Mirror) Search(expr *SearchExpr, limit int) []File {
 		}
 		return len(out) >= limit
 	}
-	ids, all := m.names.candidates(expr, max(candidateFloor, m.count/8))
+	ids, all := m.names.candidates(expr, max(candidateFloor, m.count/8), m.hashIDsLocked)
 	if all {
 		for id := range m.recs.len() {
 			if match(uint32(id)) {
@@ -212,6 +219,7 @@ func (m *Mirror) dropRefs(gone func(mirrorRef) bool) int {
 			continue
 		}
 		delete(m.files, fileMapKey(rec.Hash, rec.Size))
+		m.unlinkHashLocked(rec.Hash, id)
 		m.names.removeFile(rec.Name)
 		*rec = File{}
 		m.refs[id] = nil
@@ -247,4 +255,27 @@ func (m *Mirror) reindexLocked() {
 			m.names.indexName(uint32(i), f.Name)
 		}
 	}
+}
+
+// hashIDsLocked lists the ids of the files of hash, of size or of any size when size
+// is 0.
+func (m *Mirror) hashIDsLocked(hash []byte, size uint64) []uint32 {
+	var ids []uint32
+	for _, id := range m.byHash[hashArray(hash)] {
+		if size == 0 || m.recs.at(id).Size == size {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// unlinkHashLocked removes id from the files listed under hash.
+func (m *Mirror) unlinkHashLocked(hash []byte, id uint32) {
+	hk := hashArray(hash)
+	ids := slices.DeleteFunc(m.byHash[hk], func(x uint32) bool { return x == id })
+	if len(ids) == 0 {
+		delete(m.byHash, hk)
+		return
+	}
+	m.byHash[hk] = ids
 }

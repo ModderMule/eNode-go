@@ -18,6 +18,7 @@ import (
 	"enode/contentfilter"
 	"enode/ed2k"
 	"enode/logging"
+	"enode/memguard"
 	"enode/netfilter"
 	"enode/spamfilter"
 	"enode/storage"
@@ -50,6 +51,8 @@ type adminViews struct {
 	updater *contentfilter.Updater
 	// spam is the spam detector, or nil when filter.spam is off.
 	spam *spamfilter.Detector
+	// memGuard is the memory guard, shown on the Runtime tab.
+	memGuard *memguard.Guard
 
 	// configPath is the absolute path of the config file the server was started with.
 	configPath string
@@ -406,6 +409,9 @@ func (v *adminViews) Runtime() admin.RuntimeView {
 	}
 	if files > 0 {
 		view.BytesPerFile = mem.HeapAlloc / uint64(files)
+	}
+	if v.memGuard != nil {
+		view.Memory = memoryGuardView(v.memGuard.Stats())
 	}
 	return view
 }

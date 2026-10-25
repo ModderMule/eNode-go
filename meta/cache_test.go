@@ -20,7 +20,7 @@ func rowsNamed(names ...string) []storage.File {
 }
 
 func TestCacheHitMissAndTTL(t *testing.T) {
-	c := NewCache(10, 100, time.Minute)
+	c := NewCache(CacheLimits{MaxEntries: 10}, 100, time.Minute)
 	now := time.Unix(1000, 0)
 	c.now = func() time.Time { return now }
 
@@ -43,7 +43,7 @@ func TestCacheHitMissAndTTL(t *testing.T) {
 }
 
 func TestCacheEvictsLeastRecentlyUsedAndCapsRows(t *testing.T) {
-	c := NewCache(2, 3, time.Minute)
+	c := NewCache(CacheLimits{MaxEntries: 2}, 3, time.Minute)
 	load := func(names ...string) func() ([]storage.File, error) {
 		return func() ([]storage.File, error) { return rowsNamed(names...), nil }
 	}
@@ -67,7 +67,7 @@ func TestCacheEvictsLeastRecentlyUsedAndCapsRows(t *testing.T) {
 }
 
 func TestCacheCollapsesConcurrentMisses(t *testing.T) {
-	c := NewCache(10, 100, time.Minute)
+	c := NewCache(CacheLimits{MaxEntries: 10}, 100, time.Minute)
 	var loads atomic.Int32
 	release := make(chan struct{})
 	load := func() ([]storage.File, error) {
@@ -102,7 +102,7 @@ func TestCacheCollapsesConcurrentMisses(t *testing.T) {
 }
 
 func TestCacheWaiterHonoursItsOwnDeadline(t *testing.T) {
-	c := NewCache(10, 100, time.Minute)
+	c := NewCache(CacheLimits{MaxEntries: 10}, 100, time.Minute)
 	release := make(chan struct{})
 	defer close(release)
 	go func() {
@@ -121,7 +121,7 @@ func TestCacheWaiterHonoursItsOwnDeadline(t *testing.T) {
 }
 
 func TestCacheDoesNotStoreFailures(t *testing.T) {
-	c := NewCache(10, 100, time.Minute)
+	c := NewCache(CacheLimits{MaxEntries: 10}, 100, time.Minute)
 	boom := errors.New("daemon down")
 	_, err := c.Get(context.Background(), "k", func() ([]storage.File, error) { return nil, boom })
 	rows, _ := c.Get(context.Background(), "k", func() ([]storage.File, error) { return rowsNamed("ok"), nil })

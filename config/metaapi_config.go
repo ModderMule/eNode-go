@@ -83,7 +83,10 @@ type MetaAPISearchConfig struct {
 // network and search, so paging forward and repeated searches cost no daemon call.
 type MetaAPISearchCacheConfig struct {
 	MaxEntries int `yaml:"maxEntries"`
-	TTLSeconds int `yaml:"ttlSeconds"`
+	// MaxBytes bounds the estimated bytes of all cached chunks, least recently used
+	// evicted. Default 256 MiB.
+	MaxBytes   int64 `yaml:"maxBytes"`
+	TTLSeconds int   `yaml:"ttlSeconds"`
 }
 
 // MetaAPITLSConfig serves both listeners over TLS when CertFile and KeyFile are set.
@@ -365,6 +368,9 @@ func setMetaAPISearchDefaults(c *MetaAPISearchConfig) error {
 	}
 	if c.Cache.MaxEntries <= 0 {
 		c.Cache.MaxEntries = 2000
+	}
+	if c.Cache.MaxBytes <= 0 {
+		c.Cache.MaxBytes = DefaultMetaCacheMaxBytes
 	}
 	if c.Cache.TTLSeconds <= 0 {
 		c.Cache.TTLSeconds = 600

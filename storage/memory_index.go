@@ -159,12 +159,20 @@ func (x *nameIndex) needsRebuild() bool {
 
 // candidates returns the ids expr can match, ascending and without duplicates, or
 // all=true when the index cannot narrow it and the caller must scan. limit is the
-// widest posting total collected before a leaf is given up as all.
-func (x *nameIndex) candidates(expr *SearchExpr, limit int) (ids []uint32, all bool) {
+// widest posting total collected before a leaf is given up as all. byHash, when
+// not nil, lists the ids of a hash leaf's files, which the name index cannot.
+func (x *nameIndex) candidates(expr *SearchExpr, limit int, byHash hashLookup) (ids []uint32, all bool) {
 	if expr == nil {
 		return nil, true
 	}
 	switch expr.Kind {
+	case SearchHash:
+		if byHash == nil {
+			return nil, true
+		}
+		ids := byHash([]byte(expr.ValueString), expr.ValueUint)
+		slices.Sort(ids)
+		return slices.Compact(ids), false
 	case SearchText:
 		return x.textCandidates(expr.Text, limit)
 	case SearchString:
@@ -173,11 +181,11 @@ func (x *nameIndex) candidates(expr *SearchExpr, limit int) (ids []uint32, all b
 		}
 		return nil, true
 	case SearchAnd:
-		l, lAll := x.candidates(expr.Left, limit)
+		l, lAll := x.candidates(expr.Left, limit, byHash)
 		if !lAll && len(l) == 0 {
 			return nil, false
 		}
-		r, rAll := x.candidates(expr.Right, limit)
+		r, rAll := x.candidates(expr.Right, limit, byHash)
 		switch {
 		case lAll:
 			return r, rAll
@@ -186,18 +194,18 @@ func (x *nameIndex) candidates(expr *SearchExpr, limit int) (ids []uint32, all b
 		}
 		return intersectSorted(l, r), false
 	case SearchOr:
-		l, lAll := x.candidates(expr.Left, limit)
+		l, lAll := x.candidates(expr.Left, limit, byHash)
 		if lAll {
 			return nil, true
 		}
-		r, rAll := x.candidates(expr.Right, limit)
+		r, rAll := x.candidates(expr.Right, limit, byHash)
 		if rAll {
 			return nil, true
 		}
 		return unionSorted(l, r), false
 	case SearchAndNot:
 		// The right side only takes files away; the left bounds the result.
-		return x.candidates(expr.Left, limit)
+		return x.candidates(expr.Left, limit, byHash)
 	default:
 		// Numeric, type, extension and media leaves are not indexed; pruned and
 		// unknown nodes constrain nothing. The re-check applies them.
@@ -447,3 +455,7 @@ func unionSorted(a, b []uint32) []uint32 {
 	out = append(out, a[i:]...)
 	return append(out, b[j:]...)
 }
+
+// hashLookup lists the ids of the files with hash, of the given size or of any size
+// when size is 0.
+type hashLookup func(hash []byte, size uint64) []uint32

@@ -159,7 +159,7 @@ func NewSearcher(cfg SearcherConfig) *Searcher {
 	}
 	s := &Searcher{cfg: cfg, peers: map[string]*peer{}}
 	if cfg.Live {
-		s.cache = meta.NewCache(cfg.CacheEntries, cfg.MaxResults, cfg.CacheTTL)
+		s.cache = meta.NewCache(meta.CacheLimits{MaxEntries: cfg.CacheEntries}, cfg.MaxResults, cfg.CacheTTL)
 	}
 	if cfg.Mirror {
 		s.mirror = storage.NewMirror(cfg.MaxFiles)

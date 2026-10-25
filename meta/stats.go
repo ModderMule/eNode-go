@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"enode/logging"
+	"enode/storage"
 
 	metav1 "github.com/ModderMule/enodemeta/gen/enode/meta/v1"
 )
@@ -154,6 +155,17 @@ func (s *Searcher) CacheEntries() int {
 		return 0
 	}
 	return cache.Len()
+}
+
+// SearchCache is the shared result cache in effect now, nil when it is off. A reload
+// that changes metaSearch.cache replaces it, so callers ask again each time.
+func (s *Searcher) SearchCache() *Cache[[]storage.File] {
+	return s.state.Load().cache
+}
+
+// CatalogCache is the MetaApi.Search chunk cache, nil until EnableCatalog.
+func (s *Searcher) CatalogCache() *Cache[Chunk] {
+	return s.catalog
 }
 
 // sourceCounters are one network's search counters since start.

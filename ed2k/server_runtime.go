@@ -87,6 +87,11 @@ type TCPRuntimeConfig struct {
 	// config tcp.moreResults.
 	MoreResultsMax int
 	MoreResultsTTL time.Duration
+	// RelatedSearch answers `related::HASH` searches; RelatedMinClients is how many
+	// online users must share the searched files first (zero is
+	// defaultRelatedMinClients). See config tcp.relatedSearch.
+	RelatedSearch     bool
+	RelatedMinClients int
 }
 
 type UDPRuntimeConfig struct {
@@ -1842,6 +1847,13 @@ func (c *tcpClient) handleSearchRequest(data *Buffer) {
 		c.sendSearchPage(nil)
 		return
 	}
+	if seeds, ok := storage.FindRelated(expr); ok {
+		// Not merged with meta or mirrored rows: those have no users to relate.
+		files := c.server.relatedSearch(expr, seeds)
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST related resultCount=%d", c.remoteHost, len(files))
+		c.sendSearchPage(files)
+		return
+	}
 	metaCh := c.server.startMetaSearch(expr, c.metaCapable, false)
 	files := c.server.withholdFiles(mergeMetaResults(c.server.Storage.FindBySearch(expr), metaCh))
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST resultCount=%d", c.remoteHost, len(files))
@@ -2888,7 +2900,8 @@ func (s *ServerRuntime) udpGlobSearchReq(b *Buffer, remote *net.UDPAddr, conn UD
 	// OP_GLOBSEARCHREQ and ...REQ2 carry no tag block, so the requester cannot have
 	// asked for meta rows: it gets the pseudo-hash ones only when they go to every
 	// client. Kad rows are plain eD2K files and it gets those regardless.
-	if s.queryBlocked(expr) {
+	// A related search is TCP only (see relatedsearch.go).
+	if s.queryBlocked(expr) || isRelatedSearch(expr) {
 		return
 	}
 	metaCh := s.startMetaSearch(expr, false, true)
@@ -2922,7 +2935,7 @@ func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn U
 		return
 	}
 	metaCapable := udpSearchFlags(tags)&SrvCapUDPMetaSearch != 0
-	if s.queryBlocked(expr) {
+	if s.queryBlocked(expr) || isRelatedSearch(expr) {
 		return
 	}
 	metaCh := s.startMetaSearch(expr, metaCapable, true)
@@ -3107,6 +3120,13 @@ func formatSearchExpr(expr *storage.SearchExpr) string {
 		return fmt.Sprintf("U32(tag=0x%x,val=%d)", expr.TagType, expr.ValueUint)
 	case storage.SearchUInt64:
 		return fmt.Sprintf("U64(tag=0x%x,val=%d)", expr.TagType, expr.ValueUint)
+	case storage.SearchHash:
+		if expr.ValueUint == 0 {
+			return fmt.Sprintf("HASH(%x)", expr.ValueString)
+		}
+		return fmt.Sprintf("HASH(%x,size=%d)", expr.ValueString, expr.ValueUint)
+	case storage.SearchRelated:
+		return fmt.Sprintf("RELATED(%d)", len(expr.Related))
 	case storage.SearchAnd:
 		return fmt.Sprintf("AND(%s,%s)", formatSearchExpr(expr.Left), formatSearchExpr(expr.Right))
 	case storage.SearchOr:
@@ -3453,6 +3473,9 @@ func (t *TCPRuntimeConfig) setDefaults() {
 	}
 	if t.MoreResultsTTL <= 0 {
 		t.MoreResultsTTL = defaultMoreResultsTTL
+	}
+	if t.RelatedMinClients <= 0 {
+		t.RelatedMinClients = defaultRelatedMinClients
 	}
 }
 

@@ -116,6 +116,8 @@ func TestReloadableClassifiesKeys(t *testing.T) {
 		"storage.countCacheSeconds":       true,
 		"storage.cleanup.enabled":         false,
 		"filter.update.enabled":           false,
+		"memory.limitBytes":               true,
+		"memory":                          true,
 	}
 	for path, want := range cases {
 		got := Reloadable(path)

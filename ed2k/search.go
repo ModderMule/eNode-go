@@ -63,7 +63,7 @@ func parseSearchExpr(b *Buffer, depth int, leaves *int) (*storage.SearchExpr, er
 		if err != nil {
 			return nil, err
 		}
-		return &storage.SearchExpr{Kind: storage.SearchText, Text: s}, nil
+		return keywordLeaf(s), nil
 	case TypeString:
 		s, err := b.GetString()
 		if err != nil {
@@ -76,6 +76,11 @@ func parseSearchExpr(b *Buffer, depth int, leaves *int) (*storage.SearchExpr, er
 		// [len lo][len hi][code] read as a little-endian value, e.g. 0x00030001 for
 		// FT_FILETYPE; any other name length leaves an unknown type that is pruned.
 		typ := uint32(nameLen) | uint32(code)<<16
+		if typ == storage.SearchTermTag {
+			if leaf := specialKeywordLeaf(s); leaf != nil {
+				return leaf, nil
+			}
+		}
 		return &storage.SearchExpr{Kind: storage.SearchString, TagType: typ, ValueString: s}, nil
 	case TypeUint32:
 		v, err := b.GetUInt32LE()
@@ -165,4 +170,33 @@ func readSearchNumericType(b *Buffer) (uint32, error) {
 		return 0, err
 	}
 	return uint32(op) | uint32(nameLen)<<8 | uint32(code)<<24, nil
+}
+
+// keywordLeaf is the leaf of a plain string term: a hash or related search when the
+// text is one (see specialKeywordLeaf), otherwise a keyword.
+func keywordLeaf(s string) *storage.SearchExpr {
+	if leaf := specialKeywordLeaf(s); leaf != nil {
+		return leaf
+	}
+	return &storage.SearchExpr{Kind: storage.SearchText, Text: s}
+}
+
+// specialKeywordLeaf reads the two string terms Lugdunum gives a meaning of their
+// own, or returns nil:
+//
+//   - `related::HASH[::HASH…]`: files the users sharing HASH also share. eMule
+//     (srchybrid/SearchResultsWnd.cpp:1666) and eMuleQt
+//     (src/gui/panels/SearchPanel.cpp:204) send it from "Search related files".
+//   - `ed2k::HASH` and the other link forms storage.ParseHashTerm reads: the file
+//     with that hash. eMule sends it for an ed2k link pasted into the search box
+//     (srchybrid/Scanner.l:157-176); web front ends such as ed2k.shortypower.org
+//     (ed2k-stats) use it to ask each server about one file.
+func specialKeywordLeaf(s string) *storage.SearchExpr {
+	if seeds, ok := storage.ParseRelatedTerm(s); ok {
+		return &storage.SearchExpr{Kind: storage.SearchRelated, Related: seeds}
+	}
+	if hash, size, ok := storage.ParseHashTerm(s); ok {
+		return &storage.SearchExpr{Kind: storage.SearchHash, ValueString: string(hash), ValueUint: size}
+	}
+	return nil
 }

@@ -92,6 +92,14 @@ tcp:
   moreResults:
     maxRows: 510
     ttlSeconds: 300
+  # Lugdunum's related search: for `related::HASH` (eMule's "Search related files")
+  # the server returns the files the users sharing HASH also share, most common first.
+  # enabled also advertises SRV_TCPFLG_RELATEDSEARCH, without which clients grey the
+  # command out. minClients is how many online users must share the searched files
+  # before anything is returned, so one user's share list is never shown on its own.
+  relatedSearch:
+    enabled: true
+    minClients: 5
 
 udp:
   port: 5559
@@ -424,6 +432,7 @@ metaSearch:
     enabled: true
     maxEntries: 1000               # distinct queries kept, least recently used evicted
     maxRowsPerEntry: 100
+    maxBytes: 268435456          # 256 MiB of cached rows (estimated), least recently used evicted
     ttlSeconds: 600
 
 # Client-facing Meta API (enode.meta.v1 MetaApi + AccountApi): how eMuleQt downloads
@@ -495,6 +504,7 @@ metaApi:
     servers: false
     cache:
       maxEntries: 2000             # chunks of 100 releases per network and search
+      maxBytes: 268435456        # 256 MiB of cached chunks (estimated), least recently used evicted
       ttlSeconds: 600              # pages stay stable this long
     rateLimit:
       perIPPerMinute: 30           # searches per client address; 0 = unlimited
@@ -833,6 +843,17 @@ storage:
 # Connect/AddFile calls a real login takes), so the search results and source lists
 # the server sends can be exercised without live clients. OFF here; ON in
 # enode.local.yaml. Never enable on a public server — it advertises fake sources.
+# Memory guard: a soft memory limit for the Go GC, and cache shedding when the live
+# heap nears it, so a load spike drops cached search answers (metaSearch.cache,
+# metaApi.search.cache, metaApi.metafileCache) before their TTL instead of running
+# out of memory. Reloadable. See docs/memory-guard.md.
+memory:
+  enabled: true
+  limitBytes: 0                    # soft limit; 0 = GOMEMLIMIT, else autoPercent of the cgroup limit or RAM
+  autoPercent: 75                  # share of cgroup/RAM taken when limitBytes is 0 and GOMEMLIMIT unset
+  shedAtPercent: 80                # live heap above this share of the limit makes the caches shed
+  keepPercent: 50                  # each cache keeps this share of its bytes per shed (expired entries go first)
+
 debug:
   seedFixtures: false
   fixturesFile: tests/data/debug_fixtures.yaml

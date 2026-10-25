@@ -647,7 +647,7 @@ func (m *MemoryEngine) FindByNameContains(term string) []File {
 // sharing thousands of files holding a common word filled that word's whole answer,
 // and whatever was published later was never returned.
 func (m *MemoryEngine) FindBySearch(expr *SearchExpr) []File {
-	if expr == nil {
+	if expr == nil || searchPrunes(expr) {
 		return nil
 	}
 	m.mu.RLock()
@@ -658,7 +658,7 @@ func (m *MemoryEngine) FindBySearch(expr *SearchExpr) []File {
 	// answer is the one a full scan gives. A query it cannot narrow — no indexable
 	// term, or a term in too many files to be worth collecting — scans instead, which
 	// for a common term reaches the scan bound early.
-	ids, all := m.names.candidates(expr, max(candidateFloor, m.count/8))
+	ids, all := m.names.candidates(expr, max(candidateFloor, m.count/8), m.hashIDsLocked)
 	if all {
 		for id := range m.recs.len() {
 			if f, ok := m.matchLocked(match, expr, uint32(id)); ok && !rank.add(uint32(id), f) {
@@ -945,6 +945,21 @@ func (m *MemoryEngine) findLocked(key [hashLen]byte, size uint64) (uint32, bool)
 		id, ok = rec.next-1, rec.next != 0
 	}
 	return 0, false
+}
+
+// hashIDsLocked lists the ids of the records of hash, of size or of any size when
+// size is 0, by following the hash's chain of records.
+func (m *MemoryEngine) hashIDsLocked(hash []byte, size uint64) []uint32 {
+	var ids []uint32
+	id, ok := m.files[hashArray(hash)]
+	for ok {
+		rec := m.recs.at(id)
+		if size == 0 || rec.size == size {
+			ids = append(ids, id)
+		}
+		id, ok = rec.next-1, rec.next != 0
+	}
+	return ids
 }
 
 // eachSourceLocked calls fn for the sources of the hash whose first record is head,

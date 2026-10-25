@@ -93,7 +93,7 @@ func NewService(cfg ServiceConfig, catalog Catalog) *Service {
 		cfg:       cfg,
 		catalog:   catalog,
 		epoch:     binary.BigEndian.Uint64(seed[:]) | 1,
-		cache:     meta.NewValueCache[[]storage.File](cfg.CacheEntries, cfg.CacheTTL, nil),
+		cache:     meta.NewValueCache[[]storage.File](meta.CacheLimits{MaxEntries: cfg.CacheEntries}, cfg.CacheTTL, nil, nil),
 		ipLimit:   ratelimit.New(cfg.PerIPPerMinute),
 		peerLimit: ratelimit.New(cfg.PerPeerPerMinute),
 	}

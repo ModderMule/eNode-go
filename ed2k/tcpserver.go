@@ -33,6 +33,9 @@ type TCPServerConfig struct {
 	// NatWake advertises FlagNatWake (0x200000): this server wakes a logged-in PR_NAT
 	// target over TCP (OpNatWake). See docs/pr-nat-rendezvous-spec.md.
 	NatWake bool
+	// RelatedSearch advertises FlagRelatedSearch (0x40): this server answers
+	// Lugdunum's related search (config tcp.relatedSearch).
+	RelatedSearch bool
 	// Gate holds the accept loop while closed; nil accepts from the start. See Gate.
 	Gate *Gate
 }
@@ -42,7 +45,7 @@ type TCPServerConfig struct {
 //
 // Only bits eMule actually defines for the *server* word are emitted
 // (srchybrid/Server.h): COMPRESSION 0x01, NEWTAGS 0x08, UNICODE 0x10,
-// LARGEFILES 0x100, TCPOBFUSCATION 0x400, and the IPv6 extension bit 0x4000. The
+// RELATEDSEARCH 0x40 (when enabled), LARGEFILES 0x100, TCPOBFUSCATION 0x400, and the IPv6 extension bit 0x4000. The
 // previous build packed client-side SRVCAP_* meanings (IP-in-login 0x02, aux-port
 // 0x04, support-crypt 0x200, require-crypt 0x800) into this word — bits eMule
 // reads as undefined and ignores. TCP obfuscation is advertised from SupportCrypt
@@ -64,6 +67,9 @@ func BuildTCPFlags(cfg TCPServerConfig) uint32 {
 	}
 	if cfg.NatWake {
 		flags += FlagNatWake
+	}
+	if cfg.RelatedSearch {
+		flags += FlagRelatedSearch
 	}
 	return flags
 }

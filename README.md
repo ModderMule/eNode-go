@@ -79,6 +79,12 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   prefix (`[torrent] ` / `[usenet] ` / `[kad] ` / `[web] `) so stock clients can tell
   them apart. Each network, its feed subscription and a result cache are optional and
   off by default. See [`docs/meta-search.md`](docs/meta-search.md).
+- Search by file hash and related search, as Lugdunum answers them: an `ed2k::<hash>`
+  term (what eMule sends for a pasted ed2k link, and what web front ends such as
+  ed2k.shortypower.org send to each server) finds that file over TCP and UDP, and
+  `related::<hash>` (eMule's "Search related files") returns what the file's sharers
+  also share, once at least `tcp.relatedSearch.minClients` (5) users share it. See
+  [`docs/server-client-communication.md`](docs/server-client-communication.md#hash-and-related-search).
 - Login required before any request: every TCP opcode but `OP_LOGINREQUEST` and
   `OP_DISCONNECT` is refused on a session that has not logged in, so nothing can reach
   the index without an identity the server can account for and clean up. See

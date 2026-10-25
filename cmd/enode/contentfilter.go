@@ -197,6 +197,10 @@ func (f filteredFiles) SharedFiles(hashes [][]byte) []storage.File {
 	return f.keep(f.Engine.SharedFiles(hashes))
 }
 
+func (f filteredFiles) RelatedFiles(seeds []storage.FileKey, minClients, maxClients int) []storage.File {
+	return f.keep(f.Engine.RelatedFiles(seeds, minClients, maxClients))
+}
+
 // BrowseFiles filters a page after the engine cut it, so a page can come back short.
 // The cursor is the engine's own, which keeps the walk complete.
 func (f filteredFiles) BrowseFiles(cursor []byte, limit int) ([]storage.File, []byte, error) {

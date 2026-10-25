@@ -113,6 +113,7 @@ func buildMetaAPI(ctx context.Context, cfg config.Config, engine, servedFiles st
 			searcher.EnableCatalog(meta.CatalogConfig{
 				Timeout:    time.Duration(s.TimeoutMs) * time.Millisecond,
 				MaxEntries: s.Cache.MaxEntries,
+				MaxBytes:   s.Cache.MaxBytes,
 				TTL:        time.Duration(s.Cache.TTLSeconds) * time.Second,
 			})
 		}

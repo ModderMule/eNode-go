@@ -46,6 +46,7 @@ var reloadableKeys = []string{
 	"statsBoost",
 	"handoff",
 	"metaSearch",
+	"memory",
 }
 
 // Diff returns the sorted key paths whose values differ between a and b, in the dotted
@@ -104,6 +105,7 @@ func OverlayReloadable(base, next Config) Config {
 	out.StatsBoost = next.StatsBoost
 	out.Handoff = next.Handoff
 	out.MetaSearch = next.MetaSearch
+	out.Memory = next.Memory
 	return out
 }
 

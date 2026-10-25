@@ -581,6 +581,92 @@ func (m *MySQLEngine) SharedFiles(hashes [][]byte) []File {
 	return out
 }
 
+// RelatedFiles answers a related search (see storage/related.go) in two queries:
+// the online clients sharing a seed, then the files those clients share, weighted
+// by how many of them do. Both dialects run the same SQL; the representative
+// columns are spelled per dialect as in FindBySearch.
+func (m *MySQLEngine) RelatedFiles(seeds []FileKey, minClients, maxClients int) []File {
+	if len(seeds) == 0 {
+		return nil
+	}
+	if err := m.ensureDB(); err != nil {
+		return nil
+	}
+	maxClients = max(maxClients, minClients, 1)
+	conds := make([]string, 0, len(seeds))
+	args := make([]any, 0, 2*len(seeds)+1)
+	seedHashes := make([]any, 0, len(seeds))
+	for _, seed := range seeds {
+		seedHashes = append(seedHashes, seed.Hash)
+		if seed.Size == 0 {
+			conds = append(conds, "f.hash = ?")
+			args = append(args, seed.Hash)
+			continue
+		}
+		conds = append(conds, "(f.hash = ? AND f.size = ?)")
+		args = append(args, seed.Hash, seed.Size)
+	}
+	args = append(args, maxClients)
+	// The seeds' clients, through the hash_size index and sources' UNIQUE(id_file, id_client).
+	rows, err := m.db.Query(
+		`SELECT DISTINCT s.id_client
+		 FROM files f
+		 INNER JOIN sources s ON s.id_file = f.id
+		 INNER JOIN clients c ON c.id = s.id_client
+		 WHERE (`+strings.Join(conds, " OR ")+`) AND s.online = 1 AND c.online = 1
+		 LIMIT ?`,
+		args...,
+	)
+	if err != nil {
+		logging.Errorf("mysql related search: clients of %d seed(s) failed: %v", len(seeds), err)
+		return nil
+	}
+	var users []any
+	for rows.Next() {
+		var id uint64
+		if err := rows.Scan(&id); err == nil {
+			users = append(users, id)
+		}
+	}
+	rows.Close()
+	if len(users) < minClients {
+		return nil
+	}
+	// One row per file. UNIQUE(id_file, id_client) makes COUNT(*) the number of
+	// those clients sharing it.
+	rep := groupRepFunc(m.cfg.Dialect)
+	args = append(append(users[:len(users):len(users)], seedHashes...), MaxSearchResults)
+	rows, err = m.db.Query(
+		`SELECT `+rep("s.name")+`, f.completed, f.sources, f.hash, f.size, f.source_id, f.source_port,
+		        `+rep("s.type")+`, `+rep("s.title")+`, `+rep("s.artist")+`, `+rep("s.album")+`,
+		        `+rep("s.length")+`, `+rep("s.bitrate")+`, `+rep("s.codec")+`, COUNT(*) AS rel
+		 FROM sources s
+		 INNER JOIN files f ON s.id_file = f.id
+		 INNER JOIN clients c ON c.id = s.id_client
+		 WHERE s.id_client IN (`+sqlPlaceholders(len(users))+`) AND s.online = 1 AND c.online = 1
+		   AND f.hash NOT IN (`+sqlPlaceholders(len(seedHashes))+`) AND f.sources > 0
+		 GROUP BY s.id_file
+		 ORDER BY rel DESC, f.sources DESC
+		 LIMIT ?`,
+		args...,
+	)
+	if err != nil {
+		logging.Errorf("mysql related search: files of %d client(s) failed: %v", len(users), err)
+		return nil
+	}
+	defer rows.Close()
+	var out []relatedFile
+	for rows.Next() {
+		var r relatedFile
+		f := &r.file
+		if err := rows.Scan(&f.Name, &f.Completed, &f.Sources, &f.Hash, &f.Size, &f.SourceID, &f.SourcePort,
+			&f.Type, &f.Title, &f.Artist, &f.Album, &f.Runtime, &f.Bitrate, &f.Codec, &r.clients); err == nil {
+			out = append(out, r)
+		}
+	}
+	return rankRelated(out)
+}
+
 // BrowseFiles pages over files by primary key, which is a keyset: a page costs the
 // rows it returns however far the walk has come. The cursor is the last id read.
 // It survives anything short of the table being emptied, so it is never stale.

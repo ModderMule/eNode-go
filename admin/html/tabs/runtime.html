@@ -9,6 +9,9 @@
 <p class="desc tabmsg" id="msg-runtime"></p>
 <h2>Go runtime</h2>
 <table id="ruTable"></table>
+<h2>Memory guard</h2>
+<table id="ruGuard"></table>
+<table id="ruCaches"></table>
 <h2>Storage</h2>
 <table id="ruStorage"></table>
 </div>
@@ -31,5 +34,18 @@ tabs.runtime = {poll: true, load: async function(){
     ['Memory figures read', d.sampledAt ? fmtAge(d.sampledAt) + ' ago' : '—']
   ]);
   kvTable('ruStorage', d.storage.map(function(kv){ return [kv.key, kv.value]; }));
+  var g = d.memory;
+  if (!g) {
+    kvTable('ruGuard', [['Memory guard', 'not running']]);
+    kvTable('ruCaches', []);
+  } else {
+    kvTable('ruGuard', [
+      ['Soft limit', g.limit ? fmtBytes(g.limit) + ' (' + g.source + ')' : 'none (' + g.source + ')'],
+      ['Live heap at last GC', g.liveHeap ? fmtBytes(g.liveHeap) + (g.limit ? ' · ' + Math.round(g.liveHeap * 100 / g.limit) + '% of limit' : '') : '—'],
+      ['Sheds caches', 'above ' + g.shedAtPercent + '% of the limit, keeping ' + g.keepPercent + '% each time'],
+      ['Sheds so far', num(g.sheds) + (g.lastShed ? ' · last ' + fmtAge(g.lastShed) + ' ago, ' + fmtBytes(g.lastShedBytes) : '')]
+    ]);
+    kvTable('ruCaches', g.caches.map(function(c){ return [c.name, num(c.entries) + ' entries · ' + fmtBytes(c.bytes)]; }));
+  }
 }};
 {{end}}

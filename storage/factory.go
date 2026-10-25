@@ -67,6 +67,11 @@ type Engine interface {
 	// one lookup for the whole list, for a caller with a page of hashes to ask
 	// about.
 	SharedFiles(hashes [][]byte) []File
+	// RelatedFiles answers Lugdunum's related search: the files that the online
+	// clients sharing one of seeds also share, by how many of them do. Nothing when
+	// fewer than minClients clients share the seeds; at most maxClients are walked.
+	// See storage/related.go.
+	RelatedFiles(seeds []FileKey, minClients, maxClients int) []File
 	// BrowseFiles walks the files an online client offers now, a page at a time,
 	// for a caller that wants all of them rather than the ones matching a search.
 	// cursor is nil for the first page and then the next of the page before; a nil

@@ -433,6 +433,79 @@ func (m *MongoDBEngine) SharedFiles(hashes [][]byte) []File {
 	return decodeMongoSearchFiles(ctx, cur)
 }
 
+// RelatedFiles answers a related search (see storage/related.go) in two
+// aggregations over the sources: the online clients sharing a seed, then the files
+// those clients share, grouped as a search groups them and weighted by how many of
+// the clients share each. The heaviest MaxSearchResults are joined to their files
+// documents for the counters.
+func (m *MongoDBEngine) RelatedFiles(seeds []FileKey, minClients, maxClients int) []File {
+	if len(seeds) == 0 {
+		return nil
+	}
+	if err := m.ensureDB(); err != nil {
+		return nil
+	}
+	maxClients = max(maxClients, minClients, 1)
+	or := make([]bson.M, 0, len(seeds))
+	seedHashes := make([]any, 0, len(seeds))
+	for _, seed := range seeds {
+		seedHashes = append(seedHashes, seed.Hash)
+		if seed.Size == 0 {
+			or = append(or, bson.M{"file_hash": seed.Hash})
+			continue
+		}
+		or = append(or, bson.M{"file_hash": seed.Hash, "file_size": seed.Size})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
+	defer cancel()
+	cur, err := m.db.Collection("sources").Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{"$or": or, "online": true}}},
+		{{Key: "$group", Value: bson.M{"_id": "$client_hash"}}},
+		{{Key: "$limit", Value: maxClients}},
+	})
+	if err != nil {
+		logging.Errorf("mongodb related search: clients of %d seed(s) failed: %v", len(seeds), err)
+		return nil
+	}
+	var users []any
+	for cur.Next(ctx) {
+		var doc struct {
+			ID []byte `bson:"_id"`
+		}
+		if err := cur.Decode(&doc); err == nil && doc.ID != nil {
+			users = append(users, doc.ID)
+		}
+	}
+	cur.Close(ctx)
+	if len(users) < minClients {
+		return nil
+	}
+	group := mongoSearchGroup(false, false)
+	group["rel"] = bson.M{"$sum": 1}
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{"client_hash": bson.M{"$in": users}, "online": true, "file_hash": bson.M{"$nin": seedHashes}}}},
+		{{Key: "$group", Value: group}},
+		{{Key: "$sort", Value: bson.D{{Key: "rel", Value: -1}}}},
+		{{Key: "$limit", Value: MaxSearchResults}},
+	}
+	pipeline = append(pipeline, mongoFileCounterStages()...)
+	pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.M{"sources": bson.M{"$gt": 0}}}})
+	cur, err = m.db.Collection("sources").Aggregate(ctx, pipeline)
+	if err != nil {
+		logging.Errorf("mongodb related search: files of %d client(s) failed: %v", len(users), err)
+		return nil
+	}
+	defer cur.Close(ctx)
+	var out []relatedFile
+	for cur.Next(ctx) {
+		var doc mongoSearchDoc
+		if err := cur.Decode(&doc); err == nil {
+			out = append(out, relatedFile{file: doc.file(), clients: doc.Rel})
+		}
+	}
+	return rankRelated(out)
+}
+
 // BrowseFiles pages over the files collection by _id, which is a keyset, and joins
 // each file to one of its online sources for the name and the media tags. The
 // cursor is the last _id read.
@@ -797,6 +870,12 @@ func mongoFilterNode(expr *SearchExpr) (filter bson.M, needsFile, prune bool) {
 			return nil, false, true
 		}
 		return bson.M{field: bson.M{mongoOperators[op]: expr.ValueUint}}, needsFile, false
+	case SearchHash:
+		// On the source documents, served by the {file_hash, file_size} index.
+		if expr.ValueUint == 0 {
+			return bson.M{"file_hash": []byte(expr.ValueString)}, false, false
+		}
+		return bson.M{"file_hash": []byte(expr.ValueString), "file_size": expr.ValueUint}, false, false
 	case SearchAnd, SearchOr, SearchAndNot:
 		l, lNeedsFile, lPrune := mongoFilterNode(expr.Left)
 		r, rNeedsFile, rPrune := mongoFilterNode(expr.Right)
@@ -1841,34 +1920,43 @@ func mongoFileJoin(hashField, sizeField string) []bson.D {
 func decodeMongoSearchFiles(ctx context.Context, cur *mongo.Cursor) []File {
 	var out []File
 	for cur.Next(ctx) {
-		var doc struct {
-			Hash       []byte  `bson:"hash"`
-			Size       uint64  `bson:"size"`
-			Name       string  `bson:"name"`
-			Type       string  `bson:"type"`
-			Title      string  `bson:"title"`
-			Artist     string  `bson:"artist"`
-			Album      string  `bson:"album"`
-			Runtime    uint32  `bson:"runtime"`
-			Bitrate    uint32  `bson:"bitrate"`
-			Codec      string  `bson:"codec"`
-			Sources    uint32  `bson:"sources"`
-			Completed  uint32  `bson:"completed"`
-			SourceID   uint32  `bson:"source_id"`
-			SourcePort uint16  `bson:"source_port"`
-			Score      float64 `bson:"score"`
-		}
+		var doc mongoSearchDoc
 		if err := cur.Decode(&doc); err != nil {
 			continue
 		}
-		out = append(out, File{
-			Hash: doc.Hash, Name: doc.Name, Size: doc.Size, Type: doc.Type,
-			Sources: doc.Sources, Completed: doc.Completed, Title: doc.Title, Artist: doc.Artist,
-			Album: doc.Album, Runtime: doc.Runtime, Bitrate: doc.Bitrate, Codec: doc.Codec,
-			SourceID: doc.SourceID, SourcePort: doc.SourcePort,
-		})
+		out = append(out, doc.file())
 	}
 	return out
+}
+
+// mongoSearchDoc is one grouped search result as the pipelines produce it.
+type mongoSearchDoc struct {
+	Hash       []byte  `bson:"hash"`
+	Size       uint64  `bson:"size"`
+	Name       string  `bson:"name"`
+	Type       string  `bson:"type"`
+	Title      string  `bson:"title"`
+	Artist     string  `bson:"artist"`
+	Album      string  `bson:"album"`
+	Runtime    uint32  `bson:"runtime"`
+	Bitrate    uint32  `bson:"bitrate"`
+	Codec      string  `bson:"codec"`
+	Sources    uint32  `bson:"sources"`
+	Completed  uint32  `bson:"completed"`
+	SourceID   uint32  `bson:"source_id"`
+	SourcePort uint16  `bson:"source_port"`
+	Score      float64 `bson:"score"`
+	// Rel is a related search's weight: how many of the seeds' clients share it.
+	Rel int `bson:"rel"`
+}
+
+func (doc mongoSearchDoc) file() File {
+	return File{
+		Hash: doc.Hash, Name: doc.Name, Size: doc.Size, Type: doc.Type,
+		Sources: doc.Sources, Completed: doc.Completed, Title: doc.Title, Artist: doc.Artist,
+		Album: doc.Album, Runtime: doc.Runtime, Bitrate: doc.Bitrate, Codec: doc.Codec,
+		SourceID: doc.SourceID, SourcePort: doc.SourcePort,
+	}
 }
 
 // chunkAny splits items into consecutive slices of at most size elements.

@@ -66,7 +66,7 @@ func (s *Searcher) EnableCatalog(cfg CatalogConfig) {
 	}
 	s.catalog = &catalog{
 		cfg:   cfg,
-		cache: meta.NewValueCache[catalogAnswer](cfg.MaxEntries, cfg.TTL, nil),
+		cache: meta.NewValueCache[catalogAnswer](meta.CacheLimits{MaxEntries: cfg.MaxEntries}, cfg.TTL, nil, nil),
 	}
 }
 
