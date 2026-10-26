@@ -741,6 +741,14 @@ func TestForeignCallbackDistinctTargets(t *testing.T) {
 // T's keepalive reports its UDP endpoint: R gets UDP 0xa7 under its own key with T's
 // IP, the keepalive's source port, T's LowID, T's crypt bits and T's hash, since both
 // use the crypt layer. The entry is then gone.
+// foreignA7 is the 27-byte foreign 0xa7 body: the target's hash always follows,
+// flags as given (0x80 only = use the crypt layer).
+func foreignA7(ip uint32, port uint16, id uint32, flags byte, hash []byte) []byte {
+	body := BuildNatCallbackNotice(ip, port, id, flags, hash)
+	body[10] = flags
+	return body
+}
+
 func TestNatKeepaliveDeliversForeignNotice(t *testing.T) {
 	f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
 	loop, _ := IPv4ToUint32LE(net.IPv4(127, 0, 0, 1))
@@ -754,7 +762,7 @@ func TestNatKeepaliveDeliversForeignNotice(t *testing.T) {
 	}
 	pt := decryptServerReply(t, raw, natCallbackKey(net.IPv4(127, 0, 0, 1)))
 	t.Logf("input: T keepalive from port %d, output: R gets marker=0x%02x % x", tPort, raw[0], pt)
-	want := append([]byte{PrED2K, OpNatCallbackRequestedUDP}, BuildNatCallbackNotice(loop, tPort, 5, 0x03, f.b.info.Hash)...)
+	want := append([]byte{PrED2K, OpNatCallbackRequestedUDP}, foreignA7(loop, tPort, 5, 0x83, f.b.info.Hash)...)
 	if !bytes.Equal(pt, want) {
 		t.Fatalf("0xa7 % x, want % x", pt, want)
 	}
@@ -763,7 +771,7 @@ func TestNatKeepaliveDeliversForeignNotice(t *testing.T) {
 		t.Fatalf("second keepalive sent R % x again", got)
 	}
 
-	// Crypt unknown (8-byte request): T's bits, no hash.
+	// Crypt unknown (8-byte request): T's bits, hash without 0x80.
 	f.foreign(f.rAddr(), 5, false)
 	f.keepalive(f.bUDP, f.b.info.Hash, false)
 	raw = readUDP(f.r)
@@ -772,7 +780,7 @@ func TestNatKeepaliveDeliversForeignNotice(t *testing.T) {
 	}
 	pt = decryptServerReply(t, raw, natCallbackKey(net.IPv4(127, 0, 0, 1)))
 	t.Logf("input: 8-byte request, output: R gets % x", pt)
-	want = append([]byte{PrED2K, OpNatCallbackRequestedUDP}, BuildNatCallbackNotice(loop, tPort, 5, 0x03, nil)...)
+	want = append([]byte{PrED2K, OpNatCallbackRequestedUDP}, foreignA7(loop, tPort, 5, 0x03, f.b.info.Hash)...)
 	if !bytes.Equal(pt, want) {
 		t.Fatalf("0xa7 % x, want % x", pt, want)
 	}
@@ -809,7 +817,7 @@ func TestForeignCallbackFallback(t *testing.T) {
 	f.foreign(f.rAddr(), 5, false)
 	f.fire()
 	got = read(f)
-	want := append([]byte{PrED2K, OpNatCallbackRequestedUDP}, BuildNatCallbackNotice(loop, tPort, 5, 0x03, nil)...)
+	want := append([]byte{PrED2K, OpNatCallbackRequestedUDP}, foreignA7(loop, tPort, 5, 0x03, f.b.info.Hash)...)
 	t.Logf("input: keepalive before the request, output: R gets % x", got)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("0xa7 % x, want % x", got, want)
@@ -828,7 +836,7 @@ func TestForeignCallbackFallback(t *testing.T) {
 	f.foreign(f.rAddr(), 5, false)
 	f.fire()
 	got = read(f)
-	want = append([]byte{PrED2K, OpNatCallbackRequestedUDP}, BuildNatCallbackNotice(loop, tPort, 5, 0x03, nil)...)
+	want = append([]byte{PrED2K, OpNatCallbackRequestedUDP}, foreignA7(loop, tPort, 5, 0x03, f.b.info.Hash)...)
 	t.Logf("input: T's own 0xa6 and an older keepalive, output: R gets % x", got)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("0xa7 % x, want % x", got, want)

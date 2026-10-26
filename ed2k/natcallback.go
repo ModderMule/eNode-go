@@ -22,8 +22,8 @@ import (
 //
 // Foreign callback (UDP flag 0x100000): a requester not logged in here sends 0xa6
 // <B's ID><0>[<crypt>]. B is woken with TCP 0x37 (ID 0, no hash) and bursts UDP
-// OpNatKeepalive; its source port goes to the requester in UDP 0xa7. No keepalive
-// within 3 s: the 0xa7 carries B's last known UDP port instead.
+// OpNatKeepalive; its source port goes to the requester in UDP 0xa7, always with B's
+// hash. No keepalive within 3 s: the 0xa7 carries B's last known UDP port instead.
 //
 // Memory: an idle session pays nothing. The capability is one bool in existing
 // padding of tcpClient, and the 19 s window lives in natCallbackState, which only
@@ -395,27 +395,30 @@ func (s *ServerRuntime) foreignFallback(targetID uint32, gen uint64, module stri
 }
 
 // sendForeignNotices sends each pending requester UDP 0xa7 with the target's
-// endpoint. The crypt byte is the target's bits; the target's hash follows when the
-// requester sent its bits and both use the crypt layer.
+// endpoint. The crypt byte is the target's bits. The target's hash always follows
+// (27 bytes, as ed2k-server 0.9.86): the requester dials and obfuscates its first
+// QUIC Initial with it. 0x80 keeps Lugdunum's meaning, "use the crypt layer": set
+// only when the requester sent its bits and both use the layer.
 func (s *ServerRuntime) sendForeignNotices(target natCallbackPeerView, targetID uint32, endpoint natCallbackRecent, pending []natForeignPending, via, module string) {
 	for _, p := range pending {
 		flags := target.crypt & 0x07
-		var hash []byte
+		useCrypt := false
 		if p.cryptKnown {
 			f, withHash, ok := NatCallbackCrypt(target.crypt, p.crypt)
 			if !ok {
 				continue
 			}
-			flags = f
-			if withHash {
-				hash = target.hash
-			}
+			flags, useCrypt = f, withHash
 		}
-		notice := BuildNatCallbackNotice(endpoint.ipv4, endpoint.port, targetID, flags, hash)
+		notice := BuildNatCallbackNotice(endpoint.ipv4, endpoint.port, targetID, flags, target.hash)
+		if !useCrypt {
+			notice[10] &^= natCallbackNoticeFlagHash
+		}
+		hash := notice[11:]
 		dst := natCallbackRecent{ipv4: p.ipv4, port: p.port}
 		s.sendNatCallbackUDP(p.conn, dst, notice, module)
-		logging.Debugf("foreign callback 0xa7 sent requester=%s:%d target=%d port=%d hash=%t via=%s",
-			v4FromUint32(p.ipv4), p.port, targetID, endpoint.port, hash != nil, via)
+		logging.Debugf("foreign callback 0xa7 sent requester=%s:%d target=%d port=%d hash=%t crypt=%t via=%s",
+			v4FromUint32(p.ipv4), p.port, targetID, endpoint.port, len(hash) == 16, useCrypt, via)
 	}
 }
 
