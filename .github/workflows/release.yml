@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  linux:
+    uses: ./.github/workflows/linux.yml
+  macos:
+    uses: ./.github/workflows/macos.yml
+  windows:
+    uses: ./.github/workflows/windows.yml
+
+  # One job attaches every asset, so exactly one draft release exists per tag.
+  # Running the attach step in each platform workflow raced: two runs that
+  # reached it at the same moment both found no draft and both created one.
+  release:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    # The built-in GITHUB_TOKEN covers creating the draft; no PAT is involved.
+    permissions:
+      contents: write
+    steps:
+      # Only scripts/update.sh is needed from the tree. It is attached standalone
+      # to give fresh installs a stable bootstrap URL,
+      # releases/latest/download/update.sh.
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts/update.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: enode-*
+          path: dist
+          merge-multiple: true
+
+      - name: Attach to draft release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+            scripts/update.sh
