@@ -1271,11 +1271,19 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// such as CGNAT neighbours, could still use it. Lugdunum eserver 17.14 does not
 	// do this — it refuses every further LowID login from the IP instead — see
 	// docs/port-divergences.local.md, H1a.
+	//
+	// A second exception: a dual-stack client moving its session from IPv4 to IPv6
+	// connects from the IPv6 its live IPv4 session advertised (CT_MOD_IP_V6), with
+	// the same listen port. That address is the victim's own claim, so it proves the
+	// same host as well as a same-IP match does. The old session stays up until this
+	// login is accepted, so the client never goes offline — see handShake.
 	if len(req.Hash) == 16 && c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}) {
 		c.replaceSameIPSession(req.Hash)
-		// Re-checked so a row with no local session behind it — a stale row in a
-		// shared database — is still refused.
-		if c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}) {
+		if c.dualStackHandoverFrom(req.Hash, req.Port) != nil {
+			logging.Infof("login takes over ipv4 session after acceptance remote=%s hash=%x", c.remoteHost, req.Hash)
+		} else if c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}) {
+			// Re-checked so a row with no local session behind it — a stale row in a
+			// shared database — is still refused.
 			logging.Warnf("login rejected remote=%s hash=%x: already connected", c.remoteHost, req.Hash)
 			c.sendServerMessage("Already connected from another session.")
 			c.closeWithReason("duplicate-login")
@@ -1406,6 +1414,9 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 }
 
 func (c *tcpClient) handShake() {
+	if !c.completeDualStackHandover() {
+		return
+	}
 	storeID, err := c.server.Storage.Connect(c.snapshotInfo())
 	if err != nil {
 		logging.Warnf("storage connect failed remote=%s err=%v", c.remoteHost, err)
@@ -3338,6 +3349,50 @@ func (c *tcpClient) replaceSameIPSession(hash []byte) {
 		c.remoteHost, hash, oldInfo.ID, oldInfo.StoreID)
 	old.closeWithReason("replaced-by-relogin")
 	old.releaseSession()
+}
+
+// dualStackHandoverFrom returns the live IPv4 session for hash that this IPv6 login
+// may take over: it advertised this connection's source address as its CT_MOD_IP_V6
+// and the same listen port. Nil for anything else, which is then refused as usual.
+func (c *tcpClient) dualStackHandoverFrom(hash []byte, port uint16) *tcpClient {
+	if !c.connectedV6 || c.peerIP == nil {
+		return nil
+	}
+	old := c.server.sessionByHash(hash)
+	if old == nil || old == c || old.connectedV6 {
+		return nil
+	}
+	info := old.snapshotInfo()
+	if len(info.IPv6) != 16 || info.Port != port || !net.IP(info.IPv6).Equal(c.peerIP) {
+		return nil
+	}
+	return old
+}
+
+// completeDualStackHandover releases the IPv4 session an accepted IPv6 login takes
+// over, right before the new storage row is written: the old row must go first, as
+// in replaceSameIPSession. Re-derived here rather than remembered from the login
+// check, so a session costs no extra field. False when the hash is online from a
+// session this login may not take over; it is then refused like any duplicate.
+func (c *tcpClient) completeDualStackHandover() bool {
+	info := c.snapshotInfo()
+	if len(info.Hash) != 16 || !c.server.Storage.IsConnected(storage.ClientInfo{Hash: info.Hash}) {
+		return true
+	}
+	if old := c.dualStackHandoverFrom(info.Hash, info.Port); old != nil {
+		oldInfo := old.snapshotInfo()
+		logging.Infof("ipv6 login replaces ipv4 session remote=%s hash=%x oldRemote=%s oldID=%d",
+			c.remoteHost, info.Hash, old.remoteHost, oldInfo.ID)
+		old.closeWithReason("replaced-by-ipv6-session")
+		old.releaseSession()
+	}
+	if c.server.Storage.IsConnected(storage.ClientInfo{Hash: info.Hash}) {
+		logging.Warnf("login rejected remote=%s hash=%x: already connected", c.remoteHost, info.Hash)
+		c.sendServerMessage("Already connected from another session.")
+		c.closeWithReason("duplicate-login")
+		return false
+	}
+	return true
 }
 
 // releaseSession frees everything a session holds — its LowID, its hash index entry and
