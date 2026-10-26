@@ -181,6 +181,10 @@ type ServerRuntime struct {
 	// can drive a v6 login to either verdict without a dialable public IPv6. nil
 	// selects the real probe; nothing outside tests sets it.
 	ipv6Probe func(*tcpClient) bool
+	// staleProbeWait bounds how long a duplicate login waits for the session it
+	// collides with to die after probeStaleSession pokes it. Zero selects
+	// staleSessionProbeWait; tests shorten it so a refused duplicate costs no time.
+	staleProbeWait time.Duration
 	// meta supplies torrent/Usenet/Kad/web rows merged into search answers, or nil when no
 	// catalogue daemon is configured. Set once by SetMetaSearcher before the listeners
 	// bind, then only read. metaAdvertiseLegacy sends them to clients that did not ask;
@@ -1277,11 +1281,17 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// the same listen port. That address is the victim's own claim, so it proves the
 	// same host as well as a same-IP match does. The old session stays up until this
 	// login is accepted, so the client never goes offline — see handShake.
+	//
+	// Anything else first probes the live session (probeStaleSession): a client that
+	// crashed and came back on another address family — its last session was IPv6,
+	// the restart logs in over IPv4 — matches neither exception, and its dead session
+	// would otherwise hold the hash until the idle timeout. Only a session whose
+	// socket is dead goes, so the probe gives a remote attacker nothing.
 	if len(req.Hash) == 16 && c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}) {
 		c.replaceSameIPSession(req.Hash)
 		if c.dualStackHandoverFrom(req.Hash, req.Port) != nil {
 			logging.Infof("login takes over ipv4 session after acceptance remote=%s hash=%x", c.remoteHost, req.Hash)
-		} else if c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}) {
+		} else if c.probeStaleSession(req.Hash); c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}) {
 			// Re-checked so a row with no local session behind it — a stale row in a
 			// shared database — is still refused.
 			logging.Warnf("login rejected remote=%s hash=%x: already connected", c.remoteHost, req.Hash)
@@ -1435,7 +1445,7 @@ func (c *tcpClient) handShake() {
 	c.server.registerSession(info.Hash, c)
 
 	c.sendServerMessage(c.server.tcp().MessageLogin)
-	c.sendServerMessage(fmt.Sprintf("server version %s (%s)", ENodeVersionStr, ENodeName))
+	c.sendServerMessage("server version " + LoginVersionStr)
 	c.sendServerStatus()
 	c.startPeriodicServerStatus()
 	c.sendIDChange(info.ID)
@@ -3349,6 +3359,52 @@ func (c *tcpClient) replaceSameIPSession(hash []byte) {
 		c.remoteHost, hash, oldInfo.ID, oldInfo.StoreID)
 	old.closeWithReason("replaced-by-relogin")
 	old.releaseSession()
+}
+
+// staleSessionProbeWait is how long a duplicate login waits for the session it
+// collides with to fail the probe. A crashed client's host answers the probe with a
+// TCP reset within one round trip, so this only has to cover a slow path.
+const staleSessionProbeWait = 2 * time.Second
+
+// staleSessionProbeTick is how often the wait re-checks whether the session is gone.
+const staleSessionProbeTick = 20 * time.Millisecond
+
+// probeStaleSession pokes the live local session for hash with an OP_SERVERSTATUS
+// and waits up to staleProbeWait for it to be released. The packet is one a live
+// client accepts at any time and acts on silently. A session whose client process
+// is gone gets a TCP reset from the client's host instead, its read loop fails, and
+// its release frees the hash for this login. A session whose path is dead entirely
+// sends no reset and stays until TCP keepalive or the idle timeout reaps it.
+//
+// The caller re-checks storage afterwards. A hash with no local session behind it —
+// a stale row in a shared database — is not probed and stays refused.
+func (c *tcpClient) probeStaleSession(hash []byte) {
+	old := c.server.sessionByHash(hash)
+	if old == nil || old == c {
+		return
+	}
+	wait := c.server.staleProbeWait
+	if wait <= 0 {
+		wait = staleSessionProbeWait
+	}
+	logging.Debugf("probing session held by duplicate login remote=%s hash=%x oldRemote=%s",
+		c.remoteHost, hash, old.remoteHost)
+	// A failed write closes the old socket itself (see writeRaw), so its read loop
+	// releases it without waiting for the reset.
+	old.sendServerStatus()
+	deadline := time.Now().Add(wait)
+	for c.server.sessionByHash(hash) == old {
+		if !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(staleSessionProbeTick)
+	}
+	// releaseSession drops the hash index entry before the storage row, both under
+	// storeMu; taking it once means the row is gone too when the caller re-checks.
+	old.storeMu.Lock()
+	old.storeMu.Unlock() //nolint:staticcheck // empty critical section waits out the release
+	logging.Infof("duplicate login found the held session dead remote=%s hash=%x oldRemote=%s",
+		c.remoteHost, hash, old.remoteHost)
 }
 
 // dualStackHandoverFrom returns the live IPv4 session for hash that this IPv6 login

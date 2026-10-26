@@ -212,7 +212,7 @@ do **not** all say the same thing:
 
 | Surface | Probe | Pinned |
 |---|---|---|
-| TCP `OP_SERVERMESSAGE 0x38` | log in on `5555/tcp` | `server version v0.1.0 (eNode-go)`, built from `ed2k.ENodeVersionStr` and `ed2k.ENodeName` |
+| TCP `OP_SERVERMESSAGE 0x38` | log in on `5555/tcp` | `server version eNode-go v0.1.0 (17.15)`, i.e. `ed2k.LoginVersionStr` |
 | `OP_SERVERIDENT 0x41` | same connection | **no** version tag — eMule ignores one there, so we send none |
 | UDP `0xa3`, challenge form | `e3 a2 <challenge:4>` to `5559/udp` | challenge echoed, `ST_VERSION` = `ed2k.GossipVersionStr` (`17.15 (eNode-go v0.1.0)`) |
 | UDP `0xa3`, legacy form | `e3 a2`, under 6 bytes | name and description only: no tag block, so no version at all |
@@ -224,7 +224,9 @@ that *succeeds*, reformats the whole value to a bare `%u.%02u`
 (`ServerSocket.cpp:180-181`). So the tempting harmonisation — claiming
 `17.15 (eNode-go v0.1.0)` on both transports — would make a real client display a plain
 `17.15` with our name discarded, which is precisely what the string form of the tag was
-chosen to avoid. The leading `v` is what makes that scanf fail. The test therefore fails on
+chosen to avoid. So the login line carries the same facts with our name first
+(`eNode-go v0.1.0 (17.15)`), and the leading name is what makes that scanf fail. The
+line goes only to clients over TCP; eserver peers read nothing but the UDP tag. The test therefore fails on
 any version part that parses as two dotted integers, and says why.
 
 Its UDP probe is the only one in the package that crosses a published port rather than a

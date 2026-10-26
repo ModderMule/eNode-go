@@ -13,7 +13,7 @@ import (
 var handoverV6 = net.ParseIP("2a01:4f8:c0c:1234::2")
 
 func newHandoverRuntime(engine storage.Engine) *ServerRuntime {
-	return NewServerRuntime(TCPRuntimeConfig{
+	rt := NewServerRuntime(TCPRuntimeConfig{
 		Address:           "127.0.0.1",
 		Port:              4661,
 		Hash:              []byte("1111111111111111"),
@@ -22,6 +22,9 @@ func newHandoverRuntime(engine storage.Engine) *ServerRuntime {
 		PublishV6Sources:  true,
 		ConnectionTimeout: 50 * time.Millisecond,
 	}, UDPRuntimeConfig{}, engine)
+	// A refused duplicate probes the held session; mock sessions never die of it.
+	rt.staleProbeWait = 10 * time.Millisecond
+	return rt
 }
 
 func loginPacketIPv6(t *testing.T, hash []byte, port uint16, v6 net.IP) *Packet {

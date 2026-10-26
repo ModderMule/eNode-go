@@ -505,4 +505,12 @@ const (
 	// out, so a release bump of ENodeVersionStr carries here with nothing to remember —
 	// scripts/publish-release.sh checks that this stays true.
 	GossipVersionStr = GossipCompatVersion + " (" + ENodeName + " " + ENodeVersionStr + ")"
+
+	// LoginVersionStr is what follows "server version " in the TCP login line:
+	// "eNode-go v0.1.0 (17.15)", the same facts as GossipVersionStr with the name first.
+	// eMule lets this line overwrite the version it got over UDP, and srchybrid runs
+	// _stscanf("%u.%u") on it first: a leading number would make it show a bare "17.15"
+	// and drop our name (ServerSocket.cpp:180-181). So the name must lead here, while
+	// eserver's gate needs the number to lead over UDP; the two cannot be one string.
+	LoginVersionStr = ENodeName + " " + ENodeVersionStr + " (" + GossipCompatVersion + ")"
 )

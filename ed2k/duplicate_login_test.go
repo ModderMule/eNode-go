@@ -10,13 +10,16 @@ import (
 )
 
 func newLoginTestRuntime(engine storage.Engine) *ServerRuntime {
-	return NewServerRuntime(TCPRuntimeConfig{
+	rt := NewServerRuntime(TCPRuntimeConfig{
 		Address:           "127.0.0.1",
 		Port:              4661,
 		Hash:              []byte("1111111111111111"),
 		AllowLowIDs:       true,
 		ConnectionTimeout: 50 * time.Millisecond,
 	}, UDPRuntimeConfig{}, engine)
+	// A refused duplicate probes the held session; mock sessions never die of it.
+	rt.staleProbeWait = 10 * time.Millisecond
+	return rt
 }
 
 func loginPacket(t *testing.T, hash []byte, id uint32, port uint16) *Packet {

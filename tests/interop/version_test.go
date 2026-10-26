@@ -2,7 +2,6 @@ package interop
 
 import (
 	"encoding/binary"
-	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -23,14 +22,14 @@ const serverVersionPrefix = "server version"
 //	OP_SERVERIDENT 0x41         no version tag at all
 //	UDP 0xa3, challenge form    ed2k.GossipVersionStr, "17.15 (eNode-go v0.1.0)"
 //	UDP 0xa3, legacy form       no tags, so no version either
-//	TCP OP_SERVERMESSAGE 0x38   "server version v0.1.0 (eNode-go)"
+//	TCP OP_SERVERMESSAGE 0x38   "server version eNode-go v0.1.0 (17.15)"
 //
 // The load-bearing assertion is the last one, and it is a guard rather than a description.
 // The tempting harmonisation — putting the compatibility claim in the login line too — is a
 // regression: srchybrid tries _stscanf("%u.%u") on the text after the prefix and, when that
 // *succeeds*, reformats the whole value to a bare "17.15" (ServerSocket.cpp:180-181),
-// dropping our name and leaving us indistinguishable from a real eserver. Our leading "v"
-// is what makes the scanf fail and the name survive. See §3.5a of
+// dropping our name and leaving us indistinguishable from a real eserver. Our name leading
+// the line is what makes the scanf fail and the name survive. See §3.5a of
 // docs/ed2k-server-rust-comparison.local.md.
 //
 // Unlike every other case in this package this one needs no reference binary — one eNode
@@ -43,7 +42,7 @@ func TestVersionSurfaces(t *testing.T) {
 	// --- surface 1: the TCP login line ---------------------------------------------------
 	frames := fetchLoginFrames(t, enode.hostIP(), enode.hostPort("5555/tcp"))
 
-	wantLine := fmt.Sprintf("%s %s (%s)", serverVersionPrefix, ed2k.ENodeVersionStr, ed2k.ENodeName)
+	wantLine := serverVersionPrefix + " " + ed2k.LoginVersionStr
 	var versionLine string
 	for _, m := range frames.Messages {
 		if strings.HasPrefix(m, serverVersionPrefix) {
@@ -56,7 +55,7 @@ func TestVersionSurfaces(t *testing.T) {
 		t.Errorf("no OP_SERVERMESSAGE begins with %q; a client that connects would show no version at all (got %q)",
 			serverVersionPrefix, frames.Messages)
 	case versionLine != wantLine:
-		t.Errorf("login line is %q, want %q (built from ed2k.ENodeVersionStr and ed2k.ENodeName)",
+		t.Errorf("login line is %q, want %q (ed2k.LoginVersionStr)",
 			versionLine, wantLine)
 	default:
 		t.Logf("output: surface 1, TCP OP_SERVERMESSAGE -> %q", versionLine)
@@ -70,7 +69,7 @@ func TestVersionSurfaces(t *testing.T) {
 			t.Errorf("the login line's version part %q parses as _stscanf(\"%%u.%%u\"), so srchybrid "+
 				"reformats it to a bare \"%%u.%%02u\" (ServerSocket.cpp:180-181) and our identity is "+
 				"discarded — the client then shows a plain eserver version. Keep a non-numeric lead, "+
-				"e.g. %q, or move the identity to the front", rest, ed2k.ENodeVersionStr)
+				"e.g. %q, with the identity at the front", rest, ed2k.LoginVersionStr)
 		} else {
 			t.Logf("output: surface 1 guard, %q does not parse as \"%%u.%%u\", so both trees display it verbatim", rest)
 		}
