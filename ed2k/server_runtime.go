@@ -134,6 +134,10 @@ type UDPRuntimeConfig struct {
 	// Ed3k is the index node's ed3k:node link for the extended OP_SERVER_DESC_RES
 	// when ed3k is on. Empty omits the tag.
 	Ed3k string
+	// TrackClientUDPPorts is udp.trackClientPorts: record each address's
+	// server-UDP source port for the admin client list (udpports.go). Off by
+	// default; off, no table is allocated.
+	TrackClientUDPPorts bool
 }
 
 type ServerRuntime struct {
@@ -209,6 +213,11 @@ type ServerRuntime struct {
 	parking atomic.Pointer[parkRound]
 	// natCallback is the state of Lugdunum's NAT callback (natcallback.go).
 	natCallback natCallbackState
+	// udpPorts is the last-seen server-UDP source port per address, or nil while
+	// UDPRuntimeConfig.TrackClientUDPPorts is off; see udpports.go. The client's
+	// server-UDP listener binds an ephemeral port the TCP login never reveals, so
+	// this is the only place it is known.
+	udpPorts atomic.Pointer[udpPortTable]
 }
 
 // ipv6Enabled reports whether IPv6 is on at all (dual-stack accept, CT_MOD_IP_V6
@@ -230,6 +239,7 @@ func NewServerRuntime(tcp TCPRuntimeConfig, udp UDPRuntimeConfig, store storage.
 	}
 	s.tcpCfg.Store(&tcp)
 	s.udpCfg.Store(&udp)
+	s.setUDPPortTracking(udp.TrackClientUDPPorts)
 	return s
 }
 
@@ -244,6 +254,7 @@ func (s *ServerRuntime) ApplyRuntimeConfig(tcp TCPRuntimeConfig, udp UDPRuntimeC
 	s.udpCfg.Store(&udp)
 	s.counters.setTTL(tcp.CounterCacheTTL)
 	s.udpLimiter.SetRate(udp.RateLimitPerIPPerMinute)
+	s.setUDPPortTracking(udp.TrackClientUDPPorts)
 }
 
 // TCPConfig and UDPConfig return copies of the current settings.
@@ -604,6 +615,13 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 			logging.Debugf("udp unsupported protocol remote=%s proto=0x%x", remote, protocol)
 			return
 		}
+		// A well-formed eD2K-protocol frame: this datagram came from the
+		// sender's server-UDP socket — the listener server-UDP replies are
+		// delivered to, on a port nothing else tells us (udpports.go). Record
+		// the source port before any per-opcode gating, so even a refused
+		// opcode still identifies where its sender listens. A no-op unless
+		// udp.trackClientPorts is on.
+		s.NoteClientUDPPort(remote)
 		// Gated per opcode, not by one shared switch: each is advertised by its
 		// own flag, and the two below are deliberately ungated because they carry
 		// no such flag — refusing them would make the server invisible in server

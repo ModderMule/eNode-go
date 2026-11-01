@@ -107,6 +107,10 @@ func (v *adminViews) Clients() []admin.ClientRow {
 		if c.IPv6 != nil {
 			row.IPv6 = c.IPv6.String()
 		}
+		if udpPort, seen, ok := v.runtime.ClientUDPPort(c.IP); ok {
+			row.UDPPort = udpPort
+			row.UDPPortAgeSeconds = int64(now.Sub(seen).Seconds())
+		}
 		rows = append(rows, row)
 	}
 	return rows

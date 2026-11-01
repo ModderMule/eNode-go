@@ -34,6 +34,7 @@ var reloadableKeys = []string{
 	"udp.getFiles",
 	"udp.rateLimitPerIPPerMinute",
 	"udp.botDetection",
+	"udp.trackClientPorts",
 	"files",
 	"admin.username",
 	"admin.password",
@@ -93,6 +94,7 @@ func OverlayReloadable(base, next Config) Config {
 	out.UDP.GetFiles = next.UDP.GetFiles
 	out.UDP.RateLimitPerIPPerMinute = next.UDP.RateLimitPerIPPerMinute
 	out.UDP.BotDetection = next.UDP.BotDetection
+	out.UDP.TrackClientPorts = next.UDP.TrackClientPorts
 	out.Files = next.Files
 	out.Admin.Username = next.Admin.Username
 	out.Admin.Password = next.Admin.Password

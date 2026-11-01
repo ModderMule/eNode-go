@@ -16,11 +16,12 @@ const (
 	localConfigPath   = "../enode.local.yaml"
 )
 
-// localOnlyConfigKeys are top-level sections that are real config but must never
-// appear in the published enode.config.yaml. Both parity tests ignore them and
-// everything beneath them. statsBoost inflates advertised counts; see
-// config.StatsBoostConfig.
-var localOnlyConfigKeys = []string{"statsBoost"}
+// localOnlyConfigKeys are keys that are real config but must never appear in the
+// published enode.config.yaml. Both parity tests ignore them and everything
+// beneath them. statsBoost inflates advertised counts; see
+// config.StatsBoostConfig. udp.trackClientPorts is an undocumented diagnostic;
+// see UDPConfig.TrackClientPorts.
+var localOnlyConfigKeys = []string{"statsBoost", "udp.trackClientPorts"}
 
 // retiredConfigKeys are still parsed, so old configs load, but ignored and no longer
 // shipped.

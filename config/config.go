@@ -313,6 +313,11 @@ type UDPConfig struct {
 	RateLimitPerIPPerMinute *int `yaml:"rateLimitPerIPPerMinute"`
 	// BotDetection lists the addresses whose UDP queries look automated.
 	BotDetection BotDetectionConfig `yaml:"botDetection"`
+	// TrackClientPorts records the source port of each address's server-UDP
+	// datagrams so the admin client list can show it (ed2k/udpports.go). Off by
+	// default, and deliberately absent from every shipped config: it is an
+	// operator diagnostic, not a feature to advertise. Off, it costs no memory.
+	TrackClientPorts bool `yaml:"trackClientPorts"`
 }
 
 // BotDetectionConfig is udp.botDetection. It only observes: a flagged address is

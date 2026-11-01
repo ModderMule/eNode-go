@@ -82,15 +82,29 @@ type Features struct {
 
 // ClientRow is one logged-in client.
 type ClientRow struct {
-	Hash     string `json:"hash"`
-	IP       string `json:"ip"`
-	Port     uint16 `json:"port"`
-	ID       uint32 `json:"id"`
-	LowID    bool   `json:"lowId"`
-	Country  string `json:"country"`
-	Software string `json:"software"`
-	Nick     string `json:"nick"`
-	Files    int    `json:"files"`
+	Hash string `json:"hash"`
+	IP   string `json:"ip"`
+	// Port is the TCP listen port the client claimed in its login request
+	// (storage.ClientInfo.Port) — for client-to-client TCP, not UDP.
+	Port uint16 `json:"port"`
+	// UDPPort is the source port of this client's most recent client-protocol
+	// server-UDP datagram — the port its server-UDP listener is bound to, the
+	// one socket that parses server UDP frames (ed2k/udpports.go). 0 means no
+	// such datagram has been seen from this address within the observation TTL,
+	// or that tracking (udp.trackClientPorts) is off; it says nothing about
+	// whether the client is reachable on UDP. Clients sharing one public address
+	// (NAT, CGNAT) all show the port of whichever sent last.
+	UDPPort uint16 `json:"udpPort,omitempty"`
+	// UDPPortAgeSeconds is how long ago that datagram arrived, 0 when udpPort
+	// is 0. A high age means the client UDP-pings only rarely; the port may
+	// already have been re-bound.
+	UDPPortAgeSeconds int64  `json:"udpPortAgeSeconds,omitempty"`
+	ID                uint32 `json:"id"`
+	LowID             bool   `json:"lowId"`
+	Country           string `json:"country"`
+	Software          string `json:"software"`
+	Nick              string `json:"nick"`
+	Files             int    `json:"files"`
 	// IPv6 is the address the client published, "" when it has none.
 	IPv6             string `json:"ipv6"`
 	IPv6Capable      bool   `json:"ipv6Capable"`

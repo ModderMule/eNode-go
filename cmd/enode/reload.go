@@ -387,8 +387,9 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 			FloodQueriesPerMinute: cfg.UDP.BotDetection.FloodQueriesPerMinute,
 			MaxIntervalStddevMs:   cfg.UDP.BotDetection.MaxIntervalStddevMs,
 		},
-		ServerSearch: d.serverSearch,
-		Ed3k:         d.ed3k,
+		ServerSearch:        d.serverSearch,
+		Ed3k:                d.ed3k,
+		TrackClientUDPPorts: cfg.UDP.TrackClientPorts,
 	}
 	return tcp, udp
 }
