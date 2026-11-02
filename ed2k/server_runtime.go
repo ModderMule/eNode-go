@@ -1,7 +1,6 @@
 package ed2k
 
 import (
-	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -2570,10 +2569,34 @@ func (s *ServerRuntime) probeIPv6Reachable(client *tcpClient) bool {
 	return err == nil && ok
 }
 
+// probeClient runs one dial-back and logs how it went: a failed one at info level
+// with the step that failed, the source address it left from and how long it took.
+// A LowID is decided from these, and without the reason there is no telling a
+// closed port from a slow answer or a reply eMule held back because the probe came
+// from another IP than the one it logged in to (AwaitingTestFromIP).
 func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network, host string) (bool, error) {
+	start := time.Now()
+	ok, source, err := s.dialHello(client, enableCrypt, network, host)
+	port := client.snapshotInfo().Port
+	elapsed := time.Since(start).Round(time.Millisecond)
+	if ok && err == nil {
+		logging.Debugf("dial-back ok remote=%s network=%s target=%s crypt=%t source=%s elapsed=%s",
+			client.remoteHost, network, net.JoinHostPort(host, fmt.Sprintf("%d", port)), enableCrypt, source, elapsed)
+	} else {
+		logging.Infof("dial-back failed remote=%s network=%s target=%s crypt=%t source=%s elapsed=%s timeout=%s err=%v",
+			client.remoteHost, network, net.JoinHostPort(host, fmt.Sprintf("%d", port)), enableCrypt, source, elapsed,
+			s.tcp().ConnectionTimeout, err)
+	}
+	return ok, err
+}
+
+// dialHello dials the client and completes a hello exchange. It returns the local
+// address the dial left from ("" when the dial failed) and errors that name the
+// step that failed.
+func (s *ServerRuntime) dialHello(client *tcpClient, enableCrypt bool, network, host string) (bool, string, error) {
 	info := client.snapshotInfo()
 	if info.Port == 0 {
-		return false, fmt.Errorf("client port is 0")
+		return false, "", fmt.Errorf("client port is 0")
 	}
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", info.Port))
 	dialer := net.Dialer{Timeout: s.tcp().ConnectionTimeout}
@@ -2584,9 +2607,10 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network
 	}
 	conn, err := dialer.Dial(network, addr)
 	if err != nil {
-		return false, err
+		return false, "", fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
+	source := conn.LocalAddr().String()
 
 	cli := NewClient(ClientConfig{
 		EnableCrypt:       enableCrypt,
@@ -2601,30 +2625,30 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network
 	if enableCrypt {
 		pad, err := RandBuf(Rand(0xff))
 		if err != nil {
-			return false, err
+			return false, source, err
 		}
 		handshake, err := cli.BuildHandshake(RandProtocol(), RandUint32(), pad)
 		if err != nil {
-			return false, err
+			return false, source, err
 		}
 		if err := writeWithDeadline(conn, handshake, s.tcp().ConnectionTimeout); err != nil {
-			return false, err
+			return false, source, fmt.Errorf("send crypt handshake: %w", err)
 		}
 		if leftover, err = readHandshake(cli, conn, s.tcp().ConnectionTimeout); err != nil {
-			return false, err
+			return false, source, fmt.Errorf("read crypt handshake answer: %w", err)
 		}
 	}
 
 	hello, err := cli.BuildHelloPacket()
 	if err != nil {
-		return false, err
+		return false, source, err
 	}
 	helloBytes := hello.Bytes()
 	if enableCrypt && cli.CryptStatus == CsEncrypting {
 		helloBytes = RC4Crypt(helloBytes, len(helloBytes), cli.SendKey)
 	}
 	if err := writeWithDeadline(conn, helloBytes, s.tcp().ConnectionTimeout); err != nil {
-		return false, err
+		return false, source, fmt.Errorf("send hello: %w", err)
 	}
 	answer, ok, err := readHelloAnswer(cli, conn, s.tcp().ConnectionTimeout, cli.Hash, leftover)
 	// The probe is a client-to-client hello, the one place a client names its mod;
@@ -2636,7 +2660,10 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network
 			client.infoMu.Unlock()
 		}
 	}
-	return ok, err
+	if err != nil {
+		err = fmt.Errorf("read hello answer: %w", err)
+	}
+	return ok, source, err
 }
 
 // readHandshake reads the obfuscation handshake answer, however TCP splits it, and
@@ -2715,7 +2742,7 @@ func readHelloAnswer(cli *Client, conn net.Conn, timeout time.Duration, wantHash
 				// Only the hash matters here; a tag this parser rejects further on
 				// does not make the peer any less reachable.
 				answer, _ := ReadOpHelloAnswer(NewBufferFromBytes(payload[1:]))
-				if !bytes.Equal(answer.Hash, wantHash) {
+				if !sameUserHash(answer.Hash, wantHash) {
 					return HelloAnswer{}, false, errHelloHashMismatch
 				}
 				return answer, true, nil
@@ -2731,6 +2758,24 @@ func writeWithDeadline(conn net.Conn, data []byte, timeout time.Duration) error 
 	}
 	_, err := conn.Write(data)
 	return err
+}
+
+// sameUserHash reports whether a probe answer's user hash is the one the client
+// logged in with, ignoring bytes 5 and 14. Those are the fixed eMule markers
+// (0x0e, 0x6f; srchybrid/Preferences.cpp), and eMule 0.72a randomizes both in the
+// hello answer it sends: a dial-back to such a client never matched exactly, so it
+// always got a LowID here while servers that skip the check gave it a HighID. The
+// other 14 bytes still tell a CGNAT neighbour on the same IP apart from the client.
+func sameUserHash(got, want []byte) bool {
+	if len(got) != 16 || len(want) != 16 {
+		return false
+	}
+	for i := range got {
+		if i != 5 && i != 14 && got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *ServerRuntime) udpGlobGetSources(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, crypt *UDPCrypt, module string) {

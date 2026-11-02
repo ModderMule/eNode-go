@@ -2,6 +2,7 @@ package ed2k
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"net"
 	"testing"
@@ -152,5 +153,36 @@ func TestReadHelloAnswerReturnsModVersion(t *testing.T) {
 	}
 	if got != mod {
 		t.Fatalf("mod = %q, want %q", got, mod)
+	}
+}
+
+// eMule 0.72a randomizes the two marker bytes (5 and 14) of the user hash in its
+// hello answer. The hashes below are a real login and the answers that client
+// gave to four dial-backs: each must still count as the client itself, while a
+// hash differing anywhere else stays another user.
+func TestSameUserHashIgnoresEMuleMarkerBytes(t *testing.T) {
+	login := "69b7cf0fb40e2cc96bbd8b3440e96fed"
+	cases := []struct {
+		answer string
+		want   bool
+	}{
+		{"69b7cf0fb40e2cc96bbd8b3440e96fed", true},
+		{"69b7cf0fb49d2cc96bbd8b3440e9f1ed", true},
+		{"69b7cf0fb41c2cc96bbd8b3440e9c8ed", true},
+		{"69b7cf0fb4c12cc96bbd8b3440e945ed", true},
+		{"69b7cf0fb4c52cc96bbd8b3440e982ed", true},
+		{"69b7cf0fb40e2cc96bbd8b3440e96fee", false}, // byte 15 differs
+		{"68b7cf0fb40e2cc96bbd8b3440e96fed", false}, // byte 0 differs
+		{"69b7cf0fb40e2dc96bbd8b3440e96fed", false}, // byte 6 differs
+		{"69b7cf0fb40e2cc96bbd8b3440e96f", false},   // short
+	}
+	want, _ := hex.DecodeString(login)
+	for _, tc := range cases {
+		got, _ := hex.DecodeString(tc.answer)
+		ok := sameUserHash(got, want)
+		t.Logf("input: login=%s answer=%s output: same=%t", login, tc.answer, ok)
+		if ok != tc.want {
+			t.Fatalf("sameUserHash(%s, %s) = %t, want %t", tc.answer, login, ok, tc.want)
+		}
 	}
 }
