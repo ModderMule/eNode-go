@@ -145,16 +145,21 @@ func (m *MongoDBEngine) Close() error {
 }
 
 func (m *MongoDBEngine) ClientsCount() int {
+	n, _ := m.ClientsCountChecked()
+	return n
+}
+
+func (m *MongoDBEngine) ClientsCountChecked() (int, error) {
 	if err := m.ensureDB(); err != nil {
-		return 0
+		return 0, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
 	defer cancel()
 	n, err := m.db.Collection("clients").CountDocuments(ctx, bson.M{"online": true})
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return int(n)
+	return int(n), nil
 }
 
 func (m *MongoDBEngine) IsConnected(info ClientInfo) bool {
@@ -327,16 +332,21 @@ func (m *MongoDBEngine) FilesCount() int {
 // FilesCountEstimate reads the collection's metadata count rather than scanning
 // it, which CountDocuments with an empty filter does.
 func (m *MongoDBEngine) FilesCountEstimate() int {
+	n, _ := m.FilesCountEstimateChecked()
+	return n
+}
+
+func (m *MongoDBEngine) FilesCountEstimateChecked() (int, error) {
 	if err := m.ensureDB(); err != nil {
-		return 0
+		return 0, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
 	defer cancel()
 	n, err := m.db.Collection("files").EstimatedDocumentCount(ctx)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return int(n)
+	return int(n), nil
 }
 
 func (m *MongoDBEngine) AddFile(file File, clientInfo ClientInfo) {

@@ -1,9 +1,11 @@
 package ed2k
 
 import (
+	"errors"
 	"sync"
 	"time"
 
+	"enode/logging"
 	"enode/storage"
 )
 
@@ -42,6 +44,10 @@ type counterCache struct {
 	clients int
 	files   int
 	fetched time.Time
+	// lastErr is the error of the latest refresh, nil once one succeeds again, and
+	// failingSince is when the current run of failures began.
+	lastErr      error
+	failingSince time.Time
 	// refreshing serialises concurrent readers onto one query, so a burst of
 	// datagrams arriving on a cold cache does not each start their own.
 	refreshing bool
@@ -88,11 +94,22 @@ func (c *counterCache) Counts() (clients, files int) {
 		c.done = make(chan struct{})
 		c.mu.Unlock()
 
-		newClients := c.engine.ClientsCount()
-		newFiles := c.engine.FilesCountEstimate()
+		newClients, clientsErr := c.engine.ClientsCountChecked()
+		newFiles, filesErr := c.engine.FilesCountEstimateChecked()
 
 		c.mu.Lock()
-		c.clients, c.files = newClients, newFiles
+		// A failed read keeps the last good value rather than replacing it with 0:
+		// a database outage is not an empty server, and these counts go to every
+		// client in OP_SERVERSTATUS as well as to the dashboard.
+		if clientsErr == nil {
+			c.clients = newClients
+		}
+		if filesErr == nil {
+			c.files = newFiles
+		}
+		c.recordResult(errors.Join(clientsErr, filesErr))
+		// A failed refresh is also held for the TTL, so a database that is down is
+		// asked once per TTL rather than once per status request.
 		c.fetched = time.Now()
 		c.refreshing = false
 		close(c.done)
@@ -101,4 +118,27 @@ func (c *counterCache) Counts() (clients, files int) {
 		c.mu.Unlock()
 		return clients, files
 	}
+}
+
+// Failure reports whether the latest refresh failed, with its error and when the
+// current run of failures began. The counts Counts returns meanwhile are the last
+// good ones (or 0 if there never was one). Zero values mean the counts are live.
+func (c *counterCache) Failure() (since time.Time, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.failingSince, c.lastErr
+}
+
+// recordResult tracks the start and end of a run of failed refreshes, logging each
+// transition once rather than every TTL. Must be called with c.mu held.
+func (c *counterCache) recordResult(err error) {
+	switch {
+	case err != nil && c.lastErr == nil:
+		c.failingSince = time.Now()
+		logging.Warnf("storage counts unavailable, serving last known clients=%d files=%d: %v", c.clients, c.files, err)
+	case err == nil && c.lastErr != nil:
+		logging.Infof("storage counts available again after %s", time.Since(c.failingSince).Round(time.Second))
+		c.failingSince = time.Time{}
+	}
+	c.lastErr = err
 }

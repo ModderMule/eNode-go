@@ -1,6 +1,7 @@
 package ed2k
 
 import (
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -41,6 +42,14 @@ func (e *countingEngine) FilesCountEstimate() int {
 		time.Sleep(e.delay)
 	}
 	return 42
+}
+
+func (e *countingEngine) ClientsCountChecked() (int, error) {
+	return e.ClientsCount(), nil
+}
+
+func (e *countingEngine) FilesCountEstimateChecked() (int, error) {
+	return e.FilesCountEstimate(), nil
 }
 
 func (e *countingEngine) queries() int64 {
@@ -277,5 +286,67 @@ func TestApplyRuntimeConfigUpdatesCacheTTLAndRateLimit(t *testing.T) {
 	}
 	if limitedBefore != 2 || limitedAfter != 4 || off != 5 {
 		t.Errorf("allowed %d, %d, %d, want 2, 4, 5: the new rate limit was not applied", limitedBefore, limitedAfter, off)
+	}
+}
+
+// flakyEngine answers its counts until down is set, then fails both reads the way
+// a MySQL or MongoDB engine does when the database is unreachable.
+type flakyEngine struct {
+	storage.Engine
+	clients, files int
+	down           atomic.Bool
+}
+
+func (e *flakyEngine) ClientsCountChecked() (int, error) {
+	if e.down.Load() {
+		return 0, errors.New("invalid connection")
+	}
+	return e.clients, nil
+}
+
+func (e *flakyEngine) FilesCountEstimateChecked() (int, error) {
+	if e.down.Load() {
+		return 0, errors.New("invalid connection")
+	}
+	return e.files, nil
+}
+
+// A database outage must not read as an empty server. The cache keeps the last
+// good counts while the reads fail, reports the failure for the dashboard, and
+// clears it once the database answers again.
+func TestCounterCacheKeepsLastCountsWhileStorageFails(t *testing.T) {
+	engine := &flakyEngine{Engine: storage.NewMemoryEngine(), clients: 3897, files: 18923076}
+	cache := newCounterCache(engine, 10*time.Millisecond)
+
+	clients, files := cache.Counts()
+	since, err := cache.Failure()
+	t.Logf("input: database up with clients=3897 files=18923076")
+	t.Logf("output: clients=%d files=%d failingSince=%v err=%v", clients, files, since, err)
+	if clients != 3897 || files != 18923076 || err != nil || !since.IsZero() {
+		t.Fatalf("healthy read: clients=%d files=%d since=%v err=%v", clients, files, since, err)
+	}
+
+	engine.down.Store(true)
+	time.Sleep(20 * time.Millisecond)
+	clients, files = cache.Counts()
+	since, err = cache.Failure()
+	t.Logf("input: database down, TTL lapsed")
+	t.Logf("output: clients=%d files=%d failingSince=%v err=%v", clients, files, since, err)
+	if clients != 3897 || files != 18923076 {
+		t.Fatalf("outage replaced the last good counts: clients=%d files=%d", clients, files)
+	}
+	if err == nil || since.IsZero() {
+		t.Fatalf("outage not reported: since=%v err=%v", since, err)
+	}
+
+	engine.clients = 3500
+	engine.down.Store(false)
+	time.Sleep(20 * time.Millisecond)
+	clients, _ = cache.Counts()
+	since, err = cache.Failure()
+	t.Logf("input: database back with clients=3500, TTL lapsed")
+	t.Logf("output: clients=%d failingSince=%v err=%v", clients, since, err)
+	if clients != 3500 || err != nil || !since.IsZero() {
+		t.Fatalf("recovery: clients=%d since=%v err=%v", clients, since, err)
 	}
 }

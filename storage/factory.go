@@ -42,6 +42,12 @@ type Engine interface {
 	// engine answers from its own statistics and may be off by tens of percent.
 	// Nothing may branch on it; FilesCount is the exact figure.
 	FilesCountEstimate() int
+	// ClientsCountChecked and FilesCountEstimateChecked are ClientsCount and
+	// FilesCountEstimate with the error a DB engine hit. The unchecked forms answer 0
+	// when the database is down, which reads as an empty server; the counter cache
+	// uses these to keep its last good reading through an outage instead.
+	ClientsCountChecked() (int, error)
+	FilesCountEstimateChecked() (int, error)
 	AddFile(File, ClientInfo)
 	// AddFiles stores every file one client offered in one packet. The result must
 	// equal calling AddFile for each file in order — a later duplicate of the same

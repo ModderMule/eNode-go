@@ -426,6 +426,16 @@ func (m *MemoryEngine) FilesCountEstimate() int {
 	return m.FilesCount()
 }
 
+// ClientsCountChecked never fails: the count is held in memory.
+func (m *MemoryEngine) ClientsCountChecked() (int, error) {
+	return m.ClientsCount(), nil
+}
+
+// FilesCountEstimateChecked never fails: the count is held in memory.
+func (m *MemoryEngine) FilesCountEstimateChecked() (int, error) {
+	return m.FilesCountEstimate(), nil
+}
+
 // CleanupStale has far less to do here than on the DB engines.
 //
 // Disconnect already removes a client and its source entries outright — there is

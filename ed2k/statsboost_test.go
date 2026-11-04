@@ -22,6 +22,9 @@ func (e fixedCountsEngine) FilesCount() int   { return e.files }
 
 func (e fixedCountsEngine) FilesCountEstimate() int { return e.files }
 
+func (e fixedCountsEngine) ClientsCountChecked() (int, error)       { return e.clients, nil }
+func (e fixedCountsEngine) FilesCountEstimateChecked() (int, error) { return e.files, nil }
+
 // TestStatsBoostAppliedToTCPAndUDP pins that the configured offsets reach both
 // status packets identically, that no boost advertises the real counts (the old
 // hard-coded +2000/+1000 is gone), and that a huge offset saturates at uint32.

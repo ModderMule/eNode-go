@@ -82,6 +82,10 @@ type LiveStats struct {
 	Servers       int    `json:"servers"`
 	UptimeSeconds int64  `json:"uptimeSeconds"`
 	Time          string `json:"time"`
+	// CountsError is set while the database cannot be read: Clients and Files are
+	// then the last known values, held since CountsStaleSince (RFC 3339).
+	CountsError      string `json:"countsError,omitempty"`
+	CountsStaleSince string `json:"countsStaleSince,omitempty"`
 
 	// Server-to-server gossip. Known counts every peer in the table whatever its state;
 	// Verified counts the subset advertisable to clients, which excludes parked peers;

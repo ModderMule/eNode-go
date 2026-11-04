@@ -481,10 +481,17 @@ func run(ctx context.Context, configPath string) error {
 				gossip := runtime.GossipStats()
 				blockedIP, blockedGeo := accessFilter.Stats()
 				metaCacheEntries, metaStats := adminMetaStats(metaSearcher)
+				var countsError, countsStaleSince string
+				if since, err := runtime.CountsFailure(); err != nil {
+					countsError = err.Error()
+					countsStaleSince = since.Format(time.RFC3339)
+				}
 				return admin.LiveStats{
-					Clients: clients,
-					Files:   files,
-					LowIDs:  int(runtime.LowIDs.Count()),
+					Clients:          clients,
+					Files:            files,
+					CountsError:      countsError,
+					CountsStaleSince: countsStaleSince,
+					LowIDs:           int(runtime.LowIDs.Count()),
 					// What a client is actually sent, not Storage.ServersCount(): the latter
 					// counts only configured peers and reads 0 for everything gossip learns.
 					Servers:                   runtime.AdvertisedServerCount(),

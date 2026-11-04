@@ -144,6 +144,13 @@ mongodb. On mysql/mariadb it can differ from `SELECT COUNT(*) FROM files` by ten
 of percent and moves in steps when InnoDB recalculates its statistics; counting
 exactly would scan the whole table on every refresh.
 
+If the database cannot be read (down, disk full, connection lost), `clients` and
+`files` keep their last good values instead of dropping to 0, both on the page and
+in the status packets sent to clients. While that lasts, the response carries
+`countsError` (the storage error) and `countsStaleSince` (RFC 3339), and the
+Clients card shows "database unavailable since … — last known". Both fields are
+left out once a refresh succeeds again.
+
 The `gossip*` fields are explained in `server-gossip.md` §5; the response carries
 further sections (filters, meta search, update check) not shown here.
 

@@ -231,14 +231,23 @@ func (m *MySQLEngine) Close() error {
 }
 
 func (m *MySQLEngine) ClientsCount() int {
-	if err := m.ensureDB(); err != nil {
+	c, err := m.ClientsCountChecked()
+	if err != nil {
+		logging.Errorf("mysql clients count failed: %v", err)
 		return 0
+	}
+	return c
+}
+
+func (m *MySQLEngine) ClientsCountChecked() (int, error) {
+	if err := m.ensureDB(); err != nil {
+		return 0, err
 	}
 	var c int
 	if err := m.db.QueryRow(`SELECT COUNT(*) FROM clients WHERE online = 1`).Scan(&c); err != nil {
-		logging.Errorf("mysql clients count failed: %v", err)
+		return 0, err
 	}
-	return c
+	return c, nil
 }
 
 func (m *MySQLEngine) IsConnected(info ClientInfo) bool {
@@ -415,18 +424,36 @@ func (m *MySQLEngine) FilesCount() int {
 // estimate is a metadata lookup; it moves in steps as InnoDB recalculates its
 // statistics and can differ from the exact count by tens of percent.
 func (m *MySQLEngine) FilesCountEstimate() int {
-	if err := m.ensureDB(); err != nil {
+	n, err := m.FilesCountEstimateChecked()
+	if err != nil {
+		logging.Errorf("mysql files count estimate failed: %v", err)
 		return 0
+	}
+	return n
+}
+
+// FilesCountEstimateChecked fails when the database does. Only a missing estimate
+// (the statistics row holds NULL) falls back to the exact count; a query error is
+// returned rather than retried as a full scan against a database already failing.
+func (m *MySQLEngine) FilesCountEstimateChecked() (int, error) {
+	if err := m.ensureDB(); err != nil {
+		return 0, err
 	}
 	var rows sql.NullInt64
 	err := m.db.QueryRow(
 		`SELECT TABLE_ROWS FROM information_schema.TABLES
 		 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'files'`).Scan(&rows)
-	if err != nil || !rows.Valid {
-		logging.Errorf("mysql files count estimate unavailable (err=%v), counting instead", err)
-		return m.FilesCount()
+	if err != nil {
+		return 0, err
 	}
-	return int(rows.Int64)
+	if !rows.Valid {
+		var c int
+		if err := m.db.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&c); err != nil {
+			return 0, err
+		}
+		return c, nil
+	}
+	return int(rows.Int64), nil
 }
 
 func (m *MySQLEngine) AddFile(file File, clientInfo ClientInfo) {

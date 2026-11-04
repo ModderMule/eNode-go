@@ -524,6 +524,13 @@ func (s *ServerRuntime) Counts() (clients, files int) {
 	return s.counters.Counts()
 }
 
+// CountsFailure reports whether the latest count refresh failed, with its error
+// and when the failures began; Counts meanwhile returns the last good reading.
+// Zero values mean the counts are live.
+func (s *ServerRuntime) CountsFailure() (since time.Time, err error) {
+	return s.counters.Failure()
+}
+
 // AdvertisedServerCount reports how many peer servers a client would receive in
 // OP_SERVERLIST right now.
 //
