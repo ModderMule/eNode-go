@@ -35,7 +35,15 @@ type Engine interface {
 	ClientsCount() int
 	IsConnected(ClientInfo) bool
 	Connect(ClientInfo) (uint64, error)
+	// Disconnect marks a session offline. StoreID names it; zero falls back to the
+	// row of info.Hash.
 	Disconnect(ClientInfo)
+	// ReleaseOrphans disconnects every client still online whose hash held does not
+	// claim, and returns those hashes. For a successor of a handover, whose storage
+	// kept the predecessor's online flags (Config.KeepOnline): a row whose session
+	// was not handed over has nobody serving it, and would refuse its user's every
+	// login as already connected.
+	ReleaseOrphans(held func(hash []byte) bool) ([][]byte, error)
 	FilesCount() int
 	// FilesCountEstimate is the file total for display: the status packets, the
 	// dashboard, a peer's ServerInfo. It must be cheap at any table size, so a DB

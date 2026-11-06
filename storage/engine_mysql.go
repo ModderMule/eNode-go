@@ -292,6 +292,20 @@ func (m *MySQLEngine) Disconnect(info ClientInfo) {
 		return
 	}
 	defer m.sessions.lock(info.Hash)()
+	if info.StoreID == 0 {
+		// By hash: a row with no session behind it, so its StoreID is unknown.
+		if len(info.Hash) == 0 {
+			return
+		}
+		err := m.db.QueryRow(`SELECT id, id_ed2k, port FROM clients WHERE hash = ? LIMIT 1`, info.Hash).
+			Scan(&info.StoreID, &info.ID, &info.Port)
+		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				logging.Errorf("mysql disconnect lookup hash=%x failed: %v", info.Hash, err)
+			}
+			return
+		}
+	}
 	m.offeredMu.Lock()
 	delete(m.offered, info.StoreID)
 	m.offeredMu.Unlock()
@@ -348,6 +362,42 @@ func (m *MySQLEngine) Disconnect(info ClientInfo) {
 	}); err != nil {
 		logging.Errorf("mysql disconnect result source storeID=%d failed: %v", info.StoreID, err)
 	}
+}
+
+// ReleaseOrphans reads the online rows through the online index, then disconnects
+// each one held does not claim, as its own session's close would.
+func (m *MySQLEngine) ReleaseOrphans(held func(hash []byte) bool) ([][]byte, error) {
+	if err := m.ensureDB(); err != nil {
+		return nil, err
+	}
+	rows, err := m.db.Query(`SELECT id, hash, id_ed2k, port FROM clients WHERE online = 1`)
+	if err != nil {
+		return nil, err
+	}
+	var online []ClientInfo
+	for rows.Next() {
+		var c ClientInfo
+		if err := rows.Scan(&c.StoreID, &c.Hash, &c.ID, &c.Port); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		online = append(online, c)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var released [][]byte
+	for _, c := range online {
+		if held(c.Hash) {
+			continue
+		}
+		m.Disconnect(c)
+		released = append(released, c.Hash)
+	}
+	return released, nil
 }
 
 // OfferedCount answers from the count Connect, addFilesChunk and Disconnect keep.

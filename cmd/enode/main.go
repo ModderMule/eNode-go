@@ -41,7 +41,16 @@ func main() {
 	updateFilters := flag.Bool("update-filters", false, "download the content filter hash lists once and exit")
 	flag.BoolVar(&reindexManticore, "reindex-manticore", false,
 		"drop and recreate the storage.manticore table at startup and rebuild it from the database")
+	validate := flag.Bool("validate", false, "check the config file and exit (non-zero on errors); binds nothing")
 	flag.Parse()
+
+	if *validate {
+		if err := runValidate(*configPath, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Before anything binds: a process started by a handover adopts its
 	// predecessor's sockets as it binds them.

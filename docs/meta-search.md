@@ -446,8 +446,9 @@ act on it. What differs from a torrent row:
 
 eMuleQt shows a web row with the web icon, and a row of size 0 as "Stream". Its
 Download fetches the `text/uri-list` from the Meta API, checks it against the row's
-hash, and lists the links (file, name, size, hoster) in a dialog to copy, open in the
-browser or save. Its search form has a **Web (Server)** method, which is
+hash, and starts the links in the Hoster tab, one download a file with its mirrors.
+**Show Links...** (and Download while hoster downloads are off) lists them (file,
+name, size, hoster) in a dialog to copy, open in the browser or save. Its search form has a **Web (Server)** method, which is
 `MetaApi.Search` with `network` `META_NETWORK_WEB`, and a **Web results** box that
 hides web and container rows in a blended answer.
 
@@ -480,15 +481,25 @@ as a web row:
 - **The metafile** of a torrent or a container comes from the web daemon: see
   [meta-api.md](meta-api.md#fetching-a-metafile).
 
-eMuleQt shows a container row with its own icon. Its Download fetches the file,
-checks its SHA-256 against the row's hash, and saves it with the extension the
-content type names (`.dlc`, `.ccf`, `.rsdf`). A magnet-only row keeps the torrent
-icon. There is no metafile to fetch, so its Download hands the magnet to the
-Torrents tab; a build without BitTorrent copies it to the clipboard instead. A
-torrent row's Download fetches its `.torrent` for the Torrents tab, and falls back
-to the row's magnet when the fetch fails; without BitTorrent it saves the
-`.torrent` for another client. A **Web (Server)** search turns a
-`META_KIND_ED2K` entry into a plain eD2K file, and drops one without a size.
+eMuleQt's search menu treats every network alike. **Download** (the default)
+hands the row to eMuleQt's own tab; while that tab is off it falls back to the
+external action. A second item per network is always the external one, for another
+client:
+
+| Row | Download | Off: Download falls back to | External item |
+|---|---|---|---|
+| NZB | Usenet queue | (always on) | Save NZB File... |
+| torrent with a metafile | fetches the `.torrent` for the Torrents tab, the row's magnet when the fetch fails | saving the `.torrent` | Save Torrent File... |
+| magnet-only torrent | hands the magnet to the Torrents tab | copying it | Copy Magnet Link |
+| web | links to the Hoster tab | showing them | Show Links... |
+| link container | fetches the file and opens it in the Hoster tab, which asks which links to add | saving it | Save Container File... |
+
+A container row shows the green DLC icon; a magnet-only row keeps the torrent icon.
+A container fetch checks its SHA-256 against the row's hash, and a saved container
+takes the extension its content type names (`.dlc`, `.ccf`, `.rsdf`).
+
+A **Web (Server)** search turns a `META_KIND_ED2K` entry into a plain eD2K file, and
+drops one without a size.
 
 ## Files from other servers
 

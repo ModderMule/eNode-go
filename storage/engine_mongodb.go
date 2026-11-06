@@ -162,6 +162,40 @@ func (m *MongoDBEngine) ClientsCountChecked() (int, error) {
 	return int(n), nil
 }
 
+// ReleaseOrphans reads the online clients, then disconnects each one held does not
+// claim, as its own session's close would.
+func (m *MongoDBEngine) ReleaseOrphans(held func(hash []byte) bool) ([][]byte, error) {
+	if err := m.ensureDB(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
+	cur, err := m.db.Collection("clients").Find(ctx, bson.M{"online": true},
+		options.Find().SetProjection(bson.M{"hash": 1, "id_ed2k": 1, "port": 1}))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	var docs []struct {
+		Hash   []byte `bson:"hash"`
+		IDEd2K uint32 `bson:"id_ed2k"`
+		Port   uint16 `bson:"port"`
+	}
+	err = cur.All(ctx, &docs)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+	var released [][]byte
+	for _, d := range docs {
+		if held(d.Hash) {
+			continue
+		}
+		m.Disconnect(ClientInfo{Hash: d.Hash, ID: d.IDEd2K, Port: d.Port})
+		released = append(released, d.Hash)
+	}
+	return released, nil
+}
+
 func (m *MongoDBEngine) IsConnected(info ClientInfo) bool {
 	if err := m.ensureDB(); err != nil {
 		return false

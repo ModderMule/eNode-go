@@ -415,6 +415,26 @@ func (m *MemoryEngine) Disconnect(info ClientInfo) {
 	}
 }
 
+// ReleaseOrphans disconnects every client whose hash held does not claim. held is
+// called with the lock free, so it may take locks of its own.
+func (m *MemoryEngine) ReleaseOrphans(held func(hash []byte) bool) ([][]byte, error) {
+	m.mu.RLock()
+	online := make([]ClientInfo, 0, len(m.clients))
+	for _, c := range m.clients {
+		online = append(online, c.info)
+	}
+	m.mu.RUnlock()
+	var released [][]byte
+	for _, c := range online {
+		if held(c.Hash) {
+			continue
+		}
+		m.Disconnect(c)
+		released = append(released, c.Hash)
+	}
+	return released, nil
+}
+
 func (m *MemoryEngine) FilesCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

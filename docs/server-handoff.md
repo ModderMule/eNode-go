@@ -144,6 +144,14 @@ handover.
 | `mysql`, `mongodb` | Only the per-session offered counts that `files.softLimit` is checked against. The rows stay in the database. | Does not reset the online flags (`storage.Config.KeepOnline`). The rows belong to live sessions. |
 | + `manticore` | Whatever the wrapped engine sends. The index holds nothing per session. | As the wrapped engine. |
 
+Once committed, and before any restored session reads or a new login is accepted, the
+successor takes offline every client still online that none of its sessions holds
+(`ServerRuntime.ReleaseOrphanedRows`, `Engine.ReleaseOrphans`). Such a row comes from a
+`Disconnect` that failed, or from a session that was not handed over. Without the sweep
+it survived every handover, counted as a user and refused its owner as "Already connected
+from another session" until a cold restart (emule-qt#137). A login that still meets a row
+no session holds releases it too, see `docs/port-divergences.local.md` H1c.
+
 The predecessor skips its shutdown snapshot after a handover, because the successor now
 writes the snapshots.
 

@@ -301,6 +301,17 @@ func (m *ManticoreEngine) Disconnect(info ClientInfo) {
 	m.enqueue(manticoreOp{offline: true, clientKey: manticoreKey(info.Hash), at: time.Now().Unix()})
 }
 
+// ReleaseOrphans runs the database's release, then takes the released clients'
+// sources offline in the index, as Disconnect does.
+func (m *ManticoreEngine) ReleaseOrphans(held func(hash []byte) bool) ([][]byte, error) {
+	released, err := m.Engine.ReleaseOrphans(held)
+	now := time.Now().Unix()
+	for _, h := range released {
+		m.enqueue(manticoreOp{offline: true, clientKey: manticoreKey(h), at: now})
+	}
+	return released, err
+}
+
 // CleanupStale runs the database's sweep, then deletes the same offline sources
 // from the index: online = 0 AND time_offer < cutoff is the predicate both
 // engines' source pass uses. A client the database expired by its login time has

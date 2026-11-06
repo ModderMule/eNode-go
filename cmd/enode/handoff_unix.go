@@ -140,6 +140,10 @@ func (i *sessionImporter) Restore(states [][]byte, files []*os.File) error {
 }
 
 func (i *sessionImporter) Start() {
+	// After the commit, or the predecessor could still take its rows back; before
+	// any read loop runs, so no login races the sweep. Restore has registered the
+	// inherited sessions already.
+	i.d.runtime.ReleaseOrphanedRows()
 	i.restored.Start()
 	i.d.tcpGate.Open()
 	i.d.udpGate.Open()

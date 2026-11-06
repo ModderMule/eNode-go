@@ -175,6 +175,9 @@ type ServerRuntime struct {
 	// sessionsByEd3k indexes the same sessions by the ed3k node ID of their CT_ED3K
 	// login tag, for the ed3k bridge (Ed3kPairing). Under sessionsMu.
 	sessionsByEd3k map[[16]byte][]*tcpClient
+	// handshaking counts the handshakes per user hash between Storage.Connect and
+	// registerSession, for hashHeldLocally. Under sessionsMu.
+	handshaking map[[16]byte]int
 	// firewallProbe indirects the IPv4 dial-back so a test can drive both branches
 	// of the login ID decision without a reachable listener, and can assert that
 	// the decision short-circuits before dialling at all. nil selects the real
@@ -1311,17 +1314,32 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// the restart logs in over IPv4 — matches neither exception, and its dead session
 	// would otherwise hold the hash until the idle timeout. Only a session whose
 	// socket is dead goes, so the probe gives a remote attacker nothing.
+	//
+	// A storage row with no session in this process behind it is stale: one server
+	// owns its database (Init resets every online flag at boot), so nobody serves
+	// it. A Disconnect that failed, or a session a handover did not carry over,
+	// leaves one. It is released and the login goes on; refused, it locked its user
+	// out until the next cold restart (emule-qt#137). A hash in the middle of its
+	// own handshake counts as held, so a parallel login cannot free a row Connect
+	// has just written.
 	if len(req.Hash) == 16 && c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}) {
 		c.replaceSameIPSession(req.Hash)
 		if c.dualStackHandoverFrom(req.Hash, req.Port) != nil {
 			logging.Infof("login takes over ipv4 session after acceptance remote=%s hash=%x", c.remoteHost, req.Hash)
-		} else if c.probeStaleSession(req.Hash); c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}) {
-			// Re-checked so a row with no local session behind it — a stale row in a
-			// shared database — is still refused.
-			logging.Warnf("login rejected remote=%s hash=%x: already connected", c.remoteHost, req.Hash)
-			c.sendServerMessage("Already connected from another session.")
-			c.closeWithReason("duplicate-login")
-			return
+		} else {
+			c.probeStaleSession(req.Hash)
+			switch {
+			case !c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}):
+				// The probe freed it.
+			case !c.server.hashHeldLocally(req.Hash):
+				logging.Warnf("login releases orphaned storage row remote=%s hash=%x: no session holds it", c.remoteHost, req.Hash)
+				c.server.Storage.Disconnect(storage.ClientInfo{Hash: req.Hash})
+			default:
+				logging.Warnf("login rejected remote=%s hash=%x: already connected", c.remoteHost, req.Hash)
+				c.sendServerMessage("Already connected from another session.")
+				c.closeWithReason("duplicate-login")
+				return
+			}
 		}
 	}
 
@@ -1451,6 +1469,9 @@ func (c *tcpClient) handShake() {
 	if !c.completeDualStackHandover() {
 		return
 	}
+	// From Connect writing the row until registerSession indexes it, the hash is
+	// held here all the same; see hashHeldLocally.
+	defer c.server.beginHandshake(c.snapshotInfo().Hash)()
 	storeID, err := c.server.Storage.Connect(c.snapshotInfo())
 	if err != nil {
 		logging.Warnf("storage connect failed remote=%s err=%v", c.remoteHost, err)
@@ -3411,6 +3432,63 @@ func (s *ServerRuntime) sessionByHash(hash []byte) *tcpClient {
 	return s.sessionsByHash[key]
 }
 
+// hashHeldLocally reports whether a session of this process holds hash: one logged
+// in, or one between Storage.Connect and registerSession in handShake. A storage row
+// online without either has nobody serving it.
+func (s *ServerRuntime) hashHeldLocally(hash []byte) bool {
+	if len(hash) != 16 {
+		return false
+	}
+	var key [16]byte
+	copy(key[:], hash)
+	s.sessionsMu.RLock()
+	defer s.sessionsMu.RUnlock()
+	return s.sessionsByHash[key] != nil || s.handshaking[key] > 0
+}
+
+// beginHandshake marks hash as held by a handshake in progress until the returned
+// func runs.
+func (s *ServerRuntime) beginHandshake(hash []byte) func() {
+	if len(hash) != 16 {
+		return func() {}
+	}
+	var key [16]byte
+	copy(key[:], hash)
+	s.sessionsMu.Lock()
+	if s.handshaking == nil {
+		s.handshaking = make(map[[16]byte]int)
+	}
+	s.handshaking[key]++
+	s.sessionsMu.Unlock()
+	return func() {
+		s.sessionsMu.Lock()
+		if s.handshaking[key]--; s.handshaking[key] <= 0 {
+			delete(s.handshaking, key)
+		}
+		s.sessionsMu.Unlock()
+	}
+}
+
+// ReleaseOrphanedRows takes offline every client storage still has online that no
+// session of this process holds. A handover successor runs it once the sessions it
+// inherited are registered, before it accepts a login: its storage kept the
+// predecessor's online flags (storage.Config.KeepOnline), and so every row a failed
+// Disconnect or an unexported session left behind. Without it those rows outlived
+// every handover, inflated the user count, and refused their users as already
+// connected until a cold restart.
+func (s *ServerRuntime) ReleaseOrphanedRows() {
+	start := time.Now()
+	released, err := s.Storage.ReleaseOrphans(s.hashHeldLocally)
+	took := time.Since(start).Round(time.Millisecond)
+	if err != nil {
+		logging.Warnf("handoff: releasing orphaned storage rows failed after %d in %s: %v", len(released), took, err)
+		return
+	}
+	if len(released) > 0 {
+		logging.Infof("handoff: released %d orphaned storage row(s) no session holds in %s", len(released), took)
+	}
+}
+
 // replaceSameIPSession closes and releases the live session for hash when it was opened
 // from this connection's IP, so the caller's login can take its place. A session from any
 // other address is left alone. Two connections without a known address never match.
@@ -3446,8 +3524,8 @@ const staleSessionProbeTick = 20 * time.Millisecond
 // its release frees the hash for this login. A session whose path is dead entirely
 // sends no reset and stays until TCP keepalive or the idle timeout reaps it.
 //
-// The caller re-checks storage afterwards. A hash with no local session behind it —
-// a stale row in a shared database — is not probed and stays refused.
+// The caller re-checks storage afterwards. A hash with no local session behind it is
+// not probed: the caller releases that row as orphaned.
 func (c *tcpClient) probeStaleSession(hash []byte) {
 	old := c.server.sessionByHash(hash)
 	if old == nil || old == c {
