@@ -35,6 +35,12 @@ type ServerConfig struct {
 	// Ed3k is the ed3k:node link of the server's ed3k index node, sent as ST_ED3K
 	// (TagEd3k, 0xe3). Empty omits the tag.
 	Ed3k string
+	// UDPFlags is the server's UDP flag word, sent as ST_UDPFLAGS (TagServerUDPFlags).
+	// Zero omits the tag.
+	UDPFlags uint32
+	// NatToken is this session's NAT-T token, sent as TagNatToken with TagNatProof.
+	// Empty omits both.
+	NatToken []byte
 }
 
 // MetaAPIAdvert is what OP_SERVERIDENT tells a client about the Meta API.
@@ -445,6 +451,15 @@ func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
 	// The ed3k index node (spec docs/ed2k-tags.md §2). Only when ed3k is on.
 	if conf.Ed3k != "" {
 		tags = append(tags, Tag{Type: TypeString, Code: TagEd3k, Data: conf.Ed3k})
+	}
+	if conf.UDPFlags != 0 {
+		tags = append(tags, Tag{Type: TypeUint32, Code: TagServerUDPFlags, Data: conf.UDPFlags})
+	}
+	// Per session, and only for a session that may send the proof 0x9F.
+	if len(conf.NatToken) == 16 {
+		tags = append(tags,
+			Tag{Type: TypeHash, Code: TagNatToken, Data: conf.NatToken},
+			Tag{Type: TypeUint32, Code: TagNatProof, Data: natProofVersion})
 	}
 	// Per-session reflection tags, appended last so the packet a legacy session
 	// receives stays byte-identical to the pre-reflection server. Both ride the same

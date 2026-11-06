@@ -790,7 +790,7 @@ type tcpClient struct {
 	natWakeCapable bool
 	// holePunchExt is set at login when the foreign callback is on and the client sent
 	// SrvCapHolePunchExt (0x100000): it bursts UDP OpNatKeepalive after a TCP 0x37, so
-	// it may be a foreign callback target. Under infoMu; in the padding too.
+	// a foreign requester of it gets an 0xa7. Under infoMu; in the padding too.
 	holePunchExt bool
 	// ed3kID is the ed3k node ID the client sent as CT_ED3K at login, or nil. Read
 	// and written under infoMu.
@@ -1488,6 +1488,8 @@ func (c *tcpClient) handShake() {
 	// Indexed by user hash so a PR_NAT keepalive from this client can keep its session
 	// alive. Removed in run()'s defer.
 	c.server.registerSession(info.Hash, c)
+	// Before the OP_SERVERIDENT below, which carries it.
+	c.server.issueNatToken(c)
 
 	c.sendServerMessage(c.server.tcp().MessageLogin)
 	c.sendServerMessage("server version " + LoginVersionStr)
@@ -2186,6 +2188,8 @@ func (c *tcpClient) sendServerIdent() {
 		ClientIPv6Status: v6Status,
 		MetaAPI:          cfg.MetaAPI,
 		Ed3k:             cfg.Ed3k,
+		UDPFlags:         c.server.udp().UDPFlags,
+		NatToken:         c.server.natCallback.token(c),
 	})
 	if err != nil {
 		logging.Warnf("tcp server ident not sent remote=%s err=%v", c.remoteHost, err)
@@ -3604,6 +3608,7 @@ func (c *tcpClient) completeDualStackHandover() bool {
 // reach it; see releaseOnce.
 func (c *tcpClient) releaseSession() {
 	c.releaseOnce.Do(func() {
+		c.server.natCallback.dropSession(c)
 		if c.handedOff.Load() {
 			// The successor serves the session on its own copy of the socket; closing
 			// this one sends the client nothing.

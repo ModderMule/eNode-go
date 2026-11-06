@@ -3,7 +3,10 @@ package ed2k
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
+	"fmt"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 	"unsafe"
@@ -463,6 +466,9 @@ type foreignRig struct {
 	r *net.UDPConn
 	// timers holds the armed fallback timers; fire runs them.
 	timers []func()
+	// resends holds the armed 0xa7 resends with their delays.
+	resends   []time.Duration
+	resendFns []func()
 }
 
 // fire runs and drops the armed fallback timers, as if 3 s had passed.
@@ -499,6 +505,10 @@ func newForeignRig(t *testing.T, tcpFlags, udpFlags uint32) *foreignRig {
 		}
 		f.timers = append(f.timers, fn)
 	}
+	rt.natCallback.resendFunc = func(d time.Duration, fn func()) {
+		f.resends = append(f.resends, d)
+		f.resendFns = append(f.resendFns, fn)
+	}
 	return f
 }
 
@@ -524,6 +534,25 @@ func (f *foreignRig) keepalive(conn *net.UDPConn, hash []byte, plain bool) {
 		data = encryptClientToServer(payload, natCallbackKey(net.IPv4(127, 0, 0, 1)))
 	}
 	f.handler(data, conn.LocalAddr().(*net.UDPAddr), f.server)
+}
+
+// proof sends the proof form of OpNatKeepalive for T from remote, plain, with T's
+// token and counter; a wrong mac when !good.
+func (f *foreignRig) proof(remote *net.UDPAddr, counter uint32, good bool) {
+	var token [16]byte
+	f.rt.natCallback.mu.Lock()
+	if st := f.rt.natCallback.sessions[f.b]; st != nil {
+		token = st.token
+	}
+	f.rt.natCallback.mu.Unlock()
+	mac := natProofMAC(token, f.b.info.Hash, counter)
+	if !good {
+		mac[0] ^= 0xff
+	}
+	payload := append([]byte{PrED2K, OpNatKeepalive}, f.b.info.Hash...)
+	payload = binary.LittleEndian.AppendUint32(payload, counter)
+	payload = append(payload, mac...)
+	f.handler(payload, remote, f.server)
 }
 
 func (f *foreignRig) rAddr() *net.UDPAddr { return f.r.LocalAddr().(*net.UDPAddr) }
@@ -571,24 +600,34 @@ func TestForeignCallbackWakesTarget(t *testing.T) {
 	}
 }
 
-// With the 9th byte the crypt rule applies: a mismatch sends no 0x37, a match puts
-// the requester's bits in it. Without it the 0x37 says 0.
+// The crypt rule (ed2k-server 0.9.87). A target with the extension is dialled by the
+// requester, which has its hash: refused only when one side requires the layer and
+// the other does not support it. A Lugdunum-only target dials with no hash: refused
+// when either side requires it. An absent 9th byte counts as 0. The 0x37 carries the
+// requester's bits as sent.
 func TestForeignCallbackCryptRule(t *testing.T) {
 	cases := []struct {
 		name        string
+		extension   bool
 		targetCrypt byte
 		extra       []byte
 		wantWake    bool
 		wantFlags   byte
 	}{
-		{"target requires, requester none", 0x07, []byte{0x00}, false, 0},
-		{"requester requires, target none", 0x00, []byte{0x05}, false, 0},
-		{"both support", 0x03, []byte{0x01}, true, 0x01},
-		{"target requires, byte absent", 0x07, nil, true, 0},
+		{"ext: target requires, requester none", true, 0x07, []byte{0x00}, false, 0},
+		{"ext: requester requires, target none", true, 0x00, []byte{0x07}, false, 0},
+		{"ext: target requires, byte absent", true, 0x07, nil, false, 0},
+		{"ext: both support", true, 0x03, []byte{0x01}, true, 0x01},
+		{"ext: target requires, requester supports", true, 0x07, []byte{0x01}, true, 0x01},
+		{"ext: requester requires, target supports", true, 0x01, []byte{0x07}, true, 0x07},
+		{"lugdunum: both support", false, 0x03, []byte{0x03}, true, 0x03},
+		{"lugdunum: target requires", false, 0x07, []byte{0x03}, false, 0},
+		{"lugdunum: requester requires", false, 0x03, []byte{0x07}, false, 0},
 	}
 	for _, tc := range cases {
 		f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
 		f.b.info.CryptOptions = tc.targetCrypt
+		f.b.holePunchExt = tc.extension
 		f.foreign(f.rAddr(), 5, false, tc.extra...)
 		raw := f.bTCP.written()
 		t.Logf("input: %s, output: %d bytes TCP", tc.name, len(raw))
@@ -602,6 +641,48 @@ func TestForeignCallbackCryptRule(t *testing.T) {
 		if len(notice) != 11 || notice[10] != tc.wantFlags || binary.LittleEndian.Uint32(notice[6:10]) != 0 {
 			t.Fatalf("%s: 0x37 % x, want flags 0x%02x, ID 0, no hash", tc.name, notice, tc.wantFlags)
 		}
+	}
+}
+
+// A Lugdunum-only target (0x1000 without 0x100000) is woken with 0x37 and dials the
+// requester itself: no wait is armed and the requester never gets a 0xa7.
+func TestForeignCallbackLugdunumOnlyTarget(t *testing.T) {
+	f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
+	f.b.holePunchExt = false
+	loop, _ := IPv4ToUint32LE(net.IPv4(127, 0, 0, 1))
+	f.foreign(f.rAddr(), 5, false, 0x03)
+	notice := payloadOfOpcode(t, f.bTCP.written(), OpNatCallbackRequested)
+	f.keepalive(f.bUDP, f.b.info.Hash, false)
+	f.fire()
+	udp := readUDP(f.r)
+	t.Logf("input: foreign 0xa6 for a Lugdunum-only target, output: 0x37 % x, timers=%d, R got %d bytes", notice, len(f.timers), len(udp))
+	if want := BuildNatCallbackNotice(loop, uint16(f.rAddr().Port), 0, 0x03, nil); !bytes.Equal(notice, want) {
+		t.Fatalf("0x37 % x, want % x", notice, want)
+	}
+	if udp != nil {
+		t.Fatalf("R got % x from a Lugdunum-only target", udp)
+	}
+}
+
+// A target that sent its own 0xa6 within the window is woken by UDP 0xa7 at that
+// address instead of TCP 0x37, as Lugdunum's same-server path does.
+func TestForeignCallbackWakeOverUDP(t *testing.T) {
+	f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
+	loop, _ := IPv4ToUint32LE(net.IPv4(127, 0, 0, 1))
+	f.request(f.bUDP, 99, 5, false)
+	f.foreign(f.rAddr(), 5, false, 0x01)
+	raw := readUDP(f.bUDP)
+	if raw == nil {
+		t.Fatal("T got no UDP 0xa7 wake")
+	}
+	pt := decryptServerReply(t, raw, natCallbackKey(net.IPv4(127, 0, 0, 1)))
+	t.Logf("input: T sent 0xa6 just before, output: T gets UDP % x, TCP %d bytes", pt, len(f.bTCP.written()))
+	want := append([]byte{PrED2K, OpNatCallbackRequestedUDP}, BuildNatCallbackNotice(loop, uint16(f.rAddr().Port), 0, 0x01, nil)...)
+	if !bytes.Equal(pt, want) {
+		t.Fatalf("0xa7 wake % x, want % x", pt, want)
+	}
+	if natPacketCount(f.bTCP.written(), OpNatCallbackRequested) != 0 {
+		t.Fatal("T also got a TCP 0x37")
 	}
 }
 
@@ -628,7 +709,6 @@ func TestForeignCallbackRefusals(t *testing.T) {
 		{"foreign callback off", FlagNatCallback, 0, false, false, true, true, 5},
 		{"lugdunum callback off", 0, FlagForeignCallback, false, false, true, true, 5},
 		{"requester connected here", FlagNatCallback, FlagForeignCallback, false, true, true, true, 5},
-		{"target without 0x100000", FlagNatCallback, FlagForeignCallback, false, false, true, false, 5},
 		{"target without 0x1000", FlagNatCallback, FlagForeignCallback, false, false, false, true, 5},
 		{"unknown target", FlagNatCallback, FlagForeignCallback, false, false, true, true, 7},
 	}
@@ -868,26 +948,242 @@ func TestForeignCallbackFallback(t *testing.T) {
 	}
 }
 
+// What a 0x9F must be to count: from the session's own address (unless it proves the
+// token), for a known hash, and plain only until an obfuscated one was read.
 func TestNatKeepaliveRefusals(t *testing.T) {
 	f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
 	f.foreign(f.rAddr(), 5, false)
 
-	f.keepalive(f.bUDP, f.b.info.Hash, true)
-	plain := readUDP(f.r)
 	f.keepalive(f.bUDP, bytes.Repeat([]byte{0x77}, 16), false)
 	wrongHash := readUDP(f.r)
 	f.b.peerIP = net.IPv4(10, 0, 0, 1)
 	f.keepalive(f.bUDP, f.b.info.Hash, false)
+	f.keepalive(f.bUDP, f.b.info.Hash, true)
 	wrongIP := readUDP(f.r)
 	f.b.peerIP = net.IPv4(127, 0, 0, 1)
-	t.Logf("input: plain / unknown hash / wrong IP keepalive, output: R got %d / %d / %d bytes", len(plain), len(wrongHash), len(wrongIP))
-	if plain != nil || wrongHash != nil || wrongIP != nil {
+	f.proof(f.bUDP.LocalAddr().(*net.UDPAddr), 1, false)
+	noToken := readUDP(f.r)
+	t.Logf("input: unknown hash / wrong IP / proof without a token, output: R got %d / %d / %d bytes", len(wrongHash), len(wrongIP), len(noToken))
+	if wrongHash != nil || wrongIP != nil || noToken != nil {
 		t.Fatal("a bad keepalive reached R")
 	}
 	f.keepalive(f.bUDP, f.b.info.Hash, false)
 	if readUDP(f.r) == nil {
 		t.Fatal("bad keepalives consumed the pending entry")
 	}
+
+	// After an obfuscated one, plain ones without a proof are ignored.
+	f.foreign(f.rAddr(), 5, false)
+	f.keepalive(f.bUDP, f.b.info.Hash, true)
+	plainAfter := readUDP(f.r)
+	t.Logf("input: plain 0x9F after an obfuscated one, output: R got %d bytes", len(plainAfter))
+	if plainAfter != nil {
+		t.Fatal("plain 0x9F accepted after an obfuscated one")
+	}
+}
+
+// A plain 0x9F from the session's own address counts while the session has sent no
+// obfuscated one: eMuleQt sends plain when it holds no key from this login.
+func TestNatKeepalivePlainFromSession(t *testing.T) {
+	f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
+	loop, _ := IPv4ToUint32LE(net.IPv4(127, 0, 0, 1))
+	tPort := uint16(f.bUDP.LocalAddr().(*net.UDPAddr).Port)
+	f.foreign(f.rAddr(), 5, false)
+	f.keepalive(f.bUDP, f.b.info.Hash, true)
+	raw := readUDP(f.r)
+	if raw == nil {
+		t.Fatal("R got no 0xa7 after a plain keepalive")
+	}
+	pt := decryptServerReply(t, raw, natCallbackKey(net.IPv4(127, 0, 0, 1)))
+	t.Logf("input: plain 0x9F from the session, output: R gets % x", pt)
+	want := append([]byte{PrED2K, OpNatCallbackRequestedUDP}, foreignA7(loop, tPort, 5, 0x03, f.b.info.Hash)...)
+	if !bytes.Equal(pt, want) {
+		t.Fatalf("0xa7 % x, want % x", pt, want)
+	}
+}
+
+// The proof form (ed2k-server 0.9.88): believed from any address with the right mac
+// and a rising counter, also plain after obfuscated ones. The 0xa7, and the fallback
+// later, carry the proven address. A replayed counter or a wrong mac is ignored, and
+// the retired <hash><token> form counts as the hash alone.
+func TestNatKeepaliveProof(t *testing.T) {
+	f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
+	var token [16]byte
+	for i := range token {
+		token[i] = byte(0xc0 + i)
+	}
+	f.rt.natCallback.setToken(f.b, token)
+	elsewhere := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 48042}
+	other, _ := IPv4ToUint32LE(elsewhere.IP)
+	read := func() []byte {
+		raw := readUDP(f.r)
+		if raw == nil {
+			return nil
+		}
+		return decryptServerReply(t, raw, natCallbackKey(net.IPv4(127, 0, 0, 1)))
+	}
+	want := append([]byte{PrED2K, OpNatCallbackRequestedUDP}, foreignA7(other, 48042, 5, 0x03, f.b.info.Hash)...)
+
+	// Obfuscated first, then a plain proof from another address.
+	f.keepalive(f.bUDP, f.b.info.Hash, false)
+	f.foreign(f.rAddr(), 5, false)
+	f.proof(elsewhere, 1, true)
+	got := read()
+	t.Logf("input: plain proof #1 from %s after an obfuscated 0x9F, output: R gets % x", elsewhere, got)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("0xa7 % x, want % x", got, want)
+	}
+
+	f.foreign(f.rAddr(), 5, false)
+	f.proof(elsewhere, 1, true)
+	replay := read()
+	f.proof(elsewhere, 2, false)
+	badMac := read()
+	tokenForm := append([]byte{PrED2K, OpNatKeepalive}, f.b.info.Hash...)
+	tokenForm = append(tokenForm, token[:]...)
+	f.handler(tokenForm, elsewhere, f.server)
+	retired := read()
+	t.Logf("input: replayed #1 / wrong mac #2 / 32-byte token form, output: R got %d / %d / %d bytes", len(replay), len(badMac), len(retired))
+	if replay != nil || badMac != nil || retired != nil {
+		t.Fatal("a bad proof reached R")
+	}
+
+	// The fallback hands out the proven address too.
+	f.fire()
+	got = read()
+	t.Logf("input: no fresh 0x9F, fallback, output: R gets % x", got)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("fallback 0xa7 % x, want % x", got, want)
+	}
+}
+
+// The vector posted in andrey23127/ed2k-server#40 for client authors.
+func TestNatProofMACVector(t *testing.T) {
+	var token [16]byte
+	hash := make([]byte, 16)
+	for i := range token {
+		token[i] = byte(i)
+		hash[i] = byte(0x10 + i)
+	}
+	got := natProofMAC(token, hash, 1)
+	t.Logf("input: token %x hash %x counter 1, output: mac %x", token, hash, got)
+	if want := "57f631c901f652e692307db3ea25be83"; hex.EncodeToString(got) != want {
+		t.Fatalf("mac %x, want %s", got, want)
+	}
+}
+
+// The 0xa7 is resent at +1.2 s and +3 s, byte for byte.
+func TestForeignCallbackResends(t *testing.T) {
+	f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
+	f.foreign(f.rAddr(), 5, false)
+	f.keepalive(f.bUDP, f.b.info.Hash, false)
+	first := readUDP(f.r)
+	for _, fn := range f.resendFns {
+		fn()
+	}
+	second, third := readUDP(f.r), readUDP(f.r)
+	key := natCallbackKey(net.IPv4(127, 0, 0, 1))
+	t.Logf("input: one 0xa7, output: resends at %v, copies %d/%d/%d bytes", f.resends, len(first), len(second), len(third))
+	if len(f.resends) != 2 || f.resends[0] != 1200*time.Millisecond || f.resends[1] != 3*time.Second {
+		t.Fatalf("resends at %v, want [1.2s 3s]", f.resends)
+	}
+	if first == nil || second == nil || third == nil {
+		t.Fatal("a copy is missing")
+	}
+	a := decryptServerReply(t, first, key)
+	if !bytes.Equal(a, decryptServerReply(t, second, key)) || !bytes.Equal(a, decryptServerReply(t, third, key)) {
+		t.Fatal("resends differ from the first 0xa7")
+	}
+}
+
+// A 0x9F over IPv6 counts from the session's own IPv6: it marks the session as one
+// that obfuscates, but hands out no endpoint, since 0xa7 carries IPv4.
+func TestNatKeepaliveIPv6(t *testing.T) {
+	f := newForeignRig(t, FlagNatCallback, FlagForeignCallback)
+	f.b.peerIP = net.ParseIP("2001:db8::1")
+	send := func(ip string) {
+		remote := &net.UDPAddr{IP: net.ParseIP(ip), Port: 4672}
+		payload := append([]byte{PrED2K, OpNatKeepalive}, f.b.info.Hash...)
+		f.handler(encryptClientToServer(payload, natCallbackKey(remote.IP)), remote, f.server)
+	}
+	obfuscated := func() bool {
+		f.rt.natCallback.mu.Lock()
+		defer f.rt.natCallback.mu.Unlock()
+		st := f.rt.natCallback.sessions[f.b]
+		return st != nil && st.obfuscated
+	}
+	f.foreign(f.rAddr(), 5, false)
+	send("2001:db8::2")
+	other := obfuscated()
+	send("2001:db8::1")
+	own := obfuscated()
+	udp := readUDP(f.r)
+	t.Logf("input: v6 0x9F from another v6 / the session's v6, output: accepted %t / %t, R got %d bytes", other, own, len(udp))
+	if other || !own {
+		t.Fatalf("accepted from other=%t own=%t, want false/true", other, own)
+	}
+	if udp != nil {
+		t.Fatalf("R got % x from a v6 keepalive", udp)
+	}
+}
+
+// A session with 0x1000 and 0x100000 gets a fresh token at login, in OP_SERVERIDENT
+// with ST_NATT_PROOF; others get neither. ST_UDPFLAGS carries 0x100000.
+func TestLoginNatToken(t *testing.T) {
+	const on = FlagNatCallback | FlagTcpObfusc
+	for _, tc := range []struct {
+		name  string
+		login uint32
+		want  bool
+	}{
+		{"extension", SrvCapNatTraversal | SrvCapHolePunchExt | FlagSupportCrypt, true},
+		{"lugdunum only", SrvCapNatTraversal | FlagSupportCrypt, false},
+	} {
+		c, _ := natLogin(t, on, tc.login, "203.0.113.9")
+		token := c.server.natCallback.token(c)
+		tags := parseServerIdentTags(t, NewBufferFromBytes(identOf(t, c)))
+		t.Logf("input: %s login 0x%x, output: token %x, tags 0xac=%x 0xa9=%v 0x92=%v", tc.name, tc.login, token, tags["0xac"], tags["0xa9"], tags["0x92"])
+		if (token != nil) != tc.want {
+			t.Fatalf("%s: token %x, want issued=%t", tc.name, token, tc.want)
+		}
+		if got, _ := tags["0xac"].([]byte); tc.want && !bytes.Equal(got, token) || !tc.want && tags["0xac"] != nil {
+			t.Fatalf("%s: ST_NATT_TOKEN %x, want %x", tc.name, tags["0xac"], token)
+		}
+		if tc.want && tagUint(tags["0xa9"]) != uint64(natProofVersion) || !tc.want && tags["0xa9"] != nil {
+			t.Fatalf("%s: ST_NATT_PROOF %v", tc.name, tags["0xa9"])
+		}
+		if tagUint(tags["0x92"])&uint64(FlagForeignCallback) == 0 {
+			t.Fatalf("%s: ST_UDPFLAGS %v lacks 0x100000", tc.name, tags["0x92"])
+		}
+		c.releaseSession()
+		if c.server.natCallback.token(c) != nil {
+			t.Fatalf("%s: token kept after release", tc.name)
+		}
+	}
+}
+
+// tagUint reads a decoded integer tag of any width.
+func tagUint(v any) uint64 {
+	n, _ := strconv.ParseUint(fmt.Sprint(v), 10, 64)
+	return n
+}
+
+// identOf is the OP_SERVERIDENT a natLogin session was sent, framed.
+func identOf(t *testing.T, c *tcpClient) []byte {
+	t.Helper()
+	raw := c.conn.(*reflectConn).written()
+	for off := 0; off+6 <= len(raw); {
+		size := int(binary.LittleEndian.Uint32(raw[off+1 : off+5]))
+		if size < 1 || off+5+size > len(raw) {
+			break
+		}
+		if raw[off+5] == OpServerIdent {
+			return raw[off : off+5+size]
+		}
+		off += 5 + size
+	}
+	t.Fatal("no OP_SERVERIDENT sent")
+	return nil
 }
 
 // Pending entries live natCallbackWindow (19 s); a target holds at most 4, the oldest

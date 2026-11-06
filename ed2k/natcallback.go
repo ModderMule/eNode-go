@@ -1,6 +1,9 @@
 package ed2k
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"net"
 	"strconv"
@@ -21,9 +24,17 @@ import (
 // server relays nothing else.
 //
 // Foreign callback (UDP flag 0x100000): a requester not logged in here sends 0xa6
-// <B's ID><0>[<crypt>]. B is woken with TCP 0x37 (ID 0, no hash) and bursts UDP
-// OpNatKeepalive; its source port goes to the requester in UDP 0xa7, always with B's
-// hash. No keepalive within 3 s: the 0xa7 carries B's last known UDP port instead.
+// <B's ID><0>[<crypt>]. B is woken with 0x37 (ID 0, no hash; UDP 0xa7 instead when B
+// sent its own 0xa6 in the window). A B with the extension bursts UDP OpNatKeepalive;
+// its source goes to the requester in UDP 0xa7, always with B's hash, resent at +1.2 s
+// and +3 s. No keepalive within 3 s: the 0xa7 carries B's last known UDP port instead.
+// A Lugdunum-only B dials the requester itself; the requester gets nothing.
+//
+// NAT-T token (ed2k-server 0.9.88): a session with the extension gets 16 random bytes
+// in OP_SERVERIDENT. A 0x9F carrying a proof of it (HMAC, rising counter) is believed
+// from any address, so a carrier NAT that maps UDP elsewhere still works. Without a
+// proof a 0x9F counts only from the session's own address, and plain only until an
+// obfuscated one was read.
 //
 // Memory: an idle session pays nothing. The capability is one bool in existing
 // padding of tcpClient, and the 19 s window lives in natCallbackState, which only
@@ -53,9 +64,25 @@ const (
 	// natForeignFallback is how long a requester waits for the target's keepalive
 	// before the 0xa7 goes out with the target's last known UDP port.
 	natForeignFallback = 3 * time.Second
-	// natKeepaliveTTL is how long a session's last obfuscated keepalive endpoint is
-	// kept for that fallback.
+	// natKeepaliveTTL is how long a session's last keepalive endpoint is kept for
+	// that fallback.
 	natKeepaliveTTL = 10 * time.Minute
+	// natProofLen is the payload of the proof form of OpNatKeepalive:
+	// <user hash 16><counter u32 LE><mac 16>.
+	natProofLen = 36
+	// natProofVersion is the value of TagNatProof.
+	natProofVersion uint32 = 1
+)
+
+// natForeignResends are the extra copies of a foreign 0xa7 after the first, as
+// ed2k-server (and its 0x61): the requester ignores copies after the first.
+var natForeignResends = [...]time.Duration{1200 * time.Millisecond, 3 * time.Second}
+
+// CryptOptions bits: CT_SERVER_FLAGS >> 9.
+const (
+	natCryptSupport byte = 0x01
+	natCryptRequest byte = 0x02
+	natCryptRequire byte = 0x04
 )
 
 // natCallbackNoticeFlagHash is OR-ed into the notice's crypt byte when the
@@ -81,11 +108,17 @@ type natCallbackState struct {
 	// foreignNamed is address key -> target LowID -> last request, for the
 	// distinct-target cap.
 	foreignNamed map[string]map[uint32]time.Time
-	// keepalives is each LowID's last obfuscated OpNatKeepalive source.
+	// keepalives is each LowID's last accepted OpNatKeepalive source.
 	keepalives   map[uint32]natCallbackRecent
 	foreignSweep time.Time
-	// afterFunc arms the fallback timer; nil is time.AfterFunc. Tests replace it.
-	afterFunc func(time.Duration, func())
+	// sessions is the 0x9F state of the sessions that have one: those given a token
+	// at login, or that sent an obfuscated 0x9F. Kept here rather than on tcpClient
+	// so an idle session pays nothing; dropped when the session is released.
+	sessions map[*tcpClient]*natSessionState
+	// afterFunc arms the fallback timer and resendFunc the 0xa7 resends; nil is
+	// time.AfterFunc. Tests replace them.
+	afterFunc  func(time.Duration, func())
+	resendFunc func(time.Duration, func())
 }
 
 // natForeignWait is a target's pending requesters. gen tells the fallback timer
@@ -96,23 +129,35 @@ type natForeignWait struct {
 }
 
 // natForeignPending is a foreign requester: where its 0xa6 came from, its crypt
-// bits (cryptKnown when the 9th byte was sent) and the socket it reached, which
-// the 0xa7 leaves from.
+// bits (the 9th byte; absent means 0) and the socket it reached, which the 0xa7
+// leaves from.
 type natForeignPending struct {
-	ipv4       uint32
-	port       uint16
-	crypt      byte
-	cryptKnown bool
-	at         time.Time
-	conn       UDPReplyConn
+	ipv4  uint32
+	port  uint16
+	crypt byte
+	at    time.Time
+	conn  UDPReplyConn
 }
 
 // natCallbackRecent is a client that sent an accepted 0xa6: the address its
-// datagram came from, which is where a UDP 0xa7 for it goes.
+// datagram came from, which is where a UDP 0xa7 for it goes. For a keepalive it is
+// the 0x9F's source; owner is the session that sent it, and proven marks an address
+// other than the session's that a token proof vouched for.
 type natCallbackRecent struct {
-	ipv4 uint32
-	port uint16
-	at   time.Time
+	ipv4   uint32
+	port   uint16
+	at     time.Time
+	owner  *tcpClient
+	proven bool
+}
+
+// natSessionState is a session's 0x9F state: its NAT-T token (hasToken), the last
+// proof counter accepted, and whether an obfuscated 0x9F was read this login.
+type natSessionState struct {
+	token      [16]byte
+	hasToken   bool
+	counter    uint32
+	obfuscated bool
 }
 
 // BuildNatCallbackNotice builds the notice body shared by UDP 0xa7 and TCP 0x37:
@@ -259,10 +304,12 @@ func (s *ServerRuntime) foreignCallbackEnabled() bool {
 
 // udpForeignCallbackRequest handles 0xa6 <target ID 4><0 4>[<crypt 1>] from a client
 // not logged in here. The obfuscation key is derived per source IP, so a decrypted
-// request proves the requester's address. The target is woken with TCP 0x37
-// (requester ID 0, no hash); the requester gets UDP 0xa7 once the target's
-// OpNatKeepalive arrives, or after natForeignFallback with the target's last known
-// port. Every refusal is silent. IP-filtered sources never get here (UDPHandler).
+// request proves the requester's address. The target is woken with 0x37 (requester
+// ID 0, no hash), or UDP 0xa7 when it sent its own 0xa6 in the window. A target with
+// the extension then gets the requester UDP 0xa7 once its OpNatKeepalive arrives, or
+// after natForeignFallback with its last known port. A Lugdunum-only target dials the
+// requester itself, and the requester gets nothing. Every refusal is silent.
+// IP-filtered sources never get here (UDPHandler).
 func (s *ServerRuntime) udpForeignCallbackRequest(b *Buffer, remote *net.UDPAddr, conn UDPReplyConn, srcIPv4, targetID uint32, module string) {
 	if !s.foreignCallbackEnabled() {
 		return
@@ -272,11 +319,11 @@ func (s *ServerRuntime) udpForeignCallbackRequest(b *Buffer, remote *net.UDPAddr
 		logging.Debugf("foreign callback from a connected address ignored remote=%s", remote)
 		return
 	}
+	// The requester's crypt bits; absent means 0, as on ed2k-server.
 	var crypt byte
-	cryptKnown := false
 	if b.Remaining() > 0 {
 		if c, err := b.GetUInt8(); err == nil {
-			crypt, cryptKnown = c&0x07, true
+			crypt = c & 0x07
 		}
 	}
 	key := addressKey(remote.IP)
@@ -288,20 +335,19 @@ func (s *ServerRuntime) udpForeignCallbackRequest(b *Buffer, remote *net.UDPAddr
 		return
 	}
 	target, ok := s.natCallbackPeer(targetID)
-	if !ok || !target.natt || !target.holePunch {
+	if !ok || !target.natt {
 		logging.Debugf("foreign callback target not capable remote=%s target=%d", remote, targetID)
 		return
 	}
-	// Same rule as the same-server path when the requester sent its bits; without
-	// them the 0x37 says 0.
-	var wakeFlags byte
-	if cryptKnown {
-		flags, _, ok := NatCallbackCrypt(crypt, target.crypt)
-		if !ok {
-			logging.Debugf("foreign callback crypt mismatch remote=%s target=%d", remote, targetID)
-			return
-		}
-		wakeFlags = flags
+	// With the extension the requester dials, obfuscating with the target's hash from
+	// the 0xa7, so "requires" on either side is fine when the other side supports the
+	// layer. A Lugdunum-only target dials the requester with no hash to obfuscate
+	// with: a required layer on either side stops it.
+	if target.holePunch && !natCryptCompatible(crypt, target.crypt) ||
+		!target.holePunch && (crypt|target.crypt)&natCryptRequire != 0 {
+		logging.Debugf("foreign callback crypt mismatch remote=%s target=%d crypt=%d target_crypt=%d",
+			remote, targetID, crypt, target.crypt)
+		return
 	}
 	now := time.Now()
 	// After the target check, so made-up IDs cannot fill either.
@@ -316,41 +362,50 @@ func (s *ServerRuntime) udpForeignCallbackRequest(b *Buffer, remote *net.UDPAddr
 		return
 	}
 	port := uint16(remote.Port)
-	logging.Debugf("foreign callback accepted remote=%s target=%d crypt=%d known=%t", remote, targetID, crypt, cryptKnown)
-	gen, first := s.natCallback.addForeign(targetID, natForeignPending{
-		ipv4: srcIPv4, port: port, crypt: crypt, cryptKnown: cryptKnown, at: now, conn: conn,
-	})
-	if first {
-		s.natCallback.after(natForeignFallback, func() { s.foreignFallback(targetID, gen, module) })
+	logging.Debugf("foreign callback accepted remote=%s target=%d crypt=%d extension=%t", remote, targetID, crypt, target.holePunch)
+	// Only a target with the extension answers, so only its requesters wait.
+	if target.holePunch {
+		gen, first := s.natCallback.addForeign(targetID, natForeignPending{
+			ipv4: srcIPv4, port: port, crypt: crypt, at: now, conn: conn,
+		})
+		if first {
+			s.natCallback.after(natForeignFallback, func() { s.foreignFallback(targetID, gen, module) })
+		}
+	}
+	// The wake carries the requester's bits as it sent them, ID 0 and no hash.
+	if recent, ok := s.natCallback.recentFor(targetID, now); ok && recent.ipv4 == target.ipv4 {
+		notice := BuildNatCallbackNotice(srcIPv4, port, 0, crypt, nil)
+		s.sendNatCallbackUDP(conn, recent, notice, module)
+		logging.Debugf("foreign callback 0xa7 wake sent target=%d requester=%s flags=%d", targetID, remote, crypt)
+		return
 	}
 	if s.parking.Load() != nil {
 		return
 	}
-	packet, err := BuildNatCallbackRequestedPacket(srcIPv4, port, 0, wakeFlags, nil)
+	packet, err := BuildNatCallbackRequestedPacket(srcIPv4, port, 0, crypt, nil)
 	if err != nil {
 		return
 	}
 	if err := target.client.writePacket(packet); err == nil {
-		logging.Debugf("foreign callback 0x37 sent target=%d requester=%s flags=%d", targetID, remote, wakeFlags)
+		logging.Debugf("foreign callback 0x37 sent target=%d requester=%s flags=%d", targetID, remote, crypt)
 	}
 }
 
-// udpNatKeepalive handles OpNatKeepalive <user hash 16>, accepted only obfuscated and
-// from the IPv4 of the session logged in under that hash. Its source is the target's
-// UDP endpoint: every foreign requester waiting for that LowID gets UDP 0xa7 with it.
-// The endpoint is also kept for the 3 s fallback of later requests.
+// udpNatKeepalive handles OpNatKeepalive <user hash 16>[<counter 4><mac 16>] from the
+// session logged in under that hash (see checkKeepalive for what is believed). An
+// IPv4 source is the target's UDP endpoint: every foreign requester waiting for that
+// LowID gets UDP 0xa7 with it, and it is kept for the 3 s fallback of later requests.
+// An IPv6 one from the session's own IPv6 is accepted but has no endpoint to hand
+// out, since 0xa7 carries IPv4; such a session proves its IPv4 with a token 0x9F.
 func (s *ServerRuntime) udpNatKeepalive(b *Buffer, remote *net.UDPAddr, obfuscated bool, module string) {
-	if !obfuscated || !s.foreignCallbackEnabled() {
-		return
-	}
-	srcIPv4, ok := IPv4ToUint32LE(NormalizeIP(remote.IP))
-	if !ok || remote.Port <= 0 || remote.Port > 0xffff {
+	if !s.foreignCallbackEnabled() || remote.Port <= 0 || remote.Port > 0xffff {
 		return
 	}
 	hash := b.Get(16)
 	if len(hash) != 16 {
 		return
 	}
+	rest := b.Get(b.Remaining())
 	c := s.sessionByHash(hash)
 	if c == nil {
 		return
@@ -359,14 +414,45 @@ func (s *ServerRuntime) udpNatKeepalive(b *Buffer, remote *net.UDPAddr, obfuscat
 	id := c.info.ID
 	c.infoMu.RUnlock()
 	target, ok := s.natCallbackPeer(id)
-	if !ok || target.client != c || target.ipv4 != srcIPv4 {
-		logging.Debugf("nat keepalive not from the session remote=%s", remote)
+	if !ok || target.client != c {
+		return
+	}
+	ip := NormalizeIP(remote.IP)
+	srcIPv4, isV4 := IPv4ToUint32LE(ip)
+	sameIP := isV4 && srcIPv4 == target.ipv4 || !isV4 && target.sessionIP.Equal(ip)
+	accepted, proven, why := s.natCallback.checkKeepalive(c, hash, rest, obfuscated, sameIP)
+	if !accepted {
+		logging.Debugf("nat keepalive ignored remote=%s target=%d reason=%s", remote, id, why)
+		return
+	}
+	if !isV4 {
+		logging.Debugf("nat keepalive over IPv6 remote=%s target=%d", remote, id)
 		return
 	}
 	now := time.Now()
-	endpoint := natCallbackRecent{ipv4: srcIPv4, port: uint16(remote.Port), at: now}
+	endpoint := natCallbackRecent{ipv4: srcIPv4, port: uint16(remote.Port), at: now, owner: c, proven: proven}
 	s.natCallback.rememberKeepalive(id, endpoint)
 	s.sendForeignNotices(target, id, endpoint, s.natCallback.takeForeign(id, now), "keepalive", module)
+}
+
+// issueNatToken gives a session that may be a foreign callback target with the
+// extension a fresh NAT-T token, sent in its OP_SERVERIDENT. New on every login.
+func (s *ServerRuntime) issueNatToken(c *tcpClient) {
+	if !s.foreignCallbackEnabled() {
+		return
+	}
+	c.infoMu.RLock()
+	want := c.logged && c.hasLowID && c.nattCapable && c.holePunchExt
+	c.infoMu.RUnlock()
+	if !want {
+		return
+	}
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		logging.Warnf("nat token not issued remote=%s err=%v", c.remoteHost, err)
+		return
+	}
+	s.natCallback.setToken(c, token)
 }
 
 // foreignFallback runs natForeignFallback after a target's first pending request.
@@ -386,8 +472,10 @@ func (s *ServerRuntime) foreignFallback(targetID uint32, gen uint64, module stri
 	endpoint, ok := s.natCallback.recentFor(targetID, now)
 	if !ok || endpoint.ipv4 != target.ipv4 {
 		endpoint, ok = s.natCallback.keepaliveFor(targetID, now)
+		// From this session, at its own address or one its token proved.
+		ok = ok && endpoint.owner == target.client && (endpoint.ipv4 == target.ipv4 || endpoint.proven)
 	}
-	if !ok || endpoint.ipv4 != target.ipv4 {
+	if !ok {
 		logging.Debugf("foreign callback fallback without a target port target=%d requesters=%d", targetID, len(pending))
 		return
 	}
@@ -395,30 +483,41 @@ func (s *ServerRuntime) foreignFallback(targetID uint32, gen uint64, module stri
 }
 
 // sendForeignNotices sends each pending requester UDP 0xa7 with the target's
-// endpoint. The crypt byte is the target's bits. The target's hash always follows
-// (27 bytes, as ed2k-server 0.9.86): the requester dials and obfuscates its first
-// QUIC Initial with it. 0x80 keeps Lugdunum's meaning, "use the crypt layer": set
-// only when the requester sent its bits and both use the layer.
+// endpoint, and again after each natForeignResends delay. The crypt byte is the
+// target's bits. The target's hash always follows (27 bytes, as ed2k-server): the
+// requester dials and obfuscates its first QUIC Initial with it. 0x80 keeps
+// Lugdunum's meaning, "use the crypt layer": set only when both support the layer
+// and one asks for it.
 func (s *ServerRuntime) sendForeignNotices(target natCallbackPeerView, targetID uint32, endpoint natCallbackRecent, pending []natForeignPending, via, module string) {
+	type out struct {
+		p      natForeignPending
+		notice []byte
+	}
+	outs := make([]out, 0, len(pending))
 	for _, p := range pending {
-		flags := target.crypt & 0x07
-		useCrypt := false
-		if p.cryptKnown {
-			f, withHash, ok := NatCallbackCrypt(target.crypt, p.crypt)
-			if !ok {
-				continue
-			}
-			flags, useCrypt = f, withHash
+		flags, useCrypt, ok := NatCallbackCrypt(target.crypt, p.crypt)
+		if !ok {
+			continue
 		}
 		notice := BuildNatCallbackNotice(endpoint.ipv4, endpoint.port, targetID, flags, target.hash)
 		if !useCrypt {
 			notice[10] &^= natCallbackNoticeFlagHash
 		}
-		hash := notice[11:]
-		dst := natCallbackRecent{ipv4: p.ipv4, port: p.port}
-		s.sendNatCallbackUDP(p.conn, dst, notice, module)
-		logging.Debugf("foreign callback 0xa7 sent requester=%s:%d target=%d port=%d hash=%t crypt=%t via=%s",
-			v4FromUint32(p.ipv4), p.port, targetID, endpoint.port, len(hash) == 16, useCrypt, via)
+		outs = append(outs, out{p, notice})
+		logging.Debugf("foreign callback 0xa7 sent requester=%s:%d target=%d endpoint=%s:%d crypt=%t proven=%t via=%s",
+			v4FromUint32(p.ipv4), p.port, targetID, v4FromUint32(endpoint.ipv4), endpoint.port, useCrypt, endpoint.proven, via)
+	}
+	if len(outs) == 0 {
+		return
+	}
+	send := func() {
+		for _, o := range outs {
+			s.sendNatCallbackUDP(o.p.conn, natCallbackRecent{ipv4: o.p.ipv4, port: o.p.port}, o.notice, module)
+		}
+	}
+	send()
+	for _, d := range natForeignResends {
+		s.natCallback.afterResend(d, send)
 	}
 }
 
@@ -440,8 +539,10 @@ func (s *ServerRuntime) hasConnectionFrom(ip net.IP) bool {
 
 // natCallbackPeerView is what the callback reads from a session, copied under its lock.
 type natCallbackPeerView struct {
-	client    *tcpClient
-	ipv4      uint32
+	client *tcpClient
+	ipv4   uint32
+	// sessionIP is the address the session connected from (either family).
+	sessionIP net.IP
 	crypt     byte
 	natt      bool
 	holePunch bool
@@ -474,6 +575,7 @@ func (s *ServerRuntime) natCallbackPeer(id uint32) (natCallbackPeerView, bool) {
 	return natCallbackPeerView{
 		client:    c,
 		ipv4:      ipv4,
+		sessionIP: c.peerIP,
 		crypt:     c.info.CryptOptions,
 		natt:      c.nattCapable,
 		holePunch: c.holePunchExt,
@@ -664,6 +766,18 @@ func (n *natCallbackState) after(d time.Duration, f func()) {
 	af(d, f)
 }
 
+// afterResend arms a 0xa7 resend.
+func (n *natCallbackState) afterResend(d time.Duration, f func()) {
+	n.mu.Lock()
+	af := n.resendFunc
+	n.mu.Unlock()
+	if af == nil {
+		time.AfterFunc(d, f)
+		return
+	}
+	af(d, f)
+}
+
 // addForeign records a foreign requester for target. The same requester (address
 // and port) only refreshes its entry; past natForeignMaxPerTarget the oldest goes.
 // first reports that the target had none pending, and gen names that batch.
@@ -762,4 +876,100 @@ func liveForeign(list []natForeignPending, now time.Time) []natForeignPending {
 		}
 	}
 	return live
+}
+
+// setToken stores a session's NAT-T token; its proof counter starts again.
+func (n *natCallbackState) setToken(c *tcpClient, token [16]byte) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.sessions == nil {
+		n.sessions = map[*tcpClient]*natSessionState{}
+	}
+	n.sessions[c] = &natSessionState{token: token, hasToken: true}
+}
+
+// token returns a session's NAT-T token, or nil when it has none.
+func (n *natCallbackState) token(c *tcpClient) []byte {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	st := n.sessions[c]
+	if st == nil || !st.hasToken {
+		return nil
+	}
+	return append([]byte(nil), st.token[:]...)
+}
+
+// dropSession forgets a released session's 0x9F state.
+func (n *natCallbackState) dropSession(c *tcpClient) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	delete(n.sessions, c)
+}
+
+// checkKeepalive decides whether a 0x9F of session c is believed, as ed2k-server
+// 0.9.88 does. rest is what follows the user hash.
+//   - natProofLen bytes in all: the proof form. A right mac with a counter higher than
+//     the last accepted is believed from any address (proven when not the session's);
+//     a wrong mac or an old counter is no keepalive at all.
+//   - anything else, including the retired <hash><token> form, counts as the user hash
+//     alone: believed only from the session's own address.
+//   - once an obfuscated 0x9F was read this login, plain ones without a good proof are
+//     ignored: only the server key makes one, so a forged plain one cannot move the port.
+func (n *natCallbackState) checkKeepalive(c *tcpClient, hash, rest []byte, obfuscated, sameIP bool) (accepted, proven bool, why string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	st := n.sessions[c]
+	proofOK := false
+	var counter uint32
+	if 16+len(rest) == natProofLen {
+		if st == nil || !st.hasToken {
+			return false, false, "proof-without-token"
+		}
+		counter = binary.LittleEndian.Uint32(rest[0:4])
+		if !hmac.Equal(natProofMAC(st.token, hash, counter), rest[4:20]) {
+			return false, false, "proof-bad"
+		}
+		if counter <= st.counter {
+			return false, false, "proof-replay"
+		}
+		proofOK = true
+	}
+	if !obfuscated && !proofOK && st != nil && st.obfuscated {
+		return false, false, "plain-after-obfuscated"
+	}
+	if !sameIP && !proofOK {
+		return false, false, "wrong-address"
+	}
+	if st == nil {
+		if !obfuscated {
+			return true, false, ""
+		}
+		if n.sessions == nil {
+			n.sessions = map[*tcpClient]*natSessionState{}
+		}
+		st = &natSessionState{}
+		n.sessions[c] = st
+	}
+	if proofOK {
+		st.counter = counter
+	}
+	st.obfuscated = st.obfuscated || obfuscated
+	return true, proofOK && !sameIP, ""
+}
+
+// natProofMAC is the proof's mac: the first 16 bytes of HMAC-SHA256 keyed with the
+// token over <user hash 16><counter u32 LE>.
+func natProofMAC(token [16]byte, hash []byte, counter uint32) []byte {
+	m := hmac.New(sha256.New, token[:])
+	m.Write(hash)
+	var c [4]byte
+	binary.LittleEndian.PutUint32(c[:], counter)
+	m.Write(c[:])
+	return m.Sum(nil)[:16]
+}
+
+// natCryptCompatible reports whether two crypt settings can meet: a side that
+// requires the layer needs the other to support it.
+func natCryptCompatible(a, b byte) bool {
+	return !(a&natCryptRequire != 0 && b&natCryptSupport == 0 || b&natCryptRequire != 0 && a&natCryptSupport == 0)
 }

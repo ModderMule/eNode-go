@@ -130,9 +130,10 @@ const (
 	OpNatCallbackRequested    uint8 = 0x37
 )
 
-// OpNatKeepalive is UDP 0x9f client→server, obfuscated: <user hash 16>. ed2k-server
-// uses it as a NAT keepalive; a foreign callback target bursts it after a TCP 0x37 so
-// the server learns its UDP endpoint. 0x9f is free in the PR_ED2K UDP space
+// OpNatKeepalive is UDP 0x9f client→server: <user hash 16>, or the proof form
+// <user hash 16><counter u32 LE><mac 16> (natProofLen). ed2k-server uses it as a NAT
+// keepalive; a foreign callback target bursts it after a TCP 0x37 so the server learns
+// its UDP endpoint. 0x9f is free in the PR_ED2K UDP space
 // (0x9e OP_INVALID_LOWID, 0xa0 OP_SERVER_LIST_REQ).
 const OpNatKeepalive uint8 = 0x9f
 
@@ -295,6 +296,17 @@ const (
 	// being published as a v6 source. 0xAB is free across the ST_*, CT_* and OP_*
 	// namespaces in both surveyed C++ trees. See docs/ipv6-client-implementation-spec.md §3a.
 	TagIPv6Status uint8 = 0xab
+	// TagServerUDPFlags is eMule's ST_UDPFLAGS (srchybrid/Opcodes.h), the server's UDP
+	// flag word. ed2k-server sends it in OP_SERVERIDENT so a client learns 0x100000
+	// (FlagForeignCallback) at login; the same word as the status reply.
+	TagServerUDPFlags uint8 = 0x92
+	// TagNatToken is ed2k-server's ST_NATT_TOKEN (andrey23127/ed2k-server#40): 16
+	// random bytes per login, sent over the session's TCP only. A 0x9F that proves it
+	// (TagNatProof) is believed from any address.
+	TagNatToken uint8 = 0xac
+	// TagNatProof is ed2k-server's ST_NATT_PROOF, uint32 natProofVersion: the session
+	// may send the 36-byte proof form of OpNatKeepalive.
+	TagNatProof uint8 = 0xa9
 	// TagMetaAPI* are the enode.meta.v1 OP_SERVERIDENT discovery tags: where the
 	// client-facing Meta API (docs/meta-api.md) listens, which contract version it
 	// serves, and optionally the SPKI pin of its certificate. Values are the
@@ -480,7 +492,8 @@ const (
 	SrvCapNatWake uint32 = 0x200000
 	// SrvCapHolePunchExt is ed2k-server's hole-punch extension login bit
 	// (andrey23127/ed2k-server#39): after a TCP 0x37 the client bursts UDP
-	// OpNatKeepalive to the server. Required of a foreign callback target.
+	// OpNatKeepalive to the server. A foreign callback target with it gets the
+	// requester an 0xa7 and a NAT-T token at login; without it the target only dials.
 	SrvCapHolePunchExt uint32 = 0x100000
 )
 
