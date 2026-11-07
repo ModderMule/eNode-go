@@ -230,7 +230,8 @@ func (s *Server) handleCaps(w http.ResponseWriter, r *http.Request) {
 // bytes with no codec at all. Auth is the same as GetMetaFile's.
 func (s *Server) handleRawMetaFile(w http.ResponseWriter, r *http.Request) {
 	ip := ratelimit.ClientIP(r, s.cfg.TrustForwardedFor)
-	if _, err := s.svc.Authorize(r.Context(), r.Header.Get("Authorization"), ip); err != nil {
+	acct, err := s.svc.Authorize(r.Context(), r.Header.Get("Authorization"), ip)
+	if err != nil {
 		writeHTTPError(w, err)
 		return
 	}
@@ -239,7 +240,7 @@ func (s *Server) handleRawMetaFile(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, connect.NewError(connect.CodeInvalidArgument, "the hash must be 32 hex digits"))
 		return
 	}
-	mf, err := s.svc.fetcher.Get(r.Context(), hash, r.URL.Query().Get("id"))
+	mf, err := s.svc.fetcher.Get(r.Context(), hash, r.URL.Query().Get("id"), fetchClient(acct, ip))
 	if err != nil {
 		writeHTTPError(w, s.svc.toConnectError(err))
 		return

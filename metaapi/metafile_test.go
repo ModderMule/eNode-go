@@ -106,7 +106,7 @@ func TestFetcherServesAndCaches(t *testing.T) {
 	f := newTestFetcher(src)
 
 	for i := 0; i < 3; i++ {
-		mf, err := f.Get(context.Background(), hash[:], "cat-1")
+		mf, err := f.Get(context.Background(), hash[:], "cat-1", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -127,14 +127,14 @@ func TestFetcherRejectsSubstitutedFile(t *testing.T) {
 	src.files["cat-1"] = &metav1.MetaFile{Content: other}
 	f := newTestFetcher(src)
 
-	_, err := f.Get(context.Background(), hash[:], "cat-1")
+	_, err := f.Get(context.Background(), hash[:], "cat-1", "")
 	var fe *FetchError
 	t.Logf("input: a daemon answering with another torrent output: %v", err)
 	if !errors.As(err, &fe) || fe.Code != connect.CodeDataLoss || fe.MsgCode != CodeVerifyFailed {
 		t.Fatalf("want data_loss %s, got %v", CodeVerifyFailed, err)
 	}
 	// Remembered: a second ask does not reach the daemon.
-	_, _ = f.Get(context.Background(), hash[:], "cat-1")
+	_, _ = f.Get(context.Background(), hash[:], "cat-1", "")
 	if src.calls.Load() != 1 || f.Stats().VerifyFailed.Load() != 1 {
 		t.Fatalf("calls=%d verifyFailed=%d, want 1 1", src.calls.Load(), f.Stats().VerifyFailed.Load())
 	}
@@ -175,7 +175,7 @@ func TestFetcherErrors(t *testing.T) {
 		{"too large", hash[:], "huge", connect.CodeResourceExhausted, CodeTooLarge},
 	}
 	for _, c := range cases {
-		_, err := f.Get(context.Background(), c.hash, c.id)
+		_, err := f.Get(context.Background(), c.hash, c.id, "")
 		var fe *FetchError
 		t.Logf("input: %s output: %v", c.name, err)
 		if !errors.As(err, &fe) || fe.Code != c.code || fe.MsgCode != c.msgCode {
@@ -184,14 +184,14 @@ func TestFetcherErrors(t *testing.T) {
 	}
 	// "missing" is negatively cached; "down" is not, so the next try asks again.
 	before := src.calls.Load()
-	_, _ = f.Get(context.Background(), hash[:], "gone")
-	_, _ = f.Get(context.Background(), hash[:], "down")
+	_, _ = f.Get(context.Background(), hash[:], "gone", "")
+	_, _ = f.Get(context.Background(), hash[:], "down", "")
 	if got := src.calls.Load() - before; got != 1 {
 		t.Fatalf("after one not-found and one outage, %d new daemon calls, want 1 (the outage retried)", got)
 	}
 
 	var noSource *Fetcher = NewFetcher(nil, time.Second, 1<<20, 1<<20, time.Hour, time.Minute)
-	if _, err := noSource.Get(context.Background(), hash[:], "x"); err == nil {
+	if _, err := noSource.Get(context.Background(), hash[:], "x", ""); err == nil {
 		t.Fatalf("a fetcher without meta search served something")
 	}
 }
@@ -209,7 +209,7 @@ func TestFetcherCollapsesConcurrentMisses(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := f.Get(context.Background(), hash[:], "cat-1"); err != nil {
+			if _, err := f.Get(context.Background(), hash[:], "cat-1", ""); err != nil {
 				failures.Add(1)
 			}
 		}()
@@ -225,19 +225,19 @@ func TestByteCacheEvictsBySize(t *testing.T) {
 	c := newByteCache(100, time.Hour)
 	now := time.Now()
 	for _, k := range []string{"a", "b", "c"} {
-		c.put(k, &metav1.MetaFile{Content: bytes.Repeat([]byte{'x'}, 40)}, now)
+		c.put(k, &metav1.MetaFile{Content: bytes.Repeat([]byte{'x'}, 40)}, "torrent", now)
 	}
-	_, hasA := c.get("a", now)
-	_, hasC := c.get("c", now)
+	_, _, hasA := c.get("a", now)
+	_, _, hasC := c.get("c", now)
 	t.Logf("input: 3×40B into a 100B cache output: a=%v c=%v size=%d", hasA, hasC, c.size())
 	if hasA || !hasC || c.size() != 80 {
 		t.Fatalf("LRU by bytes: a=%v c=%v size=%d", hasA, hasC, c.size())
 	}
-	if _, ok := c.get("c", now.Add(2*time.Hour)); ok {
+	if _, _, ok := c.get("c", now.Add(2*time.Hour)); ok {
 		t.Fatalf("an expired entry was served")
 	}
-	c.put("big", &metav1.MetaFile{Content: bytes.Repeat([]byte{'x'}, 200)}, now)
-	if _, ok := c.get("big", now); ok {
+	c.put("big", &metav1.MetaFile{Content: bytes.Repeat([]byte{'x'}, 200)}, "torrent", now)
+	if _, _, ok := c.get("big", now); ok {
 		t.Fatalf("an entry larger than the cache was stored")
 	}
 }
@@ -245,16 +245,52 @@ func TestByteCacheEvictsBySize(t *testing.T) {
 func TestByteCacheShedDropsExpiredThenOldest(t *testing.T) {
 	c := newByteCache(1000, time.Minute)
 	now := time.Now()
-	c.put("old", &metav1.MetaFile{Content: bytes.Repeat([]byte{'x'}, 100)}, now.Add(-2*time.Minute))
+	c.put("old", &metav1.MetaFile{Content: bytes.Repeat([]byte{'x'}, 100)}, "torrent", now.Add(-2*time.Minute))
 	for _, k := range []string{"a", "b", "c", "d"} {
-		c.put(k, &metav1.MetaFile{Content: bytes.Repeat([]byte{'x'}, 100)}, now)
+		c.put(k, &metav1.MetaFile{Content: bytes.Repeat([]byte{'x'}, 100)}, "torrent", now)
 	}
 	freed := c.shed(0.5, now)
-	_, hasA := c.get("a", now)
-	_, hasD := c.get("d", now)
+	_, _, hasA := c.get("a", now)
+	_, _, hasD := c.get("d", now)
 	t.Logf("input: 5×100B (one expired), shed keep=0.5; output: freed=%d size=%d len=%d a=%v d=%v",
 		freed, c.size(), c.len(), hasA, hasD)
 	if freed != 300 || c.size() != 200 || hasA || !hasD {
 		t.Fatalf("freed=%d size=%d a=%v d=%v, want 300 freed (expired + 2 oldest), 200 kept, d kept", freed, c.size(), hasA, hasD)
+	}
+}
+
+// recordingSource is a fakeSource that is also a FetchRecorder.
+type recordingSource struct {
+	*fakeSource
+	recMu    sync.Mutex
+	recorded []string
+}
+
+func (r *recordingSource) RecordClientFetch(network, client string) {
+	r.recMu.Lock()
+	defer r.recMu.Unlock()
+	r.recorded = append(r.recorded, network+"/"+client)
+}
+
+// TestFetcherRecordsClientFetches: every metafile served, fetched or cached, is
+// recorded once against the network that sent it; a failed fetch is not.
+func TestFetcherRecordsClientFetches(t *testing.T) {
+	file, hash := testTorrent(t, "Recorded.Release")
+	_, missing := testTorrent(t, "Missing.Release")
+	_, bad := testTorrent(t, "Substituted.Release")
+	src := &recordingSource{fakeSource: newFakeSource()}
+	src.files["cat-1"] = &metav1.MetaFile{Content: file}
+	src.files["cat-bad"] = &metav1.MetaFile{Content: file} // does not verify against bad
+	f := newTestFetcher(src)
+
+	_, _ = f.Get(context.Background(), hash[:], "cat-1", "ip:10.0.0.1") // fetched
+	_, _ = f.Get(context.Background(), hash[:], "cat-1", "a:7")         // cached
+	_, _ = f.Get(context.Background(), missing[:], "gone", "ip:10.0.0.2")
+	_, _ = f.Get(context.Background(), bad[:], "cat-bad", "ip:10.0.0.3")
+
+	got := strings.Join(src.recorded, ",")
+	t.Logf("input: fetched, cached, not found, verify failed; output: recorded=%s", got)
+	if got != "torrent/ip:10.0.0.1,torrent/a:7" {
+		t.Fatalf("recorded %q, want the fetched and cached serves only", got)
 	}
 }

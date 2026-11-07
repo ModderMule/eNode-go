@@ -48,6 +48,12 @@ type CatalogHolder interface {
 	HoldingNetwork(catalogID string) string
 }
 
+// FetchRecorder is a MetaFileSource that counts the metafiles served to clients
+// per network. *meta.Searcher is one.
+type FetchRecorder interface {
+	RecordClientFetch(network, client string)
+}
+
 // FetchError is a metafile fetch failure with its MsgCode and status.
 type FetchError struct {
 	Code    connect.Code
@@ -155,8 +161,9 @@ func (f *Fetcher) Kinds() []metav1.MetaKind {
 	return slices.Compact(out)
 }
 
-// Get returns the metafile behind a row.
-func (f *Fetcher) Get(ctx context.Context, rawHash []byte, catalogID string) (*metav1.MetaFile, error) {
+// Get returns the metafile behind a row. client names the caller — an account,
+// else an IP — for the per-network fetch counters; "" counts the fetch alone.
+func (f *Fetcher) Get(ctx context.Context, rawHash []byte, catalogID, client string) (*metav1.MetaFile, error) {
 	hash, err := metahash.FromBytes(rawHash)
 	if err != nil {
 		return nil, &FetchError{Code: connect.CodeInvalidArgument, MsgCode: CodeInvalidRequest, cause: err}
@@ -181,9 +188,10 @@ func (f *Fetcher) Get(ctx context.Context, rawHash []byte, catalogID string) (*m
 	}
 	// The cache is keyed by hash alone: an entry was verified against the hash, so
 	// it is the right file whatever catalog_id the caller echoed.
-	if mf, ok := f.cache.get(string(hash[:]), f.now()); ok {
+	if mf, network, ok := f.cache.get(string(hash[:]), f.now()); ok {
 		f.stats.CacheHits.Add(1)
 		f.stats.Served.Add(1)
+		f.record(network, client)
 		return mf, nil
 	}
 	flightKey := string(hash[:]) + "\x00" + catalogID
@@ -209,7 +217,9 @@ func (f *Fetcher) Get(ctx context.Context, rawHash []byte, catalogID string) (*m
 			return nil, res.Err
 		}
 		f.stats.Served.Add(1)
-		return res.Val.(*metav1.MetaFile), nil
+		got := res.Val.(served)
+		f.record(got.network, client)
+		return got.mf, nil
 	}
 }
 
@@ -249,17 +259,26 @@ func (f *Fetcher) networks(kind metahash.Kind, catalogID string) []string {
 
 // fetchFrom asks each network in turn, moving on while one answers that it does
 // not have the release. Any other answer is the answer.
-func (f *Fetcher) fetchFrom(ctx context.Context, hash metahash.Hash, kind metahash.Kind, networks []string, catalogID string) (*metav1.MetaFile, error) {
+func (f *Fetcher) fetchFrom(ctx context.Context, hash metahash.Hash, kind metahash.Kind, networks []string, catalogID string) (served, error) {
 	var err error
 	for i, network := range networks {
 		var mf *metav1.MetaFile
 		mf, err = f.fetch(ctx, hash, kind, network, catalogID, i == len(networks)-1)
 		var fe *FetchError
-		if err == nil || !errors.As(err, &fe) || fe.Code != connect.CodeNotFound {
-			return mf, err
+		if err == nil {
+			return served{mf: mf, network: network}, nil
+		}
+		if !errors.As(err, &fe) || fe.Code != connect.CodeNotFound {
+			return served{}, err
 		}
 	}
-	return nil, err
+	return served{}, err
+}
+
+// served is a metafile and the network whose daemon sent it.
+type served struct {
+	mf      *metav1.MetaFile
+	network string
 }
 
 // fetch asks one network. last says no other network is left to ask, so a "not
@@ -299,8 +318,16 @@ func (f *Fetcher) fetch(ctx context.Context, hash metahash.Hash, kind metahash.K
 	if out.ContentType == "" {
 		out.ContentType = ContentType(out.Kind)
 	}
-	f.cache.put(string(hash[:]), out, f.now())
+	f.cache.put(string(hash[:]), out, network, f.now())
 	return out, nil
+}
+
+// record counts one metafile served to client against network, when the source
+// keeps such counts.
+func (f *Fetcher) record(network, client string) {
+	if rec, ok := f.source.(FetchRecorder); ok && network != "" {
+		rec.RecordClientFetch(network, client)
+	}
 }
 
 func (f *Fetcher) negative(key string) *FetchError {
@@ -384,6 +411,7 @@ type byteCache struct {
 type cacheItem struct {
 	key     string
 	mf      *metav1.MetaFile
+	network string
 	expires time.Time
 }
 
@@ -391,23 +419,23 @@ func newByteCache(maxBytes int64, ttl time.Duration) *byteCache {
 	return &byteCache{maxBytes: maxBytes, ttl: ttl, order: list.New(), items: map[string]*list.Element{}}
 }
 
-func (c *byteCache) get(key string, now time.Time) (*metav1.MetaFile, bool) {
+func (c *byteCache) get(key string, now time.Time) (mf *metav1.MetaFile, network string, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	el, ok := c.items[key]
 	if !ok {
-		return nil, false
+		return nil, "", false
 	}
 	it := el.Value.(*cacheItem)
 	if now.After(it.expires) {
 		c.remove(el)
-		return nil, false
+		return nil, "", false
 	}
 	c.order.MoveToFront(el)
-	return it.mf, true
+	return it.mf, it.network, true
 }
 
-func (c *byteCache) put(key string, mf *metav1.MetaFile, now time.Time) {
+func (c *byteCache) put(key string, mf *metav1.MetaFile, network string, now time.Time) {
 	size := int64(len(mf.GetContent()))
 	if size > c.maxBytes {
 		return
@@ -417,7 +445,7 @@ func (c *byteCache) put(key string, mf *metav1.MetaFile, now time.Time) {
 	if el, ok := c.items[key]; ok {
 		c.remove(el)
 	}
-	c.items[key] = c.order.PushFront(&cacheItem{key: key, mf: mf, expires: now.Add(c.ttl)})
+	c.items[key] = c.order.PushFront(&cacheItem{key: key, mf: mf, network: network, expires: now.Add(c.ttl)})
 	c.bytes += size
 	for c.bytes > c.maxBytes {
 		c.remove(c.order.Back())

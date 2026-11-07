@@ -93,11 +93,38 @@ type NetworkStats struct {
 	// RowsDownloaded counts the rows the daemon sent in Search answers, live and
 	// MetaApi.Search chunk loads alike, before any filtering or capping.
 	RowsDownloaded uint64
-	LiveCalls      uint64
-	LiveErrors     uint64
-	LiveTimeouts   uint64
-	CacheHits      uint64
-	CacheMisses    uint64
+	// RowsFromCache counts the rows live searches took from the result cache
+	// instead of the daemon, so RowsDownloaded + RowsFromCache is what entered the
+	// live path.
+	RowsFromCache uint64
+	// The Dropped counters are rows that entered a search and were not served, by
+	// reason: a row the daemon sent that could not be read (DroppedInvalid), a row
+	// of a release that does not match the search (DroppedNoMatch), a row past the
+	// TCP or UDP row cap (DroppedCap), a row not alive or complete under
+	// onlyAvailable (DroppedUnavailable), a row whose hash was already in the
+	// answer or a web row of a release another network sent (DroppedDuplicate), and
+	// a non-native row for a requester that wants native rows only
+	// (DroppedNativeOnly). Drops after the merge into the eD2K answer are not
+	// counted.
+	DroppedInvalid     uint64
+	DroppedNoMatch     uint64
+	DroppedCap         uint64
+	DroppedUnavailable uint64
+	DroppedDuplicate   uint64
+	DroppedNativeOnly  uint64
+	// ClientFetches counts the metafiles of this network served to clients by
+	// MetaApi.GetMetaFile and GET /meta/v1, and ClientFetchers the distinct clients
+	// (account, else IP) that fetched one. ClientFetchersCapped says the set of
+	// clients is full and ClientFetchers a lower bound. A client fetches a metafile
+	// for Details and Save too, and none for a magnet-only torrent or a Kad row.
+	ClientFetches        uint64
+	ClientFetchers       uint64
+	ClientFetchersCapped bool
+	LiveCalls            uint64
+	LiveErrors           uint64
+	LiveTimeouts         uint64
+	CacheHits            uint64
+	CacheMisses          uint64
 	// UDPSkipped counts UDP searches that made no live call because every
 	// udpMaxConcurrent slot was taken.
 	UDPSkipped uint64
@@ -171,6 +198,17 @@ func (s *Searcher) CatalogCache() *Cache[Chunk] {
 	return s.catalog
 }
 
+// RecordClientFetch counts one metafile of network served to client, an account or
+// an IP. A network not enabled is ignored.
+func (s *Searcher) RecordClientFetch(network, client string) {
+	for _, src := range s.sources() {
+		if src.network == network {
+			src.counters.recordFetch(client)
+			return
+		}
+	}
+}
+
 // sourceCounters are one network's search counters since start.
 type sourceCounters struct {
 	searchesTCP    atomic.Uint64
@@ -188,6 +226,18 @@ type sourceCounters struct {
 	catalogCalls     atomic.Uint64
 	catalogErrors    atomic.Uint64
 	catalogCacheHits atomic.Uint64
+
+	rowsFromCache      atomic.Uint64
+	droppedInvalid     atomic.Uint64
+	droppedNoMatch     atomic.Uint64
+	droppedCap         atomic.Uint64
+	droppedUnavailable atomic.Uint64
+	droppedDuplicate   atomic.Uint64
+	droppedNativeOnly  atomic.Uint64
+
+	clientFetches atomic.Uint64
+	fetchersMu    sync.Mutex
+	fetchers      map[string]struct{}
 }
 
 // daemonInfo is the poller's view of one daemon. info survives a failed poll so the
@@ -304,7 +354,16 @@ func (src *source) stats() NetworkStats {
 		CatalogCalls:        src.counters.catalogCalls.Load(),
 		CatalogErrors:       src.counters.catalogErrors.Load(),
 		CatalogCacheHits:    src.counters.catalogCacheHits.Load(),
+		RowsFromCache:       src.counters.rowsFromCache.Load(),
+		DroppedInvalid:      src.counters.droppedInvalid.Load(),
+		DroppedNoMatch:      src.counters.droppedNoMatch.Load(),
+		DroppedCap:          src.counters.droppedCap.Load(),
+		DroppedUnavailable:  src.counters.droppedUnavailable.Load(),
+		DroppedDuplicate:    src.counters.droppedDuplicate.Load(),
+		DroppedNativeOnly:   src.counters.droppedNativeOnly.Load(),
+		ClientFetches:       src.counters.clientFetches.Load(),
 	}
+	st.ClientFetchers, st.ClientFetchersCapped = src.counters.fetcherCount()
 
 	src.daemon.mu.Lock()
 	info := src.daemon.info
@@ -343,4 +402,31 @@ func (src *source) stats() NetworkStats {
 		st.Counted = src.filesForStatus()
 	}
 	return st
+}
+
+// maxFetchers bounds the distinct clients one network remembers for ClientFetchers.
+const maxFetchers = 100_000
+
+// recordFetch counts one client fetch and remembers client while there is room.
+func (c *sourceCounters) recordFetch(client string) {
+	c.clientFetches.Add(1)
+	if client == "" {
+		return
+	}
+	c.fetchersMu.Lock()
+	defer c.fetchersMu.Unlock()
+	if c.fetchers == nil {
+		c.fetchers = map[string]struct{}{}
+	}
+	if len(c.fetchers) < maxFetchers {
+		c.fetchers[client] = struct{}{}
+	}
+}
+
+// fetcherCount is the number of distinct clients that fetched a metafile, and
+// whether the set is full so the count is a lower bound.
+func (c *sourceCounters) fetcherCount() (uint64, bool) {
+	c.fetchersMu.Lock()
+	defer c.fetchersMu.Unlock()
+	return uint64(len(c.fetchers)), len(c.fetchers) >= maxFetchers
 }

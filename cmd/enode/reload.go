@@ -184,7 +184,7 @@ func (r *reloader) startGossipIO(cfg config.Config) error {
 			cfg.UDP.PortGossip)
 	}
 	r.gossipConn = gossipConn
-	r.stopLoops = startGossipLoops(r.ctx, cfg, r.gossip, r.mainConn, gossipConn)
+	r.stopLoops = startGossipLoops(r.ctx, cfg, r.gossip, r.mainConn, gossipConn, r.udpCfg.SourceIPv4)
 	return nil
 }
 
@@ -229,7 +229,7 @@ func (r *reloader) applyGossip(old, cfg config.Config) error {
 		}
 		if gossipTimersChanged(old, cfg) {
 			r.stopLoops()
-			r.stopLoops = startGossipLoops(r.ctx, cfg, r.gossip, r.mainConn, r.gossipConn)
+			r.stopLoops = startGossipLoops(r.ctx, cfg, r.gossip, r.mainConn, r.gossipConn, r.udpCfg.SourceIPv4)
 		}
 	}
 	return nil

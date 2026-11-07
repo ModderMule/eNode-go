@@ -172,6 +172,7 @@ func (src *source) loadChunk(ctx context.Context, base *metav1.SearchRequest, k 
 	for _, pb := range entries {
 		entry, err := MintEntry(pb)
 		if err != nil {
+			src.counters.droppedInvalid.Add(1)
 			logging.Debugf("meta catalogue %s: dropped row %q: %v", src.network, pb.GetCatalogId(), err)
 			continue
 		}

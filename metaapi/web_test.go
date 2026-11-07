@@ -57,7 +57,7 @@ func TestFetcherServesWebLinks(t *testing.T) {
 	f := newTestFetcher(src)
 	t.Logf("input: a %d-byte container, row hash %s", len(container), hash)
 
-	mf, err := f.Get(context.Background(), hash[:], "web:good")
+	mf, err := f.Get(context.Background(), hash[:], "web:good", "")
 	if err != nil {
 		t.Fatalf("fetching a web row's links: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestFetcherServesWebLinks(t *testing.T) {
 	}
 
 	// A fresh fetcher: the first answer is cached by hash, whatever id asks next.
-	_, err = newTestFetcher(src).Get(context.Background(), hash[:], "web:swapped")
+	_, err = newTestFetcher(src).Get(context.Background(), hash[:], "web:swapped", "")
 	var fe *FetchError
 	t.Logf("input: a container with one link swapped; output: %v", err)
 	if !errors.As(err, &fe) || fe.MsgCode != CodeVerifyFailed {
@@ -82,7 +82,7 @@ func TestFetcherServesWebLinks(t *testing.T) {
 		t.Fatalf("kinds %v, want the torrent kinds, WEB and CONTAINER", f.Kinds())
 	}
 	off := newTestFetcher(newFakeSource())
-	_, err = off.Get(context.Background(), hash[:], "web:good")
+	_, err = off.Get(context.Background(), hash[:], "web:good", "")
 	t.Logf("input: the same row with the web network off; output: %v", err)
 	if !errors.As(err, &fe) || fe.Code != connect.CodeNotFound {
 		t.Fatalf("got %v, want not found", err)
@@ -180,7 +180,7 @@ func TestFetcherServesWebItems(t *testing.T) {
 	src.networks = []string{networkTorrent, networkWeb}
 	src.files["ctr:C"] = &metav1.MetaFile{Kind: metav1.MetaKind_META_KIND_CONTAINER, Content: data, ContentType: "application/x-dlc"}
 
-	mf, err := newTestFetcher(src).Get(context.Background(), hash[:], "ctr:C")
+	mf, err := newTestFetcher(src).Get(context.Background(), hash[:], "ctr:C", "")
 	t.Logf("input: a DLC row %s; output: %d byte(s) %q, %v, asked %v", hash, len(mf.GetContent()), mf.GetContentType(), err, src.asked)
 	if err != nil || string(mf.GetContent()) != string(data) || mf.GetContentType() != "application/x-dlc" {
 		t.Fatalf("the DLC: %v", err)
@@ -206,7 +206,7 @@ func TestFetcherServesWebItems(t *testing.T) {
 	src.asked = nil
 	src.webOnly[id] = true
 	src.files[id] = &metav1.MetaFile{Kind: metav1.MetaKind_META_KIND_BT_V1, Content: torrent}
-	mf, err = newTestFetcher(src).Get(context.Background(), btHash[:], id)
+	mf, err = newTestFetcher(src).Get(context.Background(), btHash[:], id, "")
 	t.Logf("input: a torrent only a web page offered; output: %d byte(s), %v, asked %v", len(mf.GetContent()), err, src.asked)
 	if err != nil || fmt.Sprint(src.asked) != "[torrent web]" {
 		t.Fatalf("got %v, asked %v; want the torrent from web after torrent", err, src.asked)
@@ -215,7 +215,7 @@ func TestFetcherServesWebItems(t *testing.T) {
 	// The web feed holds it: the web daemon is asked first.
 	src.asked = nil
 	src.holder[id] = networkWeb
-	if _, err := newTestFetcher(src).Get(context.Background(), btHash[:], id); err != nil || fmt.Sprint(src.asked) != "[web]" {
+	if _, err := newTestFetcher(src).Get(context.Background(), btHash[:], id, ""); err != nil || fmt.Sprint(src.asked) != "[web]" {
 		t.Fatalf("got %v, asked %v; want the web daemon alone", err, src.asked)
 	}
 }
@@ -246,7 +246,7 @@ func TestFetcherServesOnionLinks(t *testing.T) {
 	src.files["web:onion"] = &metav1.MetaFile{Kind: metav1.MetaKind_META_KIND_WEB, Content: container, ContentType: weblinks.ContentType}
 	t.Logf("input: a %d-byte container with an onion link, row hash %s\n%s", len(container), hash, container)
 
-	mf, err := newTestFetcher(src).Get(context.Background(), hash[:], "web:onion")
+	mf, err := newTestFetcher(src).Get(context.Background(), hash[:], "web:onion", "")
 	if err != nil {
 		t.Fatalf("fetching a web row with an onion link: %v", err)
 	}

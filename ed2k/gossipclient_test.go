@@ -587,7 +587,7 @@ func TestGossipSendsLeaveFromSelfIPv6OnRealSocket(t *testing.T) {
 				SelfIPv6: tc.self6, SelfPort: 5555, MaxServers: 10, MaxFailures: 5,
 			}, []PeerAddr{{IP: peerIP, Port: peerPort}})
 			g.RunRound(GossipClientConfig{
-				Gossip: NewUDPSourceConn(listener), GossipPort: 5569, Interval: time.Hour,
+				Gossip: NewUDPSourceConn(listener, nil), GossipPort: 5569, Interval: time.Hour,
 			})
 
 			_ = peer.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -598,6 +598,54 @@ func TestGossipSendsLeaveFromSelfIPv6OnRealSocket(t *testing.T) {
 			}
 			t.Logf("input: SelfIPv6=%s peer=%s", tc.self6, peer.LocalAddr())
 			t.Logf("output: %d byte frame from %s", n, from)
+			if !from.IP.Equal(tc.wantFrom) {
+				t.Errorf("frame came from %s, want %s", from.IP, tc.wantFrom)
+			}
+		})
+	}
+}
+
+// TestGossipRoundSendsFromSourceIPv4 is the IPv4 half of the test above, and the
+// regression for two servers on one host (bang and razor): a wildcard-bound server
+// whose advertised IPv4 is not the route's preferred source sent its gossip from the
+// other server's address, so peers, which key servers by source IP, filed it as that
+// server and never listed it. 127.0.0.2 stands in for the second address (Linux).
+func TestGossipRoundSendsFromSourceIPv4(t *testing.T) {
+	bindSecondLoopback(t, loopbackA).Close()
+	cases := []struct {
+		name     string
+		src4     net.IP
+		wantFrom net.IP
+	}{
+		{name: "advertised IPv4 pinned", src4: loopbackB, wantFrom: loopbackB},
+		{name: "unpinned uses the route's source", src4: nil, wantFrom: loopbackA},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: loopbackA})
+			if err != nil {
+				t.Fatalf("bind peer: %v", err)
+			}
+			defer peer.Close()
+			listener, err := net.ListenUDP("udp", &net.UDPAddr{})
+			if err != nil {
+				t.Fatalf("bind listener: %v", err)
+			}
+			defer listener.Close()
+
+			// The bootstrap ping goes to the peer's eD2K port + 12.
+			peerPort := uint16(peer.LocalAddr().(*net.UDPAddr).Port) - peerObfPingOffset
+			g := NewGossipHandler(GossipConfig{
+				SelfIPv4: loopbackB, SelfPort: 5555, MaxServers: 10, MaxFailures: 5,
+				AllowPrivatePeers: true,
+			}, []PeerAddr{{IP: loopbackA, Port: peerPort}})
+			g.RunRound(GossipClientConfig{
+				Gossip: NewUDPSourceConn(listener, tc.src4), GossipPort: 5569, Interval: time.Hour,
+			})
+
+			_, from := readOne(t, peer)
+			t.Logf("input: SelfIPv4=%s src4=%v peer=%s", loopbackB, tc.src4, peer.LocalAddr())
+			t.Logf("output: gossip frame from %s", from)
 			if !from.IP.Equal(tc.wantFrom) {
 				t.Errorf("frame came from %s, want %s", from.IP, tc.wantFrom)
 			}

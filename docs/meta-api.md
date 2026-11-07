@@ -615,7 +615,9 @@ curl -s localhost:4672/status
 
 `/stats.json` and the admin page show a **Meta API** section when the API is on:
 - the mode and URLs;
-- metafiles served and cache hits;
+- metafiles served and cache hits. The per-network cards count them again by the
+  network that sent each file, with the distinct clients that fetched one
+  (`clientFetches`, `clientFetchers` in the `meta` array);
 - fetch failures (not found, failed verification, upstream);
 - how many requests were rate limited;
 - search mode (off, public, accounts required), searches and cached chunks. The

@@ -346,6 +346,22 @@ type MetaNetworkStats struct {
 	CatalogErrors    uint64 `json:"catalogErrors"`
 	CatalogCacheHits uint64 `json:"catalogCacheHits"`
 
+	// RowsFromCache and the Dropped counters explain the gap between RowsDownloaded
+	// and RowsServed; see meta.NetworkStats.
+	RowsFromCache      uint64 `json:"rowsFromCache"`
+	DroppedInvalid     uint64 `json:"droppedInvalid"`
+	DroppedNoMatch     uint64 `json:"droppedNoMatch"`
+	DroppedCap         uint64 `json:"droppedCap"`
+	DroppedUnavailable uint64 `json:"droppedUnavailable"`
+	DroppedDuplicate   uint64 `json:"droppedDuplicate"`
+	DroppedNativeOnly  uint64 `json:"droppedNativeOnly"`
+
+	// ClientFetches are this network's metafiles served to clients, ClientFetchers
+	// the distinct clients, a lower bound when ClientFetchersCapped.
+	ClientFetches        uint64 `json:"clientFetches"`
+	ClientFetchers       uint64 `json:"clientFetchers"`
+	ClientFetchersCapped bool   `json:"clientFetchersCapped"`
+
 	// Counted is what this network adds to AdvertisedFiles.
 	Counted int `json:"counted"`
 }

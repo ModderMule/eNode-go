@@ -2634,7 +2634,11 @@ func (s *ServerRuntime) dialHello(client *tcpClient, enableCrypt bool, network, 
 	dialer := net.Dialer{Timeout: s.tcp().ConnectionTimeout}
 	// Only bind a local source address whose family matches the dial network;
 	// binding a v4 LocalAddr to a tcp6 dial (or vice versa) fails outright.
-	if local := localBindForNetwork(network, s.tcp().Address); local != nil {
+	var inbound net.Addr
+	if client.conn != nil {
+		inbound = client.conn.LocalAddr()
+	}
+	if local := dialBackSource(network, s.tcp().Address, inbound); local != nil {
 		dialer.LocalAddr = &net.TCPAddr{IP: local}
 	}
 	conn, err := dialer.Dial(network, addr)
@@ -3282,6 +3286,29 @@ func loginFlags(tags []NamedTag) uint32 {
 		return 0
 	}
 	return 0
+}
+
+// dialBackSource is the source IP of a dial-back probe: the configured bind address
+// (localBindForNetwork), or on a wildcard bind the address the client's own
+// connection arrived on, when the families match. eMule holds back its answer to a
+// probe from another IP than the one it logged in to (AwaitingTestFromIP), and on a
+// host running several servers the kernel's choice can be another server's address.
+// nil lets the dialer pick.
+func dialBackSource(network, address string, inbound net.Addr) net.IP {
+	if ip := localBindForNetwork(network, address); ip != nil {
+		return ip
+	}
+	tcpAddr, ok := inbound.(*net.TCPAddr)
+	if !ok || tcpAddr == nil || tcpAddr.IP.IsUnspecified() {
+		return nil
+	}
+	switch network {
+	case "tcp4":
+		return tcpAddr.IP.To4()
+	case "tcp6":
+		return nativeIPv6(tcpAddr.IP)
+	}
+	return nil
 }
 
 // localBindForNetwork returns the configured bind address as a source IP for an

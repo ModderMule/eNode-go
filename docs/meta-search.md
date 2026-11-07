@@ -339,6 +339,21 @@ total, a line under it shows the advertised total. When meta search is on, a
   (what the daemon sent in Search answers, before filtering or capping), live calls with
   their errors and timeouts, cache hits against lookups, and UDP searches that made no
   live call because every `udpMaxConcurrent` slot was taken;
+- where the rows went between downloaded and served: rows taken from the result cache
+  (`rowsFromCache`), and rows dropped by reason — release does not match the search
+  (`droppedNoMatch`), past the TCP or UDP row cap (`droppedCap`), duplicate hash or a
+  web row of a release another network sent (`droppedDuplicate`), not alive or
+  complete under `onlyAvailable` (`droppedUnavailable`), unreadable daemon row
+  (`droppedInvalid`), non-native row for a native-only requester
+  (`droppedNativeOnly`). Rows dropped later, when the meta rows are merged into the
+  eD2K answer (hash already shared on the server, content filter, UDP packet cap),
+  are not counted, so `rowsServed` is what left the meta searcher;
+- metafiles fetched: torrent, NZB, web-link and container files clients fetched
+  through the Meta API (`clientFetches`), and how many distinct clients — account,
+  else IP — did so (`clientFetchers`, a lower bound once 100,000 are remembered,
+  `clientFetchersCapped`). It approximates downloads: it includes Details and Save,
+  and misses magnet-only torrents, files a client still had cached, and Kad rows,
+  which are plain eD2K downloads;
 - what the network adds to the server status file total.
 
 The same figures are in `/stats.json`: `advertisedFiles`, `metaCacheEntries`, and the

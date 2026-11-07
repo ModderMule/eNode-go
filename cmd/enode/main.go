@@ -275,6 +275,15 @@ func run(ctx context.Context, configPath string) error {
 	} else if advertisedIP != cfg.Address {
 		logging.Infof("advertising server IP %s (address=%q is not routable)", advertisedIP, cfg.Address)
 	}
+	// With a wildcard bind the kernel picks the IPv4 source of what the server sends
+	// first (gossip, PR_NAT forwards): the route's preferred address, which on a host
+	// running several servers on their own IPs is one of the others'. Peers key servers
+	// by source IP, so they would file us as that server. Replies already leave from
+	// the address they arrived on.
+	udpCfg.SourceIPv4 = udpSourceIPv4(cfg.Address, advertisedIP, localInterfaceIPs())
+	if udpCfg.SourceIPv4 != nil {
+		logging.Infof("udp: IPv4 sends leave from %s", udpCfg.SourceIPv4)
+	}
 
 	// Hash lists and keywords: which files are refused on publish and withheld when
 	// serving. Built before the services below, which serve the file store too and
@@ -628,8 +637,9 @@ func run(ctx context.Context, configPath string) error {
 			// Bind the dual-stack wildcard when IPv6 is enabled, matching the main
 			// UDP/TCP listeners; otherwise the NAT socket stays IPv4-only while the
 			// rest of the server serves both families.
-			DualStack: dualStack,
-			Gate:      udpGate,
+			DualStack:  dualStack,
+			Gate:       udpGate,
+			SourceIPv4: udpCfg.SourceIPv4,
 		}, udpMainHandler)
 		if err != nil {
 			return fmt.Errorf("nat traversal udp server failed: %w", err)
@@ -821,18 +831,20 @@ func startGossipLoops(
 	cfg config.Config,
 	handler *ed2k.GossipHandler,
 	mainConn, gossipConn *net.UDPConn,
+	sourceIPv4 net.IP,
 ) func() {
 	clientCfg := ed2k.GossipClientConfig{
 		MainPort:   cfg.UDP.Port,
 		GossipPort: cfg.UDP.PortGossip,
 		Interval:   time.Duration(cfg.Gossip.IntervalSeconds) * time.Second,
 	}
-	// Wrapped so IPv6 frames leave from the advertised address; assigned only when
-	// bound, because a nil conn stored in the interface would no longer compare nil.
-	if conn := ed2k.NewUDPSourceConn(mainConn); conn != nil {
+	// Wrapped so frames leave from the advertised addresses (IPv6 via SelfIPv6, IPv4
+	// via sourceIPv4); assigned only when bound, because a nil conn stored in the
+	// interface would no longer compare nil.
+	if conn := ed2k.NewUDPSourceConn(mainConn, sourceIPv4); conn != nil {
 		clientCfg.Main = conn
 	}
-	if conn := ed2k.NewUDPSourceConn(gossipConn); conn != nil {
+	if conn := ed2k.NewUDPSourceConn(gossipConn, sourceIPv4); conn != nil {
 		clientCfg.Gossip = conn
 	}
 	stopClient := handler.StartGossipClient(clientCfg)
@@ -1193,7 +1205,20 @@ func adminMetaStats(s *meta.Searcher) (cacheEntries int, out []admin.MetaNetwork
 			CatalogCalls:     st.CatalogCalls,
 			CatalogErrors:    st.CatalogErrors,
 			CatalogCacheHits: st.CatalogCacheHits,
-			Counted:          st.Counted,
+
+			RowsFromCache:      st.RowsFromCache,
+			DroppedInvalid:     st.DroppedInvalid,
+			DroppedNoMatch:     st.DroppedNoMatch,
+			DroppedCap:         st.DroppedCap,
+			DroppedUnavailable: st.DroppedUnavailable,
+			DroppedDuplicate:   st.DroppedDuplicate,
+			DroppedNativeOnly:  st.DroppedNativeOnly,
+
+			ClientFetches:        st.ClientFetches,
+			ClientFetchers:       st.ClientFetchers,
+			ClientFetchersCapped: st.ClientFetchersCapped,
+
+			Counted: st.Counted,
 		})
 	}
 	return s.CacheEntries(), out
@@ -1236,4 +1261,28 @@ func loadUDPSecret(cfg config.Config) ([]byte, error) {
 		return nil, fmt.Errorf("udp secret: %w", err)
 	}
 	return secret, nil
+}
+
+// udpSourceIPv4 is the IPv4 source for the listeners' own sends: the advertised IP,
+// when the bind is a wildcard (a bound socket already sends from its address), the
+// platform can pin it and a local interface holds it (behind 1:1 NAT it is not ours
+// to send from). nil keeps the kernel's choice.
+func udpSourceIPv4(bindAddress, advertisedIP string, local []net.IP) net.IP {
+	if !ed2k.IPv4SourcePinning {
+		return nil
+	}
+	if bind := net.ParseIP(bindAddress); bindAddress != "" && (bind == nil || !bind.IsUnspecified()) {
+		return nil
+	}
+	ip := net.ParseIP(advertisedIP).To4()
+	if ip == nil {
+		return nil
+	}
+	for _, l := range local {
+		if l.Equal(ip) {
+			return ip
+		}
+	}
+	logging.Infof("udp: advertised IP %s is not on a local interface, IPv4 sends use the kernel's source choice", ip)
+	return nil
 }

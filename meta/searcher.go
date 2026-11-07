@@ -296,9 +296,11 @@ func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, na
 		for _, row := range rows {
 			if src.mixed {
 				if nativeOnly && !row.Meta.Native() {
+					src.counters.droppedNativeOnly.Add(1)
 					continue
 				}
 				if _, dup := sent[row.Meta.CatalogID]; dup {
+					src.counters.droppedDuplicate.Add(1)
 					continue
 				}
 			}
@@ -462,16 +464,21 @@ func (src *source) search(ctx context.Context, expr *storage.SearchExpr, q Query
 	seen := map[string]struct{}{}
 	add := func(rows []storage.File, filter bool) {
 		if filter {
+			n := len(rows)
 			rows = matchReleases(expr, rows)
+			src.counters.droppedNoMatch.Add(uint64(n - len(rows)))
 		}
-		for _, row := range rows {
+		for i, row := range rows {
 			if len(out) >= limit {
+				src.counters.droppedCap.Add(uint64(len(rows) - i))
 				return
 			}
 			if set.onlyAvailable && !available(src.network, row) {
+				src.counters.droppedUnavailable.Add(1)
 				continue
 			}
 			if _, dup := seen[string(row.Hash)]; dup {
+				src.counters.droppedDuplicate.Add(1)
 				continue
 			}
 			seen[string(row.Hash)] = struct{}{}
@@ -538,6 +545,7 @@ func (src *source) fetch(ctx context.Context, q Query, set *sourceSettings) ([]s
 		for _, entry := range resp.GetEntries() {
 			file, err := EntryToFile(entry)
 			if err != nil {
+				src.counters.droppedInvalid.Add(1)
 				logging.Debugf("meta search %s: dropped row %q: %v", src.network, entry.GetCatalogId(), err)
 				continue
 			}
@@ -557,6 +565,7 @@ func (src *source) fetch(ctx context.Context, q Query, set *sourceSettings) ([]s
 		src.counters.cacheMisses.Add(1)
 	case err == nil:
 		src.counters.cacheHits.Add(1)
+		src.counters.rowsFromCache.Add(uint64(len(rows)))
 	}
 	return rows, err
 }
@@ -585,6 +594,7 @@ func (src *source) cachedOnly(q Query, set *sourceSettings) []storage.File {
 	})
 	if err == nil {
 		src.counters.cacheHits.Add(1)
+		src.counters.rowsFromCache.Add(uint64(len(rows)))
 	}
 	return rows
 }

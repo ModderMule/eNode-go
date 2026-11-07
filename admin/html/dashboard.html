@@ -231,6 +231,20 @@ function seenUsers(m){
   return out;
 }
 
+// droppedRows sums the rows a network's searches dropped and names each reason that
+// dropped any; drops after the merge into the eD2K answer are not counted.
+function droppedRows(m){
+  var reasons = [
+    ['no match', m.droppedNoMatch], ['over cap', m.droppedCap], ['duplicate', m.droppedDuplicate],
+    ['unavailable', m.droppedUnavailable], ['invalid', m.droppedInvalid], ['native-only', m.droppedNativeOnly]
+  ];
+  var total = 0, parts = [];
+  reasons.forEach(function(r){
+    if(r[1]){ total += r[1]; parts.push(r[0] + ' ' + num(r[1])); }
+  });
+  return total ? num(total) + ' · ' + parts.join(' · ') : '—';
+}
+
 // metaCard builds one network's card. Everything a daemon reported is inserted as
 // text, never as markup: the daemon name and version are its own strings.
 function metaCard(m){
@@ -271,6 +285,13 @@ function metaCard(m){
     ['Searches', 'tcp ' + num(m.searchesTCP) + ' · udp ' + num(m.searchesUDP)],
     ['Rows served', num(m.rowsServed)],
     ['Rows downloaded', num(m.rowsDownloaded)],
+    ['Rows from cache', num(m.rowsFromCache)],
+    ['Rows dropped', droppedRows(m)],
+    ['Metafiles fetched', m.network === 'kad' ? '—'
+      : num(m.clientFetches) + ' · ' + (m.clientFetchersCapped ? '≥' : '') + num(m.clientFetchers) + ' clients',
+      'Torrent, NZB, web-link and container files clients fetched through the Meta API, '
+      + 'counted by account or else IP. Includes Details and Save; excludes magnet-only torrents, '
+      + 'files a client still had cached, and Kad rows (plain eD2K downloads).'],
     ['Live calls', num(m.liveCalls) + ' · ' + num(m.liveErrors) + ' errors · ' + num(m.liveTimeouts) + ' timeouts'],
     ['Cache hits', lookups ? num(m.cacheHits) + ' / ' + num(lookups) + ' (' + Math.round(100 * m.cacheHits / lookups) + '%)' : '—'],
     ['UDP skipped', num(m.udpSkipped)],
@@ -282,6 +303,7 @@ function metaCard(m){
     var tr = table.insertRow();
     var k = tr.insertCell(); k.className = 'k'; k.textContent = r[0];
     var v = tr.insertCell(); v.className = 'v'; v.textContent = r[1];
+    if(r[2]){ tr.title = r[2]; }
   });
   card.appendChild(table);
   return card;

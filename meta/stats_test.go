@@ -234,10 +234,10 @@ func TestStatsSearchCounters(t *testing.T) {
 		st.SearchesTCP, st.SearchesUDP, st.RowsServed, st.RowsDownloaded, st.LiveCalls, st.LiveErrors, st.LiveTimeouts,
 		st.CacheHits, st.CacheMisses, st.UDPSkipped, s.CacheEntries())
 	want := NetworkStats{SearchesTCP: 4, SearchesUDP: 2, RowsServed: 3, RowsDownloaded: 1, LiveCalls: 3, LiveErrors: 1, LiveTimeouts: 1,
-		CacheHits: 2, CacheMisses: 3, UDPSkipped: 2}
+		CacheHits: 2, CacheMisses: 3, UDPSkipped: 2, RowsFromCache: 2}
 	got := NetworkStats{SearchesTCP: st.SearchesTCP, SearchesUDP: st.SearchesUDP, RowsServed: st.RowsServed, RowsDownloaded: st.RowsDownloaded,
 		LiveCalls: st.LiveCalls, LiveErrors: st.LiveErrors, LiveTimeouts: st.LiveTimeouts,
-		CacheHits: st.CacheHits, CacheMisses: st.CacheMisses, UDPSkipped: st.UDPSkipped}
+		CacheHits: st.CacheHits, CacheMisses: st.CacheMisses, UDPSkipped: st.UDPSkipped, RowsFromCache: st.RowsFromCache}
 	if got != want {
 		t.Errorf("counters %+v, want %+v", got, want)
 	}
@@ -287,5 +287,52 @@ func TestNetworkUsersFromDaemonInfo(t *testing.T) {
 	}
 	if stale != 0 || kept != 412000 {
 		t.Errorf("stale NetworkUsers=%d stats=%d, want 0 and 412000", stale, kept)
+	}
+}
+
+// TestStatsDropCounters: each row a daemon sends and the answer leaves out is
+// counted under its reason.
+func TestStatsDropCounters(t *testing.T) {
+	invalid := torrentEntry("drop.invalid.mkv", 1)
+	invalid.Kind = metav1.MetaKind_META_KIND_UNSPECIFIED
+	d := &fakeDaemon{entries: []*metav1.MetaEntry{
+		torrentEntry("drop.a.mkv", 1), torrentEntry("drop.a.mkv", 1), // the second is a duplicate
+		torrentEntry("drop.b.mkv", 1), torrentEntry("drop.c.mkv", 1),
+		torrentEntry("drop.d.mkv", 1), // past maxResults
+		torrentEntry("other.mkv", 1),  // does not match
+		invalid,
+	}}
+	cfg := testConfig(t, true, false)
+	cfg.Torrent.MaxResults = 3
+	s := searcherFor(cfg, map[string]*fakeDaemon{NetworkTorrent: d})
+
+	got := s.Search(context.Background(), text("drop"), false, false)
+	st := s.Stats()[0]
+	t.Logf("input: 7 rows (1 dup, 1 over cap 3, 1 no match, 1 invalid); output: served=%d downloaded=%d invalid=%d noMatch=%d cap=%d dup=%d unavailable=%d nativeOnly=%d rows=%s",
+		st.RowsServed, st.RowsDownloaded, st.DroppedInvalid, st.DroppedNoMatch, st.DroppedCap, st.DroppedDuplicate,
+		st.DroppedUnavailable, st.DroppedNativeOnly, fileNames(got))
+	want := NetworkStats{RowsServed: 3, RowsDownloaded: 7, DroppedInvalid: 1, DroppedNoMatch: 1, DroppedCap: 1, DroppedDuplicate: 1}
+	gotStats := NetworkStats{RowsServed: st.RowsServed, RowsDownloaded: st.RowsDownloaded, DroppedInvalid: st.DroppedInvalid,
+		DroppedNoMatch: st.DroppedNoMatch, DroppedCap: st.DroppedCap, DroppedDuplicate: st.DroppedDuplicate,
+		DroppedUnavailable: st.DroppedUnavailable, DroppedNativeOnly: st.DroppedNativeOnly}
+	if gotStats != want {
+		t.Errorf("counters %+v, want %+v", gotStats, want)
+	}
+}
+
+// TestStatsClientFetches: fetches count per network and clients once each; an
+// unknown network is ignored.
+func TestStatsClientFetches(t *testing.T) {
+	s := searcherFor(testConfig(t, true, false), map[string]*fakeDaemon{NetworkTorrent: {}})
+	s.RecordClientFetch(NetworkTorrent, "ip:10.0.0.1")
+	s.RecordClientFetch(NetworkTorrent, "ip:10.0.0.1")
+	s.RecordClientFetch(NetworkTorrent, "a:7")
+	s.RecordClientFetch(NetworkTorrent, "")
+	s.RecordClientFetch("nosuch", "ip:10.0.0.2")
+	st := s.Stats()[0]
+	t.Logf("input: 4 torrent fetches by 2 clients + 1 anonymous, 1 for an unknown network; output: fetches=%d clients=%d capped=%t",
+		st.ClientFetches, st.ClientFetchers, st.ClientFetchersCapped)
+	if st.ClientFetches != 4 || st.ClientFetchers != 2 || st.ClientFetchersCapped {
+		t.Errorf("fetches=%d clients=%d capped=%t, want 4/2/false", st.ClientFetches, st.ClientFetchers, st.ClientFetchersCapped)
 	}
 }

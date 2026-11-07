@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -167,10 +168,11 @@ func (s *Service) GetMetaFile(ctx context.Context, req *metav1.GetMetaFileReques
 	if err := s.AdmitIP(ip); err != nil {
 		return nil, err
 	}
-	if _, err := s.Authorize(ctx, auth, ip); err != nil {
+	acct, err := s.Authorize(ctx, auth, ip)
+	if err != nil {
 		return nil, err
 	}
-	mf, err := s.fetcher.Get(ctx, req.GetMetaHash(), req.GetCatalogId())
+	mf, err := s.fetcher.Get(ctx, req.GetMetaHash(), req.GetCatalogId(), fetchClient(acct, ip))
 	if err != nil {
 		return nil, s.toConnectError(err)
 	}
@@ -491,4 +493,16 @@ func (s *Service) admitCall(ctx context.Context) error {
 func (s *Service) rateLimited() error {
 	s.stats.RateLimited.Add(1)
 	return s.toConnectError(accounts.NewError(accounts.KindRateLimited, accounts.CodeRateLimited))
+}
+
+// fetchClient names a metafile's requester for the per-network fetch counters: the
+// account when the call carried one, else the address.
+func fetchClient(acct storage.Account, ip string) string {
+	if acct.ID != 0 {
+		return "a:" + strconv.FormatUint(acct.ID, 10)
+	}
+	if ip == "" {
+		return ""
+	}
+	return "ip:" + ip
 }

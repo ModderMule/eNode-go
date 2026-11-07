@@ -56,6 +56,8 @@ func testServer(t *testing.T) (string, LiveStats) {
 			SearchAvailable: true, Catalogued: 1200, Published: 300, Files: 5000, LastSeq: 42,
 			SearchesTCP: 9, SearchesUDP: 4, RowsServed: 30, RowsDownloaded: 45, LiveCalls: 6, LiveErrors: 1, LiveTimeouts: 2,
 			CacheHits: 5, CacheMisses: 6, UDPSkipped: 1, Counted: 5000,
+			RowsFromCache: 3, DroppedNoMatch: 10, DroppedCap: 5, DroppedDuplicate: 2, DroppedInvalid: 1,
+			ClientFetches: 4, ClientFetchers: 2,
 		}},
 		ServerSearch: &ServerSearchStats{
 			Mode: "allowlist", URL: "https://203.0.113.7:4673", Fingerprint: "sha256/abc=", ServeSearch: true, ServeBrowse: true,
@@ -162,6 +164,8 @@ func TestStatsJSONReturnsSnapshot(t *testing.T) {
 		"catalogued", "published", "files", "lastSeq", "liveSearch", "feedEnabled", "feedRows",
 		"feedReleases", "feedCursor", "feedCaughtUp", "searchesTCP", "searchesUDP", "rowsServed", "rowsDownloaded",
 		"liveCalls", "liveErrors", "liveTimeouts", "cacheHits", "cacheMisses", "udpSkipped",
+		"rowsFromCache", "droppedInvalid", "droppedNoMatch", "droppedCap", "droppedUnavailable", "droppedDuplicate",
+		"droppedNativeOnly", "clientFetches", "clientFetchers", "clientFetchersCapped",
 		"countInServerStatus", "counted",
 		"networkUsers", "networkUsersExperimental", "networkFiles",
 		"networkUsersSeen", "networkUsersSeenDay", "networkUsersSeenWindow", "networkUsersSeenSince",
