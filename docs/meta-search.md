@@ -136,7 +136,9 @@ Rows are then matched per release (`matchRelease` in `meta/searcher.go`):
 
 ### UDP
 
-A UDP search runs on a shared worker, and every row costs one datagram. So a UDP
+A UDP search runs on a shared worker. Its rows are packed into datagrams of up to
+about 1300 bytes (`udpSearchDatagramBudget`), so a meta row, with its `FT_META_*`
+tags and magnet link, still costs a few hundred bytes of the answer. So a UDP
 search:
 
 - has a shorter deadline (`udpSearchTimeoutMs`);
@@ -155,6 +157,16 @@ meta rows. When it is `false`, only these requesters do:
   `SRVCAP_UDP_METASEARCH` (`0x02`).
 
 `OP_GLOBSEARCHREQ` and `…REQ2` have no tag block, so they never qualify.
+
+**Declining.** A UDP `OP_GLOBSEARCHREQ3` whose `CT_SERVER_UDPSEARCH_FLAGS` includes
+`SRVCAP_UDP_NO_META` (`0x04`) gets no catalogue row at all: no torrent, Usenet or
+web row, no [Kad row](#kad-results) and no [file from another server](#files-from-other-servers).
+The server makes no catalogue lookup for it. The bit wins over `0x02` and over
+`advertiseToLegacyClients`. A global search asks every server in the client's list,
+and servers with catalogues of the same networks would each send the same rows,
+which the client merges by hash and discards. eMuleQt therefore sets the bit once
+N servers have sent catalogue rows for the search (`serverConnection.globalSearchCatalogueServers`
+in its YAML, default 1). The contract is enodemeta `ingest-contract.md` amendment 29.
 
 This gate covers torrent, Usenet and web rows. [Kad rows](#kad-results) go to every client.
 

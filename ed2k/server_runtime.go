@@ -3068,11 +3068,18 @@ func (s *ServerRuntime) udpGlobSearchReq3(b *Buffer, remote *net.UDPAddr, conn U
 	if err != nil {
 		return
 	}
-	metaCapable := udpSearchFlags(tags)&SrvCapUDPMetaSearch != 0
+	flags := udpSearchFlags(tags)
+	metaCapable := flags&SrvCapUDPMetaSearch != 0
 	if s.queryBlocked(expr) || isRelatedSearch(expr) {
 		return
 	}
-	metaCh := s.startMetaSearch(expr, metaCapable, true)
+	// SrvCapUDPNoMeta declines every catalogue row: the client already holds them
+	// from other servers in its global search, so no lookup is made at all. It wins
+	// over metaCapable and over advertiseToLegacyClients.
+	var metaCh <-chan []storage.File
+	if flags&SrvCapUDPNoMeta == 0 {
+		metaCh = s.startMetaSearch(expr, metaCapable, true)
+	}
 	files := capUDPSearchResults(s.withholdFiles(mergeMetaResults(s.Storage.FindBySearch(expr), metaCh)))
 	if len(files) == 0 {
 		return

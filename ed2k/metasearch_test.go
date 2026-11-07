@@ -273,7 +273,8 @@ func TestLoginRecordsMetaCapability(t *testing.T) {
 
 // TestUDPGlobSearchMetaGating: with advertiseToLegacyClients off, OP_GLOBSEARCHREQ
 // (no tag block) never gets meta rows, and OP_GLOBSEARCHREQ3 gets them only when its
-// CT_SERVER_UDPSEARCH_FLAGS carries SrvCapUDPMetaSearch. Each row is its own record.
+// CT_SERVER_UDPSEARCH_FLAGS carries SrvCapUDPMetaSearch. SrvCapUDPNoMeta declines
+// every catalogue row, even when they go to every client. Each row is its own record.
 func TestUDPGlobSearchMetaGating(t *testing.T) {
 	search := []byte{0x01, 0x04, 0x00, 'f', 'o', 'o', 'd'}
 	req3 := func(flags uint32) []byte {
@@ -282,19 +283,25 @@ func TestUDPGlobSearchMetaGating(t *testing.T) {
 		return append(b.Bytes()[:b.Pos()], search...)
 	}
 	cases := []struct {
-		name      string
-		payload   []byte
-		req3      bool
-		wantCalls int
+		name       string
+		payload    []byte
+		req3       bool
+		advertise  bool // metaSearch.advertiseToLegacyClients
+		wantCalls  int
+		wantNative int // calls limited to the native networks
 	}{
-		{"REQ no tag block", search, false, 0},
-		{"REQ3 large-files only", req3(0x01), true, 0},
-		{"REQ3 meta flag", req3(0x01 | SrvCapUDPMetaSearch), true, 1},
+		{"REQ no tag block", search, false, false, 0, 1},
+		{"REQ3 large-files only", req3(0x01), true, false, 0, 1},
+		{"REQ3 meta flag", req3(0x01 | SrvCapUDPMetaSearch), true, false, 1, 0},
+		{"REQ3 legacy advertised", req3(0x01), true, true, 1, 0},
+		// The opt-out makes no lookup at all, native networks included.
+		{"REQ3 no-meta", req3(0x01 | SrvCapUDPNoMeta), true, true, 0, 0},
+		{"REQ3 no-meta wins over meta flag", req3(0x01 | SrvCapUDPMetaSearch | SrvCapUDPNoMeta), true, true, 0, 0},
 	}
 	for _, tc := range cases {
 		fake := &fakeMeta{rows: metaRows(t, 2)}
 		rt := NewServerRuntime(TCPRuntimeConfig{}, UDPRuntimeConfig{}, seededEngine(t))
-		rt.SetMetaSearcher(fake, false)
+		rt.SetMetaSearcher(fake, tc.advertise)
 		server, remote, gotReply := udpProbe(t)
 
 		if tc.req3 {
@@ -310,6 +317,9 @@ func TestUDPGlobSearchMetaGating(t *testing.T) {
 			tc.name, tc.payload, fake.callCount(), fake.calls, records)
 		if fake.callCount() != tc.wantCalls {
 			t.Fatalf("%s: %d searcher calls, want %d", tc.name, fake.callCount(), tc.wantCalls)
+		}
+		if fake.nativeCalls != tc.wantNative {
+			t.Fatalf("%s: %d native-only calls, want %d", tc.name, fake.nativeCalls, tc.wantNative)
 		}
 		if tc.wantCalls > 0 && !fake.calls[0] {
 			t.Fatalf("%s: searcher asked with udp=false", tc.name)
@@ -343,7 +353,8 @@ func TestAddFileEmitsMetaTags(t *testing.T) {
 			t.Fatalf("tag 0x%02x differs from the contract's 0x%02x", ours, contract)
 		}
 	}
-	if FlagMetaSearch != tags.FlagMetaSearch || SrvCapMetaSearch != tags.SrvCapMetaSearch || SrvCapUDPMetaSearch != tags.SrvCapUDPMetaSearch {
+	if FlagMetaSearch != tags.FlagMetaSearch || SrvCapMetaSearch != tags.SrvCapMetaSearch || SrvCapUDPMetaSearch != tags.SrvCapUDPMetaSearch ||
+		SrvCapUDPNoMeta != tags.SrvCapUDPNoMeta {
 		t.Fatal("capability bits differ from the contract's")
 	}
 

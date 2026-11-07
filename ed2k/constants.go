@@ -477,11 +477,16 @@ const (
 	// SrvCapUDPMetaSearch is the same request in OP_GLOBSEARCHREQ3's
 	// CT_SERVER_UDPSEARCH_FLAGS tag (0x0e, decoded under TagSearchTree's name).
 	// Both only matter when metaSearch.advertiseToLegacyClients is off.
+	// SrvCapUDPNoMeta in the same UDP tag declines every catalogue row (torrent,
+	// Usenet, web, Kad, other servers' files) whatever else is set: eMuleQt sends it
+	// in a global search once enough servers have sent it those rows
+	// (enodemeta ingest-contract.md amendment 29).
 	// The login bit has the same value as FlagMetaSearch. It was 0x2000 until
 	// 2026-10; 0x1000 and 0x2000 belong to Lugdunum's NAT callback and NeoLoader's
 	// IPv6 bit (docs/lugdunum-nat-callback.local.md), so neither is read here.
 	SrvCapMetaSearch    uint32 = 0x10000
 	SrvCapUDPMetaSearch uint32 = 0x02
+	SrvCapUDPNoMeta     uint32 = 0x04
 	// SrvCapNatTraversal is the client's CT_SERVER_FLAGS login bit for Lugdunum's NAT
 	// callback. With natTraversal.lugdunumCallback on, a LowID client that sets it gets
 	// an odd LowID and may be named as a callback target; every other LowID is even.

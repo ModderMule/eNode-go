@@ -349,7 +349,7 @@ metaSearch:
     searchTimeoutMs: 1500          # TCP: the reply waits at most this long for the daemon
     udpSearchTimeoutMs: 800        # UDP: shorter, it holds a shared worker
     maxResults: 50                 # rows merged into one TCP search answer
-    maxUDPResults: 10              # rows per UDP answer (one datagram each); max 50
+    maxUDPResults: 10              # rows per UDP answer, packed into ~1300-byte datagrams; max 50
     # Add this network's catalogue files to the file total sent in OP_SERVERSTATUS
     # and OP_GLOBSERVSTATRES: the daemon's file count with liveSearch on, the feed's
     # rows held with it off. Off by default: eD2K clients then see eD2K files only.
