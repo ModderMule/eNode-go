@@ -270,6 +270,7 @@ function metaCard(m){
       + (m.feedCaughtUp ? (lag ? 'lag ' + num(lag) : 'caught up') : 'catching up')],
     ['Searches', 'tcp ' + num(m.searchesTCP) + ' · udp ' + num(m.searchesUDP)],
     ['Rows served', num(m.rowsServed)],
+    ['Rows downloaded', num(m.rowsDownloaded)],
     ['Live calls', num(m.liveCalls) + ' · ' + num(m.liveErrors) + ' errors · ' + num(m.liveTimeouts) + ' timeouts'],
     ['Cache hits', lookups ? num(m.cacheHits) + ' / ' + num(lookups) + ' (' + Math.round(100 * m.cacheHits / lookups) + '%)' : '—'],
     ['UDP skipped', num(m.udpSkipped)],

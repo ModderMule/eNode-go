@@ -87,14 +87,17 @@ type NetworkStats struct {
 	FeedCursor   uint64
 	FeedCaughtUp bool
 
-	SearchesTCP  uint64
-	SearchesUDP  uint64
-	RowsServed   uint64
-	LiveCalls    uint64
-	LiveErrors   uint64
-	LiveTimeouts uint64
-	CacheHits    uint64
-	CacheMisses  uint64
+	SearchesTCP uint64
+	SearchesUDP uint64
+	RowsServed  uint64
+	// RowsDownloaded counts the rows the daemon sent in Search answers, live and
+	// MetaApi.Search chunk loads alike, before any filtering or capping.
+	RowsDownloaded uint64
+	LiveCalls      uint64
+	LiveErrors     uint64
+	LiveTimeouts   uint64
+	CacheHits      uint64
+	CacheMisses    uint64
 	// UDPSkipped counts UDP searches that made no live call because every
 	// udpMaxConcurrent slot was taken.
 	UDPSkipped uint64
@@ -170,15 +173,16 @@ func (s *Searcher) CatalogCache() *Cache[Chunk] {
 
 // sourceCounters are one network's search counters since start.
 type sourceCounters struct {
-	searchesTCP  atomic.Uint64
-	searchesUDP  atomic.Uint64
-	rowsServed   atomic.Uint64
-	liveCalls    atomic.Uint64
-	liveErrors   atomic.Uint64
-	liveTimeouts atomic.Uint64
-	cacheHits    atomic.Uint64
-	cacheMisses  atomic.Uint64
-	udpSkipped   atomic.Uint64
+	searchesTCP    atomic.Uint64
+	searchesUDP    atomic.Uint64
+	rowsServed     atomic.Uint64
+	rowsDownloaded atomic.Uint64
+	liveCalls      atomic.Uint64
+	liveErrors     atomic.Uint64
+	liveTimeouts   atomic.Uint64
+	cacheHits      atomic.Uint64
+	cacheMisses    atomic.Uint64
+	udpSkipped     atomic.Uint64
 	// catalogCalls, catalogErrors and catalogCacheHits count MetaApi.Search chunk
 	// loads: daemon calls, failed loads (errors and timeouts), cached chunks served.
 	catalogCalls     atomic.Uint64
@@ -290,6 +294,7 @@ func (src *source) stats() NetworkStats {
 		SearchesTCP:         src.counters.searchesTCP.Load(),
 		SearchesUDP:         src.counters.searchesUDP.Load(),
 		RowsServed:          src.counters.rowsServed.Load(),
+		RowsDownloaded:      src.counters.rowsDownloaded.Load(),
 		LiveCalls:           src.counters.liveCalls.Load(),
 		LiveErrors:          src.counters.liveErrors.Load(),
 		LiveTimeouts:        src.counters.liveTimeouts.Load(),

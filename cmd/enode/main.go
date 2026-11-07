@@ -1183,6 +1183,7 @@ func adminMetaStats(s *meta.Searcher) (cacheEntries int, out []admin.MetaNetwork
 			SearchesTCP:      st.SearchesTCP,
 			SearchesUDP:      st.SearchesUDP,
 			RowsServed:       st.RowsServed,
+			RowsDownloaded:   st.RowsDownloaded,
 			LiveCalls:        st.LiveCalls,
 			LiveErrors:       st.LiveErrors,
 			LiveTimeouts:     st.LiveTimeouts,

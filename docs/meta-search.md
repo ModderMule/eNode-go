@@ -335,7 +335,8 @@ total, a line under it shows the advertised total. When meta search is on, a
 - the live-search state, and whether the daemon has a search index;
 - feed rows and releases held, and whether the feed has caught up, or how far its
   cursor lags the daemon's `last_seq`;
-- search counters since start: TCP and UDP searches, rows served, live calls with
+- search counters since start: TCP and UDP searches, rows served, rows downloaded
+  (what the daemon sent in Search answers, before filtering or capping), live calls with
   their errors and timeouts, cache hits against lookups, and UDP searches that made no
   live call because every `udpMaxConcurrent` slot was taken;
 - what the network adds to the server status file total.

@@ -330,15 +330,16 @@ type MetaNetworkStats struct {
 	FeedCursor   uint64 `json:"feedCursor"`
 	FeedCaughtUp bool   `json:"feedCaughtUp"`
 
-	SearchesTCP  uint64 `json:"searchesTCP"`
-	SearchesUDP  uint64 `json:"searchesUDP"`
-	RowsServed   uint64 `json:"rowsServed"`
-	LiveCalls    uint64 `json:"liveCalls"`
-	LiveErrors   uint64 `json:"liveErrors"`
-	LiveTimeouts uint64 `json:"liveTimeouts"`
-	CacheHits    uint64 `json:"cacheHits"`
-	CacheMisses  uint64 `json:"cacheMisses"`
-	UDPSkipped   uint64 `json:"udpSkipped"`
+	SearchesTCP    uint64 `json:"searchesTCP"`
+	SearchesUDP    uint64 `json:"searchesUDP"`
+	RowsServed     uint64 `json:"rowsServed"`
+	RowsDownloaded uint64 `json:"rowsDownloaded"`
+	LiveCalls      uint64 `json:"liveCalls"`
+	LiveErrors     uint64 `json:"liveErrors"`
+	LiveTimeouts   uint64 `json:"liveTimeouts"`
+	CacheHits      uint64 `json:"cacheHits"`
+	CacheMisses    uint64 `json:"cacheMisses"`
+	UDPSkipped     uint64 `json:"udpSkipped"`
 	// CatalogCalls, CatalogErrors and CatalogCacheHits are MetaApi.Search's daemon
 	// calls, failed chunk loads and cached chunks served.
 	CatalogCalls     uint64 `json:"catalogCalls"`

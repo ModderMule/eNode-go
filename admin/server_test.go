@@ -54,7 +54,7 @@ func testServer(t *testing.T) (string, LiveStats) {
 			Reachable: true, InfoAt: "2026-07-22T09:59:00Z", Daemon: "torrent-crawler-1", Version: "v1.2.3",
 			StatsStale: true, LiveOKAt: "2026-07-22T09:59:30Z",
 			SearchAvailable: true, Catalogued: 1200, Published: 300, Files: 5000, LastSeq: 42,
-			SearchesTCP: 9, SearchesUDP: 4, RowsServed: 30, LiveCalls: 6, LiveErrors: 1, LiveTimeouts: 2,
+			SearchesTCP: 9, SearchesUDP: 4, RowsServed: 30, RowsDownloaded: 45, LiveCalls: 6, LiveErrors: 1, LiveTimeouts: 2,
 			CacheHits: 5, CacheMisses: 6, UDPSkipped: 1, Counted: 5000,
 		}},
 		ServerSearch: &ServerSearchStats{
@@ -160,7 +160,7 @@ func TestStatsJSONReturnsSnapshot(t *testing.T) {
 	for _, key := range []string{
 		"network", "reachable", "down", "statsStale", "liveOkAt", "infoAt", "lastError", "daemon", "version", "searchAvailable",
 		"catalogued", "published", "files", "lastSeq", "liveSearch", "feedEnabled", "feedRows",
-		"feedReleases", "feedCursor", "feedCaughtUp", "searchesTCP", "searchesUDP", "rowsServed",
+		"feedReleases", "feedCursor", "feedCaughtUp", "searchesTCP", "searchesUDP", "rowsServed", "rowsDownloaded",
 		"liveCalls", "liveErrors", "liveTimeouts", "cacheHits", "cacheMisses", "udpSkipped",
 		"countInServerStatus", "counted",
 		"networkUsers", "networkUsersExperimental", "networkFiles",

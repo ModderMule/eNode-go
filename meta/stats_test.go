@@ -230,12 +230,12 @@ func TestStatsSearchCounters(t *testing.T) {
 	_ = s.Search(context.Background(), text("slow"), false, false) // miss, live call, timeout
 
 	st := s.Stats()[0]
-	t.Logf("input: miss, hit, 2 UDP with slots full, error, timeout; output: tcp=%d udp=%d rows=%d live=%d errors=%d timeouts=%d hits=%d misses=%d udpSkipped=%d cacheEntries=%d",
-		st.SearchesTCP, st.SearchesUDP, st.RowsServed, st.LiveCalls, st.LiveErrors, st.LiveTimeouts,
+	t.Logf("input: miss, hit, 2 UDP with slots full, error, timeout; output: tcp=%d udp=%d rows=%d downloaded=%d live=%d errors=%d timeouts=%d hits=%d misses=%d udpSkipped=%d cacheEntries=%d",
+		st.SearchesTCP, st.SearchesUDP, st.RowsServed, st.RowsDownloaded, st.LiveCalls, st.LiveErrors, st.LiveTimeouts,
 		st.CacheHits, st.CacheMisses, st.UDPSkipped, s.CacheEntries())
-	want := NetworkStats{SearchesTCP: 4, SearchesUDP: 2, RowsServed: 3, LiveCalls: 3, LiveErrors: 1, LiveTimeouts: 1,
+	want := NetworkStats{SearchesTCP: 4, SearchesUDP: 2, RowsServed: 3, RowsDownloaded: 1, LiveCalls: 3, LiveErrors: 1, LiveTimeouts: 1,
 		CacheHits: 2, CacheMisses: 3, UDPSkipped: 2}
-	got := NetworkStats{SearchesTCP: st.SearchesTCP, SearchesUDP: st.SearchesUDP, RowsServed: st.RowsServed,
+	got := NetworkStats{SearchesTCP: st.SearchesTCP, SearchesUDP: st.SearchesUDP, RowsServed: st.RowsServed, RowsDownloaded: st.RowsDownloaded,
 		LiveCalls: st.LiveCalls, LiveErrors: st.LiveErrors, LiveTimeouts: st.LiveTimeouts,
 		CacheHits: st.CacheHits, CacheMisses: st.CacheMisses, UDPSkipped: st.UDPSkipped}
 	if got != want {

@@ -533,6 +533,7 @@ func (src *source) fetch(ctx context.Context, q Query, set *sourceSettings) ([]s
 			return nil, err
 		}
 		src.noteLiveOK()
+		src.counters.rowsDownloaded.Add(uint64(len(resp.GetEntries())))
 		rows := make([]storage.File, 0, len(resp.GetEntries()))
 		for _, entry := range resp.GetEntries() {
 			file, err := EntryToFile(entry)
