@@ -10,7 +10,7 @@ testUrls:
   # Returns key=value lines rather than a bare IP; parseIPResponse reads the ip= line.
   - "https://www.cloudflare.com/cdn-cgi/trace"
 
-messageLowID: "You have LowID."
+messageLowID: "You have LowID. This limits your connectivity with other clients and causes slower downloads. Please open your connection options to forward ports."
 
 # Keep it ASCII. The art below is laid out for Tahoma, the default eMule (MFC) and
 # eMule-Qt server-info font: '$' and '`' share one advance width there (as do the
