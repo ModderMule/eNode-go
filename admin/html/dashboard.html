@@ -83,7 +83,7 @@ tr.sel{outline:2px solid var(--accent);outline-offset:-2px}
 </header>
 {{if .Reload}}<p id="msg" class="desc"></p>{{end}}
 <p class="desc" style="margin-bottom:4px">{{.Description}} · {{.Version}}<span id="update"></span> · storage: {{.Engine}}</p>
-<p class="desc addr">IPv4: {{if .AdvertisedIP}}<b>{{.AdvertisedIP}}</b>{{else}}<span class="off">unresolved</span>{{end}} · IPv6: {{if .AdvertisedIPv6}}<b>{{.AdvertisedIPv6}}</b>{{else if .IPv6}}<span class="off">unresolved</span>{{else}}<span class="off">off</span>{{end}}</p>
+<p class="desc addr">{{if and .AdvertisedIP .AdvertisedIPv6}}<button class="icon copy-link" data-link="ed2k://|server|{{.AdvertisedIP}}|{{.TCPPort}}|/|v6=[{{.AdvertisedIPv6}}]|/" title="Copy dual-stack ed2k server link (IPv4 + IPv6; older clients use the IPv4)" aria-label="Copy dual-stack ed2k server link">🔗</button> {{end}}IPv4: {{if .AdvertisedIP}}<b>{{.AdvertisedIP}}</b> <button class="icon copy-link" data-link="ed2k://|server|{{.AdvertisedIP}}|{{.TCPPort}}|/" title="Copy ed2k server link" aria-label="Copy ed2k server link (IPv4)">🔗</button>{{else}}<span class="off">unresolved</span>{{end}} · IPv6: {{if .AdvertisedIPv6}}<b>{{.AdvertisedIPv6}}</b> <button class="icon copy-link" data-link="ed2k://|server|[{{.AdvertisedIPv6}}]|{{.TCPPort}}|/" title="Copy ed2k server link" aria-label="Copy ed2k server link (IPv6)">🔗</button>{{else if .IPv6}}<span class="off">unresolved</span>{{else}}<span class="off">off</span>{{end}}</p>
 
 {{if .Tabs}}<nav id="tabs">
 <a href="#status" data-tab="status">Status</a>
@@ -524,6 +524,29 @@ function fmtBytes(n){
   while(n >= 1024 && i < units.length - 1){ n /= 1024; i++; }
   return (i ? n.toFixed(n < 10 ? 2 : 1) : n) + ' ' + units[i];
 }
+// copyText puts text on the clipboard. The clipboard API needs a secure context;
+// a plain-http remote page falls back to a hidden textarea.
+async function copyText(text){
+  if(navigator.clipboard && window.isSecureContext){
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  var ta = el('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  var ok = document.execCommand('copy');
+  ta.remove();
+  if(!ok){ throw new Error('the browser refused to copy; link: ' + text); }
+}
+// The server-link buttons next to the advertised addresses confirm on the button
+// itself: the header has no message line when reload is off.
+document.querySelectorAll('button.copy-link').forEach(function(b){
+  b.onclick = function(){
+    var icon = b.textContent, title = b.title;
+    function flash(t, tip){ b.textContent = t; b.title = tip; setTimeout(function(){ b.textContent = icon; b.title = title; }, 1500); }
+    copyText(b.dataset.link).then(function(){ flash('\u2713', 'Copied ' + b.dataset.link); },
+                                  function(e){ flash('\u2717', e.message); });
+  };
+});
 function tabMsg(tab, text, bad){
   var m = document.getElementById('msg-' + tab);
   if(m){ m.textContent = text || ''; m.style.color = bad ? 'var(--err)' : ''; }

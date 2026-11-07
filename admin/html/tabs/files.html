@@ -40,17 +40,7 @@
     return 'ed2k://|file|' + encodeURIComponent(f.name) + '|' + f.size + '|' + f.hash.toUpperCase() + '|/';
   }
   async function copyLink(f){
-    var link = ed2kLink(f);
-    // The clipboard API needs a secure context; a plain-http remote page falls back.
-    if(navigator.clipboard && window.isSecureContext){
-      await navigator.clipboard.writeText(link);
-    }else{
-      var ta = el('textarea'); ta.value = link; ta.style.position = 'fixed'; ta.style.opacity = '0';
-      document.body.appendChild(ta); ta.select();
-      var ok = document.execCommand('copy');
-      ta.remove();
-      if(!ok){ throw new Error('the browser refused to copy; link: ' + link); }
-    }
+    await copyText(ed2kLink(f));
     tabMsg('files', 'Copied ed2k link of ' + f.name);
   }
   async function load(){

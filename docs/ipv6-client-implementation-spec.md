@@ -594,3 +594,22 @@ IPv6 pairings, before family selection.
 - `natTraversal.tcpWake` — TCP wake-up of a logged-in target (default **true**, flag
   `0x200000`); see [`pr-nat-rendezvous-spec.md`](pr-nat-rendezvous-spec.md).
 - `natTraversal.lugdunumCallback` — Lugdunum's LowID↔LowID callback (default **true**).
+
+## 10. Dual-stack server links (`v6=`)
+
+The admin page copies the server as an `ed2k://` link. When it advertises both families it offers a
+third, dual-stack link next to one link per family:
+
+```
+ed2k://|server|203.0.113.7|4661|/                          IPv4
+ed2k://|server|[2001:db8::7]|4661|/                        IPv6 (always bracketed)
+ed2k://|server|203.0.113.7|4661|/|v6=[2001:db8::7]|/       both
+```
+
+- The `v6=` field sits **after the `/` that closes the classic link**. Stock eMule returns the server
+  link at that `/` and never reads the tail, so it adds the plain IPv4 server.
+- The IPv6 is reached on the link's port; the field carries no port of its own.
+- A client that understands it stores the IPv6 as the server's other-family address (one server
+  entry), which is the address its IPv4→IPv6 handover dials.
+
+The full grammar and ingest rules are in eMuleQt's `docs/protocol/ipv6-spec.md` §6.4.

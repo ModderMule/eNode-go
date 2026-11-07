@@ -254,6 +254,55 @@ func TestIndexRendersUnresolvedAddresses(t *testing.T) {
 	}
 }
 
+func TestIndexRendersServerLinks(t *testing.T) {
+	static := StaticInfo{Name: "eNode", AdvertisedIP: "203.0.113.7", AdvertisedIPv6: "2001:db8::7", IPv6: true, TCPPort: 5555}
+	t.Logf("input: AdvertisedIP=%q AdvertisedIPv6=%q TCPPort=%d", static.AdvertisedIP, static.AdvertisedIPv6, static.TCPPort)
+	resp, err := http.Get(serveStatic(t, static, LiveStats{}) + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+	// The IPv6 literal is bracketed, the form eMuleQt's ED2KServerLink round-trips.
+	// The dual-stack link carries the IPv6 after the closing "/", where stock eMule
+	// has already returned the IPv4 server (eMuleQt ipv6-spec §6.4).
+	for _, want := range []string{
+		`data-link="ed2k://|server|203.0.113.7|5555|/|v6=[2001:db8::7]|/"`,
+		`data-link="ed2k://|server|203.0.113.7|5555|/"`,
+		`data-link="ed2k://|server|[2001:db8::7]|5555|/"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index HTML missing %q", want)
+		}
+	}
+	t.Logf("output: dual-stack and per-family server link buttons rendered")
+
+	v4only := StaticInfo{Name: "eNode", AdvertisedIP: "203.0.113.7", TCPPort: 5555}
+	t.Logf("input: AdvertisedIP=%q AdvertisedIPv6=%q", v4only.AdvertisedIP, v4only.AdvertisedIPv6)
+	resp1, err := http.Get(serveStatic(t, v4only, LiveStats{}) + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp1.Body.Close()
+	body1, _ := io.ReadAll(resp1.Body)
+	if strings.Contains(string(body1), "|v6=") {
+		t.Errorf("a single-family server must not render a dual-stack link")
+	}
+	t.Logf("output: no dual-stack link without an IPv6")
+
+	resp2, err := http.Get(serveStatic(t, StaticInfo{Name: "eNode"}, LiveStats{}) + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp2.Body.Close()
+	body2, _ := io.ReadAll(resp2.Body)
+	if strings.Contains(string(body2), "ed2k://|server|") {
+		t.Errorf("unresolved addresses must not render a server link")
+	}
+	t.Logf("output: no server link when both addresses are unresolved")
+}
+
 func TestUnknownPathIs404(t *testing.T) {
 	base, _ := testServer(t)
 	resp, err := http.Get(base + "/nope")
