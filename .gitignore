@@ -67,3 +67,4 @@ data/
 Thumbs.db
 ehthumbs.db
 desktop.ini
+tests/system

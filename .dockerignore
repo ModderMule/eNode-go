@@ -21,6 +21,7 @@ logs
 bin
 dist
 build
+tests/system
 
 # Not compiled in.
 docs
