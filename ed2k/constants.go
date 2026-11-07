@@ -498,7 +498,7 @@ const (
 )
 
 const (
-	ENodeVersionStr = "v0.5.17"
+	ENodeVersionStr = "v0.5.18"
 	ENodeVersionInt = 0x00000003
 	ENodeName       = "eNode-go"
 
