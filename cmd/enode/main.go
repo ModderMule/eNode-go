@@ -281,8 +281,11 @@ func run(ctx context.Context, configPath string) error {
 	// by source IP, so they would file us as that server. Replies already leave from
 	// the address they arrived on.
 	udpCfg.SourceIPv4 = udpSourceIPv4(cfg.Address, advertisedIP, localInterfaceIPs())
+	// Same address pins the listeners: what arrives on another local IPv4 belongs to
+	// another server and is dropped (ed2k.ForeignLocalIPv4).
+	tcpCfg.PinIPv4 = udpCfg.SourceIPv4
 	if udpCfg.SourceIPv4 != nil {
-		logging.Infof("udp: IPv4 sends leave from %s", udpCfg.SourceIPv4)
+		logging.Infof("udp: IPv4 sends leave from %s; tcp/udp ignore other local IPv4s", udpCfg.SourceIPv4)
 	}
 
 	// Hash lists and keywords: which files are refused on publish and withheld when

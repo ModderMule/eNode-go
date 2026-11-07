@@ -254,3 +254,25 @@ func readOne(t *testing.T, conn *net.UDPConn) ([]byte, *net.UDPAddr) {
 	}
 	return buf[:n], from
 }
+
+func TestForeignLocalIPv4(t *testing.T) {
+	pin := net.ParseIP("192.0.2.20")
+	cases := []struct {
+		dst, pin net.IP
+		want     bool
+	}{
+		{net.ParseIP("192.0.2.10"), pin, true},
+		{net.ParseIP("::ffff:192.0.2.10"), pin, true},
+		{net.ParseIP("192.0.2.20"), pin, false},
+		{net.ParseIP("::ffff:192.0.2.20"), pin, false},
+		{net.ParseIP("127.0.0.1"), pin, false},
+		{net.ParseIP("2001:db8::20"), pin, false},
+		{nil, pin, false},
+		{net.ParseIP("192.0.2.10"), nil, false},
+	}
+	for _, c := range cases {
+		if got := ForeignLocalIPv4(c.dst, c.pin); got != c.want {
+			t.Errorf("ForeignLocalIPv4(%v, %v) = %v, want %v", c.dst, c.pin, got, c.want)
+		}
+	}
+}

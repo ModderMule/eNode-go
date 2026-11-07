@@ -38,6 +38,10 @@ type TCPServerConfig struct {
 	RelatedSearch bool
 	// Gate holds the accept loop while closed; nil accepts from the start. See Gate.
 	Gate *Gate
+	// PinIPv4 is our advertised IPv4 on a wildcard bind (UDPServerConfig.SourceIPv4).
+	// Connections to any other local IPv4 are closed: they were meant for another
+	// server on this host. nil accepts all.
+	PinIPv4 net.IP
 }
 
 // BuildTCPFlags builds the SRV_TCPFLG_* capability word sent in OP_IDCHANGE and
@@ -101,6 +105,12 @@ func RunTCPServer(cfg TCPServerConfig, handler func(net.Conn)) (net.Listener, er
 					continue
 				}
 				return
+			}
+			if local, ok := conn.LocalAddr().(*net.TCPAddr); ok && ForeignLocalIPv4(local.IP, cfg.PinIPv4) {
+				logging.Debugf("tcp connection refused remote=%s local=%s: not our address %s",
+					conn.RemoteAddr(), local, cfg.PinIPv4)
+				_ = conn.Close()
+				continue
 			}
 			if cfg.MaxConnections > 0 && active.Add(1) > int64(cfg.MaxConnections) {
 				active.Add(-1)

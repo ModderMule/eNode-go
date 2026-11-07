@@ -45,6 +45,7 @@ type UDPServerConfig struct {
 	// another server's, and peers and clients drop or misfile what arrives. Set it
 	// only to an address a local interface holds; nil keeps the kernel's choice.
 	// Replies always leave from the address their datagram arrived on. Linux only.
+	// Datagrams arriving on any other local IPv4 are dropped (ForeignLocalIPv4).
 	SourceIPv4 net.IP
 }
 
@@ -169,6 +170,12 @@ func RunUDPServer(cfg UDPServerConfig, handler func([]byte, *net.UDPAddr, UDPRep
 			var dst net.IP
 			if oobn > 0 {
 				dst = arrivalAddress(oob[:oobn])
+			}
+			if ForeignLocalIPv4(dst, src4) {
+				// Addressed to another server on this host. Answering would make peers
+				// and clients file us under its IP.
+				logging.Debugf("udp %s: dropping datagram from %s to %s, not our address %s", conn.LocalAddr(), remote, dst, src4)
+				continue
 			}
 			// buf is reused on the next iteration, so the worker must get its own
 			// copy — handing it buf[:n] would race the following read.
@@ -349,6 +356,16 @@ func plainIPv4(ip net.IP) net.IP {
 		return nil
 	}
 	return v4
+}
+
+// ForeignLocalIPv4 reports whether a packet that arrived on local address dst was
+// meant for another address of this host than pin, our advertised IPv4. A wildcard
+// bind otherwise serves every IP of a host running several servers, and peers key
+// servers by IP: a stale entry for a neighbour's IP and our port never dies, and
+// gossip renames the neighbour after us. Loopback stays allowed; nil pin or dst = no.
+func ForeignLocalIPv4(dst, pin net.IP) bool {
+	pin, dst = plainIPv4(pin), plainIPv4(dst)
+	return pin != nil && dst != nil && !dst.IsLoopback() && !dst.Equal(pin)
 }
 
 // arrivalAddress is the local address a datagram arrived on, from its control

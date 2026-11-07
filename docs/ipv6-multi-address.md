@@ -85,6 +85,15 @@ of a dual-stack socket. If the kernel refuses a pinned send (the address left th
 interface), it goes out unpinned. Behind 1:1 NAT the advertised IP is not local, so
 the server keeps the kernel's choice; replies are still pinned to the arrival address.
 
+The same address also pins what the listeners accept. A wildcard bind receives on
+every IPv4 of the host, so without a filter the server answers pings, logins and
+gossip sent to a neighbour's IP: peers then keep an entry for "neighbour IP + our
+port" alive forever, hand it to clients in `OP_SERVERLIST`, and (keying peers by IP
+alone) rename the neighbour after us. So when the advertised IPv4 is pinned, TCP
+connections and UDP datagrams (main, obfuscated, gossip, PR_NAT) that arrive on any
+other local IPv4 are dropped; loopback is still served. IPv6 arrivals are not
+filtered. Stale entries elsewhere then fail their pings and age out.
+
 Other platforms keep the kernel's choice for IPv4. There, set `address` to the
 instance's IPv4 (the listeners then bind IPv4 only), or rewrite the source with an
 `iptables -t nat ... -m owner --uid-owner <user> -j SNAT` rule.
