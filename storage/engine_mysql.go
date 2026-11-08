@@ -364,6 +364,51 @@ func (m *MySQLEngine) Disconnect(info ClientInfo) {
 	}
 }
 
+// UpdateClient rewrites the client row's id_ed2k and port; sources join on it. A
+// file naming oldID:oldPort as its result source gets the new address, in chunks
+// for a large sharer as Disconnect clears it.
+func (m *MySQLEngine) UpdateClient(oldID uint32, oldPort uint16, info ClientInfo) error {
+	if err := m.ensureDB(); err != nil {
+		return err
+	}
+	defer m.sessions.lock(info.Hash)()
+	if info.StoreID == 0 {
+		if len(info.Hash) == 0 {
+			return nil
+		}
+		if err := m.db.QueryRow(`SELECT id FROM clients WHERE hash = ? LIMIT 1`, info.Hash).Scan(&info.StoreID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+	}
+	if err := m.execRetry("update client", func() error {
+		_, err := m.db.Exec(`UPDATE clients SET id_ed2k = ?, port = ? WHERE id = ?`, info.ID, info.Port, info.StoreID)
+		return err
+	}); err != nil {
+		return err
+	}
+	if oldID == 0 {
+		return nil
+	}
+	old := ClientInfo{StoreID: info.StoreID, ID: oldID, Port: oldPort}
+	m.offeredMu.Lock()
+	large := m.offered[info.StoreID] >= disconnectChunk
+	m.offeredMu.Unlock()
+	if large {
+		m.setResultSourceInChunks(old, info.ID, info.Port)
+		return nil
+	}
+	return m.execRetry("update result source", func() error {
+		_, err := m.db.Exec(`UPDATE files f JOIN sources s ON s.id_file = f.id
+			SET f.source_id = ?, f.source_port = ?
+			WHERE s.id_client = ? AND f.source_id = ? AND f.source_port = ?`,
+			info.ID, info.Port, info.StoreID, oldID, oldPort)
+		return err
+	})
+}
+
 // ReleaseOrphans reads the online rows through the online index, then disconnects
 // each one held does not claim, as its own session's close would.
 func (m *MySQLEngine) ReleaseOrphans(held func(hash []byte) bool) ([][]byte, error) {
@@ -1566,6 +1611,12 @@ func (m *MySQLEngine) addFilesChunk(files []File, clientInfo ClientInfo) error {
 // rows at a time. The single joined UPDATE it stands in for locks every one of the
 // client's file rows until it commits.
 func (m *MySQLEngine) clearResultSourceInChunks(info ClientInfo) {
+	m.setResultSourceInChunks(info, 0, 0)
+}
+
+// setResultSourceInChunks names newID:newPort as the result source of the files of
+// session info.StoreID that name info.ID:info.Port, disconnectChunk source rows at a time.
+func (m *MySQLEngine) setResultSourceInChunks(info ClientInfo, newID uint32, newPort uint16) {
 	after := uint64(0)
 	for {
 		fileIDs := make([]any, 0, disconnectChunk)
@@ -1602,10 +1653,11 @@ func (m *MySQLEngine) clearResultSourceInChunks(info ClientInfo) {
 		if len(fileIDs) == 0 {
 			return
 		}
-		args := append(fileIDs[:len(fileIDs):len(fileIDs)], info.ID, info.Port)
+		args := append([]any{newID, newPort}, fileIDs...)
+		args = append(args, info.ID, info.Port)
 		if err := m.execRetry("disconnect result source", func() error {
 			_, err := m.db.Exec(
-				`UPDATE files SET source_id = 0, source_port = 0
+				`UPDATE files SET source_id = ?, source_port = ?
 				 WHERE id IN (`+sqlPlaceholders(len(fileIDs))+`) AND source_id = ? AND source_port = ?`,
 				args...)
 			return err

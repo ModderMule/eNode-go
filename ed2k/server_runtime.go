@@ -91,6 +91,11 @@ type TCPRuntimeConfig struct {
 	// defaultRelatedMinClients). See config tcp.relatedSearch.
 	RelatedSearch     bool
 	RelatedMinClients int
+	// FirewallRecheck answers OpRecheckFirewall; FirewallRecheckInterval is the least
+	// time between two on one session (zero is defaultFirewallRecheckInterval). See
+	// config tcp.firewallRecheck.
+	FirewallRecheck         bool
+	FirewallRecheckInterval time.Duration
 }
 
 type UDPRuntimeConfig struct {
@@ -804,6 +809,11 @@ type tcpClient struct {
 	info     storage.ClientInfo
 	logged   bool
 	hasLowID bool
+	// recheckBusy is set while an OpRecheckFirewall probe runs; under infoMu.
+	// lastRecheck is when the last one was taken on, in seconds since connectedAt
+	// plus one (0: never); own goroutine only. Both sit in the padding here.
+	recheckBusy bool
+	lastRecheck uint32
 	// nick and software are what the client called itself at login, kept for the
 	// admin client list only. Written once under infoMu.
 	nick     string
@@ -1245,6 +1255,8 @@ func (c *tcpClient) handleED2K(opcode uint8, data *Buffer) {
 		c.handleQueryMoreResult()
 	case OpCallbackRequest:
 		c.handleCallbackRequest(data)
+	case OpRecheckFirewall:
+		c.handleRecheckFirewall(data)
 	case OpDisconnect:
 		// eMule sends this before closing. Acting on it releases the session, its LowID
 		// and its storage row immediately instead of after the read loop notices the FIN —
@@ -2143,6 +2155,13 @@ func (c *tcpClient) sendServerStatus() {
 }
 
 func (c *tcpClient) sendIDChange(id uint32) {
+	if packet := c.buildIDChange(id); packet != nil {
+		_ = c.writePacket(packet)
+	}
+}
+
+// buildIDChange is the OP_IDCHANGE for id, nil when it cannot be built.
+func (c *tcpClient) buildIDChange(id uint32) *Buffer {
 	// The observed IPv4 is taken from the accepted socket, never from anything the
 	// client claimed in OP_LOGINREQUEST. It is what lets a LowID client learn its
 	// own public IPv4 — see BuildIDChangePacket. A private or loopback address
@@ -2159,9 +2178,9 @@ func (c *tcpClient) sendIDChange(id uint32) {
 	}
 	packet, err := BuildIDChangePacket(id, c.server.tcp().Flags, c.server.tcp().Port, observed, natPorts)
 	if err != nil {
-		return
+		return nil
 	}
-	_ = c.writePacket(packet)
+	return packet
 }
 
 func (c *tcpClient) sendCallbackFailed() {
@@ -2235,6 +2254,11 @@ func (c *tcpClient) writePacket(packet *Buffer) error {
 func (c *tcpClient) writeRaw(data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	return c.writeRawLocked(data)
+}
+
+// writeRawLocked is writeRaw for a caller that holds writeMu.
+func (c *tcpClient) writeRawLocked(data []byte) error {
 	LogTCPRaw(c.module, "send", c.remoteHost, data)
 	c.logSendPayload(data)
 	// writeRaw is reachable from goroutines other than this connection's own —
@@ -2548,23 +2572,28 @@ func opcodeLabel(opcode uint8) string {
 }
 
 func (s *ServerRuntime) isFirewalled(client *tcpClient) bool {
+	return s.isFirewalledAt(client, client.snapshotInfo().Port)
+}
+
+// isFirewalledAt is isFirewalled against port instead of the session's own.
+func (s *ServerRuntime) isFirewalledAt(client *tcpClient, port uint16) bool {
 	if s.firewallProbe != nil {
 		return s.firewallProbe(client)
 	}
-	return s.probeFirewalled(client)
+	return s.probeFirewalled(client, port)
 }
 
-func (s *ServerRuntime) probeFirewalled(client *tcpClient) bool {
+func (s *ServerRuntime) probeFirewalled(client *tcpClient, port uint16) bool {
 	if client == nil {
 		return true
 	}
 	if s.tcp().SupportCrypt {
-		ok, err := s.probeClient(client, true, "tcp4", client.remoteHost)
+		ok, err := s.probeClient(client, port, true, "tcp4", client.remoteHost)
 		if err == nil && ok {
 			return false
 		}
 	}
-	ok, err := s.probeClient(client, false, "tcp4", client.remoteHost)
+	ok, err := s.probeClient(client, port, false, "tcp4", client.remoteHost)
 	return err != nil || !ok
 }
 
@@ -2593,11 +2622,11 @@ func (s *ServerRuntime) probeIPv6Reachable(client *tcpClient) bool {
 	}
 	host := net.IP(info.IPv6).String()
 	if s.tcp().SupportCrypt {
-		if ok, err := s.probeClient(client, true, "tcp6", host); err == nil && ok {
+		if ok, err := s.probeClient(client, info.Port, true, "tcp6", host); err == nil && ok {
 			return true
 		}
 	}
-	ok, err := s.probeClient(client, false, "tcp6", host)
+	ok, err := s.probeClient(client, info.Port, false, "tcp6", host)
 	return err == nil && ok
 }
 
@@ -2606,10 +2635,9 @@ func (s *ServerRuntime) probeIPv6Reachable(client *tcpClient) bool {
 // A LowID is decided from these, and without the reason there is no telling a
 // closed port from a slow answer or a reply eMule held back because the probe came
 // from another IP than the one it logged in to (AwaitingTestFromIP).
-func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network, host string) (bool, error) {
+func (s *ServerRuntime) probeClient(client *tcpClient, port uint16, enableCrypt bool, network, host string) (bool, error) {
 	start := time.Now()
-	ok, source, err := s.dialHello(client, enableCrypt, network, host)
-	port := client.snapshotInfo().Port
+	ok, source, err := s.dialHello(client, port, enableCrypt, network, host)
 	elapsed := time.Since(start).Round(time.Millisecond)
 	if ok && err == nil {
 		logging.Debugf("dial-back ok remote=%s network=%s target=%s crypt=%t source=%s elapsed=%s",
@@ -2625,12 +2653,11 @@ func (s *ServerRuntime) probeClient(client *tcpClient, enableCrypt bool, network
 // dialHello dials the client and completes a hello exchange. It returns the local
 // address the dial left from ("" when the dial failed) and errors that name the
 // step that failed.
-func (s *ServerRuntime) dialHello(client *tcpClient, enableCrypt bool, network, host string) (bool, string, error) {
-	info := client.snapshotInfo()
-	if info.Port == 0 {
+func (s *ServerRuntime) dialHello(client *tcpClient, port uint16, enableCrypt bool, network, host string) (bool, string, error) {
+	if port == 0 {
 		return false, "", fmt.Errorf("client port is 0")
 	}
-	addr := net.JoinHostPort(host, fmt.Sprintf("%d", info.Port))
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 	dialer := net.Dialer{Timeout: s.tcp().ConnectionTimeout}
 	// Only bind a local source address whose family matches the dial network;
 	// binding a v4 LocalAddr to a tcp6 dial (or vice versa) fails outright.
@@ -3651,6 +3678,10 @@ func (c *tcpClient) releaseSession() {
 			logging.Debugf("tcp session handed off remote=%s id=%d storeID=%d", c.remoteHost, info.ID, info.StoreID)
 			return
 		}
+		// Under storeMu, so a firewall recheck (promoteSession) cannot move the ID
+		// between reading and freeing it.
+		c.storeMu.Lock()
+		c.released = true
 		c.infoMu.RLock()
 		hadLowID, wasLogged := c.hasLowID, c.logged
 		c.infoMu.RUnlock()
@@ -3658,8 +3689,6 @@ func (c *tcpClient) releaseSession() {
 		if hadLowID {
 			c.server.LowIDs.Remove(info.ID)
 		}
-		c.storeMu.Lock()
-		c.released = true
 		if wasLogged {
 			c.server.unregisterSession(info.Hash, c)
 			c.server.Storage.Disconnect(info)

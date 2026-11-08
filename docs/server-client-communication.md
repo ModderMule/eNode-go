@@ -43,6 +43,7 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 | `OP_GETSOURCES_IPV6` | `0x24` | Client -> Server | IPv6 tag-block source query (opt-in); payload as `OP_GETSOURCES2`. |
 | `OP_FOUNDSOURCES_IPV6` | `0x25` | Server -> Client | IPv6 tag-block source response (per source: `id+port+tagCount+tags`). |
 | `OP_CALLBACKREQUESTED_IPV6` | `0x26` | Server -> v6-capable client | IPv6 form of `OP_CALLBACKREQUESTED`; sent when the requester has no usable IPv4 but a reachable public IPv6. |
+| `OP_RECHECKFIREWALL` | `0x27` | Client -> Server | After login: `tcpPort(uint16)`, empty or `0` = current port. Re-tests the port; answer is a fresh `OP_IDCHANGE`. See [Firewall recheck](#firewall-recheck). |
 
 ### File identity
 
@@ -126,6 +127,29 @@ The cost is the one 17.3 set out to remove: a hash-only answer mixes the sources
 size offered under that hash, so a client can be handed sources for a different file. That
 is already true of 0x9a. Unverified: what eserver 17.14/17.15 does with a 16-byte
 `OP_GETSOURCES` — worth a `tests/interop` case before implementing.
+
+### Firewall recheck
+
+For a client whose port became reachable after login (VPN / NAT-PMP / UPnP mapping done
+late) or whose mapped port changed mid-session. No reconnect needed.
+
+- Advertised: `OP_IDCHANGE` tcpFlags bit `SRV_TCPFLG_FIREWALL_RECHECK 0x800000` (`0x400000` is ed2k-server's IPV6_PROBE). Config `tcp.firewallRecheck` (default on).
+- Request: `OP_RECHECKFIREWALL 0x27` (PR_ED2K), only after login (before = dropped, see below). Payload `<tcpPort uint16 LE>`; empty or `0` keeps the session port. Other lengths ignored.
+- Server dial-tests the port like at login (obfuscated hello first if the client supports crypt, then plain; same source address; user hash must match). Address that cannot be a HighID (`.0`, v6-only): no dial, stays LowID.
+- Reply: always a fresh `OP_IDCHANGE`, same layout as at login (24-byte form for NAT-callback clients):
+  - LowID + reachable: promoted to HighID (`id = IPv4`), LowID freed, NAT-callback state and NAT-T token of the old LowID dropped.
+  - LowID + not reachable: same LowID; requested port taken anyway.
+  - HighID: port moves only if the new one answered; never demoted.
+  - Storage (client row, sources, search-result source) follows the new id/port.
+- Throttle: one request per `tcp.firewallRecheckInterval` seconds (default 120) per session, one in flight. Throttled = no reply.
+
+```
+client                         server
+  | OP_RECHECKFIREWALL <port>  -->|
+  |                               |-- dial-back hello to ip:port
+  |                               |<- hello answer (same user hash)
+  |<-- OP_IDCHANGE <HighID>       |   (or current LowID if no answer)
+```
 
 ### Login precondition
 

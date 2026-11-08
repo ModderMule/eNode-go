@@ -191,6 +191,10 @@ type manticoreOp struct {
 	offline   bool
 	clientKey uint64
 	at        int64
+	// readdress moves the client's documents to srcID:srcPort (UpdateClient).
+	readdress bool
+	srcID     uint32
+	srcPort   uint16
 }
 
 // manticoreDoc is one source row as the table stores it.
@@ -299,6 +303,16 @@ func (m *ManticoreEngine) AddFiles(files []File, info ClientInfo) {
 func (m *ManticoreEngine) Disconnect(info ClientInfo) {
 	m.Engine.Disconnect(info)
 	m.enqueue(manticoreOp{offline: true, clientKey: manticoreKey(info.Hash), at: time.Now().Unix()})
+}
+
+// UpdateClient runs the database's update, then moves the client's documents to the
+// new address.
+func (m *ManticoreEngine) UpdateClient(oldID uint32, oldPort uint16, info ClientInfo) error {
+	err := m.Engine.UpdateClient(oldID, oldPort, info)
+	if len(info.Hash) > 0 {
+		m.enqueue(manticoreOp{readdress: true, clientKey: manticoreKey(info.Hash), srcID: info.ID, srcPort: info.Port})
+	}
+	return err
 }
 
 // ReleaseOrphans runs the database's release, then takes the released clients'
@@ -518,6 +532,11 @@ func (m *ManticoreEngine) writeLoop() {
 			m.markOffline(op)
 			return
 		}
+		if op.readdress {
+			flush()
+			m.readdress(op)
+			return
+		}
 		pending = append(pending, op.docs...)
 		if len(pending) >= m.cfg.BatchSize {
 			flush()
@@ -686,7 +705,7 @@ func (m *ManticoreEngine) reconcile() {
 // enqueue hands an op to the writer, or drops it when the queue is full: an offer
 // must never wait on the index.
 func (m *ManticoreEngine) enqueue(op manticoreOp) {
-	if !op.offline && len(op.docs) == 0 {
+	if !op.offline && !op.readdress && len(op.docs) == 0 {
 		return
 	}
 	select {
@@ -724,6 +743,20 @@ func (m *ManticoreEngine) markOffline(op manticoreOp) {
 	defer cancel()
 	if _, err := m.db.ExecContext(ctx, statement, args...); err != nil {
 		m.lost(1, fmt.Errorf("marking a client offline: %w", err))
+	}
+}
+
+// readdress mirrors UpdateClient.
+func (m *ManticoreEngine) readdress(op manticoreOp) {
+	if !m.up.Load() {
+		m.dirty.Store(true)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), manticoreWriteTimeout)
+	defer cancel()
+	if _, err := m.db.ExecContext(ctx, "UPDATE "+m.cfg.Table+" SET src_id = ?, src_port = ? WHERE client_key = ?",
+		op.srcID, op.srcPort, op.clientKey); err != nil {
+		m.lost(1, fmt.Errorf("moving a client to a new address: %w", err))
 	}
 }
 

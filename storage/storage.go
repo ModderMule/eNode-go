@@ -415,6 +415,30 @@ func (m *MemoryEngine) Disconnect(info ClientInfo) {
 	}
 }
 
+// UpdateClient rewrites the session's ID, port and LowID flag, and the id/port copy
+// each of its sources keeps. Search results read the sources, so they follow.
+func (m *MemoryEngine) UpdateClient(_ uint32, _ uint16, info ClientInfo) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	storeID := info.StoreID
+	if storeID == 0 {
+		storeID = m.resolveStoreIDLocked(info)
+	}
+	client, ok := m.clients[storeID]
+	if !ok {
+		return nil
+	}
+	client.info.ID, client.info.Port, client.info.LowID = info.ID, info.Port, info.LowID
+	for _, head := range client.offered {
+		m.eachSourceLocked(head, func(s *memSource) {
+			if s.peer.storeID == storeID {
+				s.id, s.port = info.ID, info.Port
+			}
+		})
+	}
+	return nil
+}
+
 // ReleaseOrphans disconnects every client whose hash held does not claim. held is
 // called with the lock free, so it may take locks of its own.
 func (m *MemoryEngine) ReleaseOrphans(held func(hash []byte) bool) ([][]byte, error) {

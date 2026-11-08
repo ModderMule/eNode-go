@@ -288,18 +288,25 @@ func (m *MongoDBEngine) Disconnect(info ClientInfo) {
 	if info.ID == 0 {
 		return
 	}
-	hashes, err := m.db.Collection("sources").Distinct(ctx, "file_hash", bson.M{"client_hash": info.Hash}).Raw()
-	if err != nil {
+	if err := m.setResultSource(ctx, info.Hash, info.ID, info.Port, 0, 0); err != nil {
 		logging.Errorf("mongodb disconnect result source hash=%x failed: %v", info.Hash, err)
-		return
+	}
+}
+
+// setResultSource names newID:newPort as the result source of the files client hash
+// offers that name oldID:oldPort.
+func (m *MongoDBEngine) setResultSource(ctx context.Context, hash []byte, oldID uint32, oldPort uint16, newID uint32, newPort uint16) error {
+	hashes, err := m.db.Collection("sources").Distinct(ctx, "file_hash", bson.M{"client_hash": hash}).Raw()
+	if err != nil {
+		return err
 	}
 	values, err := hashes.Values()
 	if err != nil || len(values) == 0 {
-		return
+		return err
 	}
 	// disconnectChunk hashes per update, each with its own deadline. A client
 	// sourcing a hundred thousand files made this one statement with a megabyte-sized
-	// $in, which had to finish inside what the two updates above left of ctx.
+	// $in, which had to finish inside what the updates before left of ctx.
 	in := make([]any, len(values))
 	for i, v := range values {
 		in[i] = v
@@ -307,14 +314,36 @@ func (m *MongoDBEngine) Disconnect(info ClientInfo) {
 	for _, chunk := range chunkAny(in, disconnectChunk) {
 		chunkCtx, chunkCancel := m.opContext()
 		_, err := m.db.Collection("files").UpdateMany(chunkCtx,
-			bson.M{"hash": bson.M{"$in": chunk}, "source_id": info.ID, "source_port": info.Port},
-			bson.M{"$set": bson.M{"source_id": uint32(0), "source_port": uint16(0)}})
+			bson.M{"hash": bson.M{"$in": chunk}, "source_id": oldID, "source_port": oldPort},
+			bson.M{"$set": bson.M{"source_id": newID, "source_port": newPort}})
 		chunkCancel()
 		if err != nil {
-			logging.Errorf("mongodb disconnect result source hash=%x failed: %v", info.Hash, err)
-			return
+			return err
 		}
 	}
+	return nil
+}
+
+// UpdateClient rewrites the client document's id_ed2k and port; sources look it up
+// by hash. A file naming oldID:oldPort as its result source gets the new address.
+func (m *MongoDBEngine) UpdateClient(oldID uint32, oldPort uint16, info ClientInfo) error {
+	if err := m.ensureDB(); err != nil {
+		return err
+	}
+	if len(info.Hash) == 0 {
+		return nil
+	}
+	defer m.sessions.lock(info.Hash)()
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
+	defer cancel()
+	if _, err := m.db.Collection("clients").UpdateOne(ctx, bson.M{"hash": info.Hash},
+		bson.M{"$set": bson.M{"id_ed2k": info.ID, "port": info.Port}}); err != nil {
+		return err
+	}
+	if oldID == 0 {
+		return nil
+	}
+	return m.setResultSource(ctx, info.Hash, oldID, oldPort, info.ID, info.Port)
 }
 
 // OfferedCount answers from the count Connect, addFilesChunk and Disconnect keep.

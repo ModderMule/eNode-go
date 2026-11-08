@@ -36,6 +36,9 @@ type TCPServerConfig struct {
 	// RelatedSearch advertises FlagRelatedSearch (0x40): this server answers
 	// Lugdunum's related search (config tcp.relatedSearch).
 	RelatedSearch bool
+	// FirewallRecheck advertises FlagFirewallRecheck (0x800000): a logged-in client
+	// may ask for its port to be re-tested (OpRecheckFirewall, tcp.firewallRecheck).
+	FirewallRecheck bool
 	// Gate holds the accept loop while closed; nil accepts from the start. See Gate.
 	Gate *Gate
 	// PinIPv4 is our advertised IPv4 on a wildcard bind (UDPServerConfig.SourceIPv4).
@@ -74,6 +77,9 @@ func BuildTCPFlags(cfg TCPServerConfig) uint32 {
 	}
 	if cfg.RelatedSearch {
 		flags += FlagRelatedSearch
+	}
+	if cfg.FirewallRecheck {
+		flags += FlagFirewallRecheck
 	}
 	return flags
 }

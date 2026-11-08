@@ -156,6 +156,27 @@ type TCPConfig struct {
 	MoreResults MoreResultsConfig `yaml:"moreResults"`
 	// RelatedSearch answers Lugdunum's related search over TCP.
 	RelatedSearch RelatedSearchConfig `yaml:"relatedSearch"`
+	// FirewallRecheck lets a logged-in client ask for its port to be re-tested and be
+	// promoted to HighID on the same session (OP_RECHECKFIREWALL 0x27, flag 0x800000).
+	// Default true. FirewallRecheckInterval is the least seconds between two requests
+	// of one session; 0 or less is the default. Pointers so false/0 differ from absent.
+	FirewallRecheck         *bool `yaml:"firewallRecheck"`
+	FirewallRecheckInterval *int  `yaml:"firewallRecheckInterval"`
+}
+
+// DefaultFirewallRecheckInterval is the default of tcp.firewallRecheckInterval, seconds.
+const DefaultFirewallRecheckInterval = 120
+
+// FirewallRecheckOrDefault resolves tcp.firewallRecheck.
+func (c TCPConfig) FirewallRecheckOrDefault() bool { return boolOrDefault(c.FirewallRecheck, true) }
+
+// FirewallRecheckIntervalOrDefault resolves tcp.firewallRecheckInterval.
+func (c TCPConfig) FirewallRecheckIntervalOrDefault() time.Duration {
+	secs := intOrDefault(c.FirewallRecheckInterval, DefaultFirewallRecheckInterval)
+	if secs <= 0 {
+		secs = DefaultFirewallRecheckInterval
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // RelatedSearchConfig controls Lugdunum's related search: for a `related::HASH`

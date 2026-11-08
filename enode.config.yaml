@@ -100,6 +100,12 @@ tcp:
   relatedSearch:
     enabled: true
     minClients: 5
+  # OP_RECHECKFIREWALL (0x27, flag 0x800000): a logged-in client asks for its port to be
+  # re-tested (VPN/UPnP port opened after login, or its mapped port changed) and is moved
+  # to HighID on the same session when reachable. firewallRecheckInterval is the least
+  # seconds between two requests of one session.
+  firewallRecheck: true
+  firewallRecheckInterval: 120
 
 udp:
   port: 5559

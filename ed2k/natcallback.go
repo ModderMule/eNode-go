@@ -899,6 +899,25 @@ func (n *natCallbackState) token(c *tcpClient) []byte {
 	return append([]byte(nil), st.token[:]...)
 }
 
+// forgetLowID drops the NAT-T state keyed by a LowID session c no longer holds (a
+// firewall recheck promoted it), and its token: a HighID is no callback target.
+func (n *natCallbackState) forgetLowID(id uint32, c *tcpClient) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	delete(n.recent, id)
+	delete(n.foreign, id)
+	delete(n.keepalives, id)
+	for key, named := range n.foreignNamed {
+		delete(named, id)
+		if len(named) == 0 {
+			delete(n.foreignNamed, key)
+		}
+	}
+	if st := n.sessions[c]; st != nil {
+		st.token, st.hasToken, st.counter = [16]byte{}, false, 0
+	}
+}
+
 // dropSession forgets a released session's 0x9F state.
 func (n *natCallbackState) dropSession(c *tcpClient) {
 	n.mu.Lock()

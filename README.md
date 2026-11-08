@@ -92,6 +92,10 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   `related::<hash>` (eMule's "Search related files") returns what the file's sharers
   also share, once at least `tcp.relatedSearch.minClients` (5) users share it. See
   [`docs/server-client-communication.md`](docs/server-client-communication.md#hash-and-related-search).
+- Firewall recheck: a logged-in client sends `OP_RECHECKFIREWALL` (0x27) once its port
+  is reachable (late VPN/NAT-PMP mapping) or has moved, and is promoted to HighID on the
+  same session (`tcp.firewallRecheck`, flag 0x800000). See
+  [`docs/server-client-communication.md`](docs/server-client-communication.md#firewall-recheck).
 - Login required before any request: every TCP opcode but `OP_LOGINREQUEST` and
   `OP_DISCONNECT` is refused on a session that has not logged in, so nothing can reach
   the index without an identity the server can account for and clean up. See

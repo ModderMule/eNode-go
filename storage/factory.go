@@ -38,6 +38,11 @@ type Engine interface {
 	// Disconnect marks a session offline. StoreID names it; zero falls back to the
 	// row of info.Hash.
 	Disconnect(ClientInfo)
+	// UpdateClient moves a live session (info.StoreID, else info.Hash) to info.ID and
+	// info.Port: a firewall recheck promoted it to HighID or its port changed. Its
+	// sources follow, and a search result naming it as oldID:oldPort names the new
+	// address.
+	UpdateClient(oldID uint32, oldPort uint16, info ClientInfo) error
 	// ReleaseOrphans disconnects every client still online whose hash held does not
 	// claim, and returns those hashes. For a successor of a handover, whose storage
 	// kept the predecessor's online flags (Config.KeepOnline): a row whose session

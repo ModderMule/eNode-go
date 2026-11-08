@@ -59,7 +59,7 @@ func TestDialHelloNamesTheFailingStep(t *testing.T) {
 			client.info.Hash = loginHash
 			client.info.Port = port
 
-			ok, source, err := rt.dialHello(client, false, "tcp4", "127.0.0.1")
+			ok, source, err := rt.dialHello(client, client.snapshotInfo().Port, false, "tcp4", "127.0.0.1")
 			t.Logf("input: target=127.0.0.1:%d answerHash=%x silent=%t", port, tc.answer, tc.silent)
 			t.Logf("output: ok=%t source=%q err=%v", ok, source, err)
 

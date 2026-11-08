@@ -149,17 +149,25 @@ func getSourcesItems(hash []byte, size uint32) []PacketItem {
 // all others reachable (HighID), without a dial-back.
 func handoffRuntime(t *testing.T) (*ServerRuntime, *storage.MemoryEngine, string) {
 	t.Helper()
+	return handoffRuntimeProbe(t, func(c *tcpClient) bool { return c.snapshotInfo().Port == 4662 })
+}
+
+// handoffRuntimeProbe is handoffRuntime with its own firewall verdict, set before the
+// listener serves anyone.
+func handoffRuntimeProbe(t *testing.T, firewalled func(*tcpClient) bool) (*ServerRuntime, *storage.MemoryEngine, string) {
+	t.Helper()
 	engine := storage.NewMemoryEngine()
 	rt := NewServerRuntime(TCPRuntimeConfig{
-		Address:      "127.0.0.1",
-		Port:         4661,
-		Hash:         bytes.Repeat([]byte{0x11}, 16),
-		AllowLowIDs:  true,
-		SupportCrypt: true,
-		MessageLogin: "welcome",
-		MessageLowID: "lowid",
+		Address:         "127.0.0.1",
+		Port:            4661,
+		Hash:            bytes.Repeat([]byte{0x11}, 16),
+		AllowLowIDs:     true,
+		SupportCrypt:    true,
+		MessageLogin:    "welcome",
+		MessageLowID:    "lowid",
+		FirewallRecheck: true,
 	}, UDPRuntimeConfig{}, engine)
-	rt.firewallProbe = func(c *tcpClient) bool { return c.snapshotInfo().Port == 4662 }
+	rt.firewallProbe = firewalled
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

@@ -57,3 +57,19 @@ func TestMongoDisconnectClearsResultSource(t *testing.T) {
 		t.Fatalf("want 0x0b000001 then 0, got %#x then %#x:%d", before.SourceID, after.SourceID, after.SourcePort)
 	}
 }
+
+// A firewall recheck moves a client to its HighID and a new port; its sources and
+// the search result's source follow.
+func TestMySQLUpdateClientMovesSources(t *testing.T) {
+	requireIntegration(t)
+	engine, _ := startMySQL(t, "enode")
+	moved, sources, result := updateClientMovesSources(t, engine)
+	checkUpdatedClient(t, engine, moved, sources, result)
+}
+
+func TestMongoUpdateClientMovesSources(t *testing.T) {
+	requireIntegration(t)
+	engine := startMongoEngine(t, "enode_update_client")
+	moved, sources, result := updateClientMovesSources(t, engine)
+	checkUpdatedClient(t, engine, moved, sources, result)
+}
