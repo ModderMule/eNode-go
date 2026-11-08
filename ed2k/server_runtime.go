@@ -220,6 +220,9 @@ type ServerRuntime struct {
 	parking atomic.Pointer[parkRound]
 	// natCallback is the state of Lugdunum's NAT callback (natcallback.go).
 	natCallback natCallbackState
+	// sessionTokens holds the tokens logins claim (sessiontakeover.go), outside tcpClient
+	// so an idle session stays the same size.
+	sessionTokens sessionTokenState
 	// udpPorts is the last-seen server-UDP source port per address, or nil while
 	// UDPRuntimeConfig.TrackClientUDPPorts is off; see udpports.go. The client's
 	// server-UDP listener binds an ephemeral port the TCP login never reveals, so
@@ -1321,6 +1324,10 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// same host as well as a same-IP match does. The old session stays up until this
 	// login is accepted, so the client never goes offline — see handShake.
 	//
+	// A third: the login sends back the TagNatToken the live session was issued
+	// over its own TCP. Any address and family, so also IPv6 → IPv4 (HighID recheck)
+	// and IPv4 → IPv6 behind NAT66 — see takeoverFrom.
+	//
 	// Anything else first probes the live session (probeStaleSession): a client that
 	// crashed and came back on another address family — its last session was IPv6,
 	// the restart logs in over IPv4 — matches neither exception, and its dead session
@@ -1336,8 +1343,9 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// has just written.
 	if len(req.Hash) == 16 && c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}) {
 		c.replaceSameIPSession(req.Hash)
-		if c.dualStackHandoverFrom(req.Hash, req.Port) != nil {
-			logging.Infof("login takes over ipv4 session after acceptance remote=%s hash=%x", c.remoteHost, req.Hash)
+		if old, how := c.takeoverFrom(req.Hash, req.Port, loginSessionToken(req.Tags)); old != nil {
+			logging.Infof("login takes over live session after acceptance remote=%s hash=%x by=%s oldRemote=%s",
+				c.remoteHost, req.Hash, how, old.remoteHost)
 		} else {
 			c.probeStaleSession(req.Hash)
 			switch {
@@ -1371,6 +1379,19 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 				v6Bytes = append([]byte(nil), pb[:]...)
 			}
 		}
+		// A login taking over a session by its token keeps that session's IPv6: an
+		// IPv6 session moving to IPv4 (a HighID recheck) often has no address it
+		// could advertise itself, NAT66 for one.
+		if v6Bytes == nil {
+			if old, how := c.takeoverFrom(req.Hash, req.Port, loginSessionToken(req.Tags)); old != nil && how == takeoverByToken {
+				if prev := old.snapshotInfo().IPv6; len(prev) == 16 {
+					v6Bytes = append([]byte(nil), prev...)
+					sentV6Tag = true
+					logging.Infof("login keeps ipv6 of the session it takes over remote=%s ipv6=%s",
+						c.remoteHost, net.IP(v6Bytes).String())
+				}
+			}
+		}
 		v6Capable = c.connectedV6 || sentV6Tag
 	}
 
@@ -1387,6 +1408,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	c.holePunchExt = c.server.foreignCallbackEnabled() && loginFlags(req.Tags)&SrvCapHolePunchExt != 0
 	c.nick, c.software = loginNick(req.Tags), loginSoftware(req.Tags)
 	c.ed3kID = loginEd3k(req.Tags)
+	c.server.sessionTokens.setClaimed(c, loginSessionToken(req.Tags))
 	c.info.IPv6 = v6Bytes
 	// ipv6Capable is read cross-goroutine by the callback path (isV6Capable), so it
 	// is written under infoMu here rather than as a bare field assignment.
@@ -1478,7 +1500,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 }
 
 func (c *tcpClient) handShake() {
-	if !c.completeDualStackHandover() {
+	if !c.completeTakeover() {
 		return
 	}
 	// From Connect writing the row until registerSession indexes it, the hash is
@@ -1499,9 +1521,9 @@ func (c *tcpClient) handShake() {
 
 	// Indexed by user hash so a PR_NAT keepalive from this client can keep its session
 	// alive. Removed in run()'s defer.
-	c.server.registerSession(info.Hash, c)
 	// Before the OP_SERVERIDENT below, which carries it.
-	c.server.issueNatToken(c)
+	c.issueSessionToken()
+	c.server.registerSession(info.Hash, c)
 
 	c.sendServerMessage(c.server.tcp().MessageLogin)
 	c.sendServerMessage("server version " + LoginVersionStr)
@@ -3620,56 +3642,13 @@ func (c *tcpClient) probeStaleSession(hash []byte) {
 		c.remoteHost, hash, old.remoteHost)
 }
 
-// dualStackHandoverFrom returns the live IPv4 session for hash that this IPv6 login
-// may take over: it advertised this connection's source address as its CT_MOD_IP_V6
-// and the same listen port. Nil for anything else, which is then refused as usual.
-func (c *tcpClient) dualStackHandoverFrom(hash []byte, port uint16) *tcpClient {
-	if !c.connectedV6 || c.peerIP == nil {
-		return nil
-	}
-	old := c.server.sessionByHash(hash)
-	if old == nil || old == c || old.connectedV6 {
-		return nil
-	}
-	info := old.snapshotInfo()
-	if len(info.IPv6) != 16 || info.Port != port || !net.IP(info.IPv6).Equal(c.peerIP) {
-		return nil
-	}
-	return old
-}
-
-// completeDualStackHandover releases the IPv4 session an accepted IPv6 login takes
-// over, right before the new storage row is written: the old row must go first, as
-// in replaceSameIPSession. Re-derived here rather than remembered from the login
-// check, so a session costs no extra field. False when the hash is online from a
-// session this login may not take over; it is then refused like any duplicate.
-func (c *tcpClient) completeDualStackHandover() bool {
-	info := c.snapshotInfo()
-	if len(info.Hash) != 16 || !c.server.Storage.IsConnected(storage.ClientInfo{Hash: info.Hash}) {
-		return true
-	}
-	if old := c.dualStackHandoverFrom(info.Hash, info.Port); old != nil {
-		oldInfo := old.snapshotInfo()
-		logging.Infof("ipv6 login replaces ipv4 session remote=%s hash=%x oldRemote=%s oldID=%d",
-			c.remoteHost, info.Hash, old.remoteHost, oldInfo.ID)
-		old.closeWithReason("replaced-by-ipv6-session")
-		old.releaseSession()
-	}
-	if c.server.Storage.IsConnected(storage.ClientInfo{Hash: info.Hash}) {
-		logging.Warnf("login rejected remote=%s hash=%x: already connected", c.remoteHost, info.Hash)
-		c.sendServerMessage("Already connected from another session.")
-		c.closeWithReason("duplicate-login")
-		return false
-	}
-	return true
-}
-
 // releaseSession frees everything a session holds — its LowID, its hash index entry and
 // its storage row — closes the socket and logs the close. Runs once however many callers
 // reach it; see releaseOnce.
 func (c *tcpClient) releaseSession() {
 	c.releaseOnce.Do(func() {
 		c.server.natCallback.dropSession(c)
+		c.server.sessionTokens.drop(c)
 		if c.handedOff.Load() {
 			// The successor serves the session on its own copy of the socket; closing
 			// this one sends the client nothing.

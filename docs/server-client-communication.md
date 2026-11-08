@@ -151,6 +151,35 @@ client                         server
   |<-- OP_IDCHANGE <HighID>       |   (or current LowID if no answer)
 ```
 
+### Session takeover
+
+One session per user hash; a second login for a live hash is refused unless it proves it
+is the same client (hash and port are public, so they prove nothing). The proof lets a
+client move its session — IPv4 ⇄ IPv6, HighID recheck — without going offline.
+
+- The token is ed2k-server's NAT-T token: `OP_SERVERIDENT` tag `ST_NATT_TOKEN 0xAC` (hash16)
+  with `ST_NATT_PROOF 0xA9` (u32 1), 16 random bytes per login, only over that session's TCP.
+  eNode-go gives one to every session (NAT-T flags or not); the 0x9F proof uses it as before.
+- A later `OP_LOGINREQUEST` with the same hash and tag `0xAC` = that token takes the live
+  session over: any address, family and port. The old session goes only once the new login
+  is accepted (`reason=replaced-by-takeover`). Each login gets a new token; a wrong or spent
+  one is refused like any duplicate. `0xAC` is free as a login tag in
+  eMule/eMuleAI/MorphXT; ed2k-server ignores it there (no takeover, refused as a duplicate).
+- Also without a token: an IPv6 login from the `CT_MOD_IP_V6` the live IPv4 session
+  advertised, same port (`replaced-by-ipv6-session`). Never the reverse: an IPv4 login's
+  `CT_MOD_IP_V6` is its own claim.
+- A token takeover without `CT_MOD_IP_V6` keeps the old session's IPv6 (an IPv6 session moving
+  to IPv4 often has no local address to advertise, e.g. NAT66). It is re-probed as at login.
+- Tokens live in process memory: a session carried over by a server handoff has none.
+
+```
+client                          server
+  |== IPv6 session ==============|  OP_SERVERIDENT ... 0xAC <token>
+  |-- new TCP over IPv4 -------->|
+  |   OP_LOGINREQUEST 0xAC <token>|  live IPv6 session matches the token
+  |<-- OP_IDCHANGE <HighID>      |  IPv6 session released, its IPv6 kept
+```
+
 ### Login precondition
 
 Every TCP opcode except `OP_LOGINREQUEST (0x01)` and `OP_DISCONNECT (0x18)` requires a

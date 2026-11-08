@@ -119,7 +119,7 @@ func (c *tcpClient) promoteSession(port uint16, promote bool) {
 	}
 	c.storeMu.Unlock()
 	if promoted {
-		c.server.natCallback.forgetLowID(old.ID, c)
+		c.server.natCallback.forgetLowID(old.ID)
 		logging.Infof("firewall recheck promoted remote=%s lowID=%d -> highID=%d port=%d",
 			c.remoteHost, old.ID, info.ID, info.Port)
 	} else if info.Port != old.Port {

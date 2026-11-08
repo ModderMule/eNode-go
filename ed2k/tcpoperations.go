@@ -38,8 +38,8 @@ type ServerConfig struct {
 	// UDPFlags is the server's UDP flag word, sent as ST_UDPFLAGS (TagServerUDPFlags).
 	// Zero omits the tag.
 	UDPFlags uint32
-	// NatToken is this session's NAT-T token, sent as TagNatToken with TagNatProof.
-	// Empty omits both.
+	// NatToken is this session's token (NAT-T proof and takeover), sent as TagNatToken
+	// with TagNatProof. Empty omits both.
 	NatToken []byte
 }
 
@@ -455,7 +455,7 @@ func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
 	if conf.UDPFlags != 0 {
 		tags = append(tags, Tag{Type: TypeUint32, Code: TagServerUDPFlags, Data: conf.UDPFlags})
 	}
-	// Per session, and only for a session that may send the proof 0x9F.
+	// Per session; always with TagNatProof, so a client never puts the token on UDP.
 	if len(conf.NatToken) == 16 {
 		tags = append(tags,
 			Tag{Type: TypeHash, Code: TagNatToken, Data: conf.NatToken},

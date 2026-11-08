@@ -170,8 +170,8 @@ func TestDualStackHandoverOldSessionGoneMeanwhile(t *testing.T) {
 	first.releaseSession()
 	t.Logf("input: ipv4 session released before the ipv6 handshake")
 
-	ok := second.completeDualStackHandover()
-	t.Logf("output: completeDualStackHandover=%t", ok)
+	ok := second.completeTakeover()
+	t.Logf("output: completeTakeover=%t", ok)
 	if !ok {
 		t.Fatal("handover refused although the old session was already gone")
 	}

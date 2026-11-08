@@ -553,6 +553,8 @@ func tagName(code uint8) string {
 		return "metaapifp"
 	case TagEd3k:
 		return "ed3k"
+	case TagNatToken:
+		return "sessiontoken"
 	default:
 		return fmt.Sprintf("0x%x", code)
 	}

@@ -309,7 +309,10 @@ const (
 	TagServerUDPFlags uint8 = 0x92
 	// TagNatToken is ed2k-server's ST_NATT_TOKEN (andrey23127/ed2k-server#40): 16
 	// random bytes per login, sent over the session's TCP only. A 0x9F that proves it
-	// (TagNatProof) is believed from any address.
+	// (TagNatProof) is believed from any address. eNode-go extension: the same token
+	// sent back as a tag of OP_LOGINREQUEST with the same hash takes that live session
+	// over once accepted, from any address or family (sessiontakeover.go). Free as a
+	// login tag in eMule, eMuleAI, MorphXT and ed2k-server, which ignores it there.
 	TagNatToken uint8 = 0xac
 	// TagNatProof is ed2k-server's ST_NATT_PROOF, uint32 natProofVersion: the session
 	// may send the 36-byte proof form of OpNatKeepalive.

@@ -1127,8 +1127,8 @@ func TestNatKeepaliveIPv6(t *testing.T) {
 	}
 }
 
-// A session with 0x1000 and 0x100000 gets a fresh token at login, in OP_SERVERIDENT
-// with ST_NATT_PROOF; others get neither. ST_UDPFLAGS carries 0x100000.
+// Every session gets a fresh token at login, in OP_SERVERIDENT with ST_NATT_PROOF: it
+// is also the takeover token. ST_UDPFLAGS carries 0x100000.
 func TestLoginNatToken(t *testing.T) {
 	const on = FlagNatCallback | FlagTcpObfusc
 	for _, tc := range []struct {
@@ -1137,17 +1137,18 @@ func TestLoginNatToken(t *testing.T) {
 		want  bool
 	}{
 		{"extension", SrvCapNatTraversal | SrvCapHolePunchExt | FlagSupportCrypt, true},
-		{"lugdunum only", SrvCapNatTraversal | FlagSupportCrypt, false},
+		{"lugdunum only", SrvCapNatTraversal | FlagSupportCrypt, true},
+		{"no nat-t", FlagSupportCrypt, true},
 	} {
 		c, _ := natLogin(t, on, tc.login, "203.0.113.9")
 		token := c.server.natCallback.token(c)
 		tags := parseServerIdentTags(t, NewBufferFromBytes(identOf(t, c)))
-		t.Logf("input: %s login 0x%x, output: token %x, tags 0xac=%x 0xa9=%v 0x92=%v", tc.name, tc.login, token, tags["0xac"], tags["0xa9"], tags["0x92"])
+		t.Logf("input: %s login 0x%x, output: token %x, tags sessiontoken=%x 0xa9=%v 0x92=%v", tc.name, tc.login, token, tags["sessiontoken"], tags["0xa9"], tags["0x92"])
 		if (token != nil) != tc.want {
 			t.Fatalf("%s: token %x, want issued=%t", tc.name, token, tc.want)
 		}
-		if got, _ := tags["0xac"].([]byte); tc.want && !bytes.Equal(got, token) || !tc.want && tags["0xac"] != nil {
-			t.Fatalf("%s: ST_NATT_TOKEN %x, want %x", tc.name, tags["0xac"], token)
+		if got, _ := tags["sessiontoken"].([]byte); tc.want && !bytes.Equal(got, token) || !tc.want && tags["sessiontoken"] != nil {
+			t.Fatalf("%s: ST_NATT_TOKEN %x, want %x", tc.name, tags["sessiontoken"], token)
 		}
 		if tc.want && tagUint(tags["0xa9"]) != uint64(natProofVersion) || !tc.want && tags["0xa9"] != nil {
 			t.Fatalf("%s: ST_NATT_PROOF %v", tc.name, tags["0xa9"])

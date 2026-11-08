@@ -2,7 +2,6 @@ package ed2k
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"net"
@@ -433,26 +432,6 @@ func (s *ServerRuntime) udpNatKeepalive(b *Buffer, remote *net.UDPAddr, obfuscat
 	endpoint := natCallbackRecent{ipv4: srcIPv4, port: uint16(remote.Port), at: now, owner: c, proven: proven}
 	s.natCallback.rememberKeepalive(id, endpoint)
 	s.sendForeignNotices(target, id, endpoint, s.natCallback.takeForeign(id, now), "keepalive", module)
-}
-
-// issueNatToken gives a session that may be a foreign callback target with the
-// extension a fresh NAT-T token, sent in its OP_SERVERIDENT. New on every login.
-func (s *ServerRuntime) issueNatToken(c *tcpClient) {
-	if !s.foreignCallbackEnabled() {
-		return
-	}
-	c.infoMu.RLock()
-	want := c.logged && c.hasLowID && c.nattCapable && c.holePunchExt
-	c.infoMu.RUnlock()
-	if !want {
-		return
-	}
-	var token [16]byte
-	if _, err := rand.Read(token[:]); err != nil {
-		logging.Warnf("nat token not issued remote=%s err=%v", c.remoteHost, err)
-		return
-	}
-	s.natCallback.setToken(c, token)
 }
 
 // foreignFallback runs natForeignFallback after a target's first pending request.
@@ -899,9 +878,9 @@ func (n *natCallbackState) token(c *tcpClient) []byte {
 	return append([]byte(nil), st.token[:]...)
 }
 
-// forgetLowID drops the NAT-T state keyed by a LowID session c no longer holds (a
-// firewall recheck promoted it), and its token: a HighID is no callback target.
-func (n *natCallbackState) forgetLowID(id uint32, c *tcpClient) {
+// forgetLowID drops the NAT-T state keyed by a LowID its session no longer holds (a
+// firewall recheck promoted it). Its token stays: it is also the takeover token.
+func (n *natCallbackState) forgetLowID(id uint32) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	delete(n.recent, id)
@@ -912,9 +891,6 @@ func (n *natCallbackState) forgetLowID(id uint32, c *tcpClient) {
 		if len(named) == 0 {
 			delete(n.foreignNamed, key)
 		}
-	}
-	if st := n.sessions[c]; st != nil {
-		st.token, st.hasToken, st.counter = [16]byte{}, false, 0
 	}
 }
 
