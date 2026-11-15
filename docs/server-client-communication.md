@@ -375,6 +375,11 @@ close, so the user would have no way to learn why they keep being disconnected.
 | Wiring | `cmd/enode/main.go` — both runtime configs, from one accessor each |
 | Tests | `ed2k/offer_limits_test.go`, `ed2k/offer_prelogin_test.go`, `config/file_limits_test.go`, `storage/offered_contract_test.go` |
 
+**Faster publishing (OFFERFILES v1):** a client that asks at login is told, in its
+post-login `OP_SERVERIDENT`, a batch size and pace faster than the legacy 200 files a
+minute (`files.offerFilesV1`), and its connection is held to them. Clients that do not ask
+are unaffected. See [offerfiles-v1.md](offerfiles-v1.md).
+
 ### Search paging
 
 `OP_SEARCHRESULT` now ends with one "more results available" byte, and eMule's contract for

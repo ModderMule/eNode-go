@@ -286,6 +286,36 @@ func (c TCPConfig) MaxConnectionsPerIPOrDefault() int {
 type FilesConfig struct {
 	SoftLimit *int `yaml:"softLimit"`
 	HardLimit *int `yaml:"hardLimit"`
+	// OfferFilesV1 is the OFFERFILES v1 fast-publishing contract (emule-qt#185, the
+	// same as ed2k-server's): a client that asks for it at login is told the batch
+	// size and pace it may publish at, and held to them. Clients that do not ask are
+	// never affected. See docs/offerfiles-v1.md.
+	OfferFilesV1 OfferFilesV1Config `yaml:"offerFilesV1"`
+}
+
+// OfferFilesV1Config is files.offerFilesV1.
+type OfferFilesV1Config struct {
+	Enabled       *bool `yaml:"enabled"`
+	BatchMax      *int  `yaml:"batchMax"`
+	MinIntervalMs *int  `yaml:"minIntervalMs"`
+}
+
+// The OFFERFILES v1 defaults, ed2k-server's: 200 records every 500 ms, so at most 400
+// files a second per client. MaxOfferFilesV1IntervalMs is the legacy pace itself:
+// advertising a slower one would make v1 pointless, and a handover waits for a
+// session paused on it.
+const (
+	DefaultOfferFilesV1BatchMax      = 200
+	DefaultOfferFilesV1MinIntervalMs = 500
+	MaxOfferFilesV1IntervalMs        = 60000
+)
+
+func (c OfferFilesV1Config) EnabledOrDefault() bool { return boolOrDefault(c.Enabled, true) }
+func (c OfferFilesV1Config) BatchMaxOrDefault() int {
+	return intOrDefault(c.BatchMax, DefaultOfferFilesV1BatchMax)
+}
+func (c OfferFilesV1Config) MinIntervalMsOrDefault() int {
+	return intOrDefault(c.MinIntervalMs, DefaultOfferFilesV1MinIntervalMs)
 }
 
 // DefaultSoftFileLimit and DefaultHardFileLimit are the values eNode-go has published
@@ -1272,6 +1302,23 @@ func setDefaults(cfg *Config) error {
 	if softFiles < 0 || hardFiles < 0 {
 		return fmt.Errorf("files.softLimit (%d) and files.hardLimit (%d) must not be negative; 0 means unlimited",
 			softFiles, hardFiles)
+	}
+	// OFFERFILES v1 needs a batch below the hard limit (the contract's hard > batch_max).
+	// A soft or hard limit of 0 (unlimited) is not an error: v1 then simply advertises
+	// nothing, and the server warns about it when it applies the configuration.
+	if v1 := cfg.Files.OfferFilesV1; v1.EnabledOrDefault() {
+		batch, interval := v1.BatchMaxOrDefault(), v1.MinIntervalMsOrDefault()
+		if batch <= 0 {
+			return fmt.Errorf("files.offerFilesV1.batchMax (%d) must be above 0", batch)
+		}
+		if interval <= 0 || interval > MaxOfferFilesV1IntervalMs {
+			return fmt.Errorf("files.offerFilesV1.minIntervalMs (%d) must be between 1 and %d",
+				interval, MaxOfferFilesV1IntervalMs)
+		}
+		if hardFiles > 0 && hardFiles <= batch {
+			return fmt.Errorf("files.offerFilesV1.batchMax (%d) must be below files.hardLimit (%d)",
+				batch, hardFiles)
+		}
 	}
 	if b := cfg.StatsBoost; b.Users < 0 || b.LowIDUsers < 0 || b.Files < 0 {
 		return fmt.Errorf("statsBoost.users (%d), statsBoost.lowIDUsers (%d) and statsBoost.files (%d) must not be negative",

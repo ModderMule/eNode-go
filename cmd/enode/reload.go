@@ -330,30 +330,35 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		// Address stays the bind address: probeClient uses it as its
 		// LocalAddr and special-cases the wildcard. AdvertisedIP is what goes
 		// out in OP_SERVERIDENT.
-		Address:                 cfg.Address,
-		AdvertisedIP:            d.advertisedIP,
-		Port:                    cfg.TCP.Port,
-		Flags:                   tcpFlags,
-		Hash:                    d.serverHash,
-		MessageLogin:            cfg.MessageLogin,
-		MessageLowID:            cfg.MessageLowID,
-		ConnectionTimeout:       time.Duration(cfg.TCP.ConnectionTimeout) * time.Millisecond,
-		DisconnectTimeout:       time.Duration(cfg.TCP.DisconnectTimeout) * time.Second,
-		LoginTimeout:            time.Duration(cfg.TCP.LoginTimeout) * time.Second,
-		MaxConnsPerIP:           cfg.TCP.MaxConnectionsPerIPOrDefault(),
-		AllowLowIDs:             cfg.TCP.AllowLowIDs,
-		SupportCrypt:            cfg.SupportCrypt,
-		MinLowID:                cfg.TCP.MinLowID,
-		MaxLowID:                cfg.TCP.MaxLowID,
-		IPv6:                    dualStack,
-		PublishV6Sources:        dualStack && cfg.IPv6.PublishSourcesOrDefault(),
-		ProbeIPv6:               dualStack && cfg.IPv6.ProbeReachabilityOrDefault(),
-		ServerIPv6:              d.serverIPv6,
-		NatRendezvousPort:       natRendezvousPort,
-		MetaAPI:                 d.metaAPI,
-		Ed3k:                    d.ed3k,
-		SoftFileLimit:           cfg.Files.SoftLimitOrDefault(),
-		HardFileLimit:           cfg.Files.HardLimitOrDefault(),
+		Address:           cfg.Address,
+		AdvertisedIP:      d.advertisedIP,
+		Port:              cfg.TCP.Port,
+		Flags:             tcpFlags,
+		Hash:              d.serverHash,
+		MessageLogin:      cfg.MessageLogin,
+		MessageLowID:      cfg.MessageLowID,
+		ConnectionTimeout: time.Duration(cfg.TCP.ConnectionTimeout) * time.Millisecond,
+		DisconnectTimeout: time.Duration(cfg.TCP.DisconnectTimeout) * time.Second,
+		LoginTimeout:      time.Duration(cfg.TCP.LoginTimeout) * time.Second,
+		MaxConnsPerIP:     cfg.TCP.MaxConnectionsPerIPOrDefault(),
+		AllowLowIDs:       cfg.TCP.AllowLowIDs,
+		SupportCrypt:      cfg.SupportCrypt,
+		MinLowID:          cfg.TCP.MinLowID,
+		MaxLowID:          cfg.TCP.MaxLowID,
+		IPv6:              dualStack,
+		PublishV6Sources:  dualStack && cfg.IPv6.PublishSourcesOrDefault(),
+		ProbeIPv6:         dualStack && cfg.IPv6.ProbeReachabilityOrDefault(),
+		ServerIPv6:        d.serverIPv6,
+		NatRendezvousPort: natRendezvousPort,
+		MetaAPI:           d.metaAPI,
+		Ed3k:              d.ed3k,
+		SoftFileLimit:     cfg.Files.SoftLimitOrDefault(),
+		HardFileLimit:     cfg.Files.HardLimitOrDefault(),
+		OfferFilesV1: ed2k.OfferFilesV1Config{
+			Enabled:     cfg.Files.OfferFilesV1.EnabledOrDefault(),
+			BatchMax:    cfg.Files.OfferFilesV1.BatchMaxOrDefault(),
+			MinInterval: time.Duration(cfg.Files.OfferFilesV1.MinIntervalMsOrDefault()) * time.Millisecond,
+		},
 		CounterCacheTTL:         time.Duration(cfg.Storage.CountCacheSecondsOrDefault()) * time.Second,
 		MoreResultsMax:          moreResultsMax(cfg.TCP.MoreResults),
 		MoreResultsTTL:          cfg.TCP.MoreResults.TTLOrDefault(),
@@ -393,6 +398,11 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		ServerSearch:        d.serverSearch,
 		Ed3k:                d.ed3k,
 		TrackClientUDPPorts: cfg.UDP.TrackClientPorts,
+	}
+	// Config validation lets unlimited (0) file limits through with v1 on, as they
+	// are a valid choice on their own; v1 then advertises nothing.
+	if err := ed2k.OfferFilesV1Problem(tcp); err != nil && tcp.OfferFilesV1.Enabled {
+		logging.Warnf("files.offerFilesV1 is on but cannot be advertised: %v; clients asking for it publish at the legacy pace", err)
 	}
 	return tcp, udp
 }

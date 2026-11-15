@@ -33,7 +33,7 @@ func newReflectClient(t *testing.T, rt *ServerRuntime, remote string) (*tcpClien
 // sentIdentTags runs sendServerIdent and decodes the tags off the wire.
 func sentIdentTags(t *testing.T, c *tcpClient, conn *reflectConn) map[string]any {
 	t.Helper()
-	c.sendServerIdent()
+	c.sendServerIdent(nil)
 	raw := conn.written()
 	if len(raw) == 0 {
 		t.Fatal("no OP_SERVERIDENT written")
@@ -335,7 +335,7 @@ func TestServerIdentUnchangedForLegacySession(t *testing.T) {
 	c.infoMu.Lock()
 	c.logged = true
 	c.infoMu.Unlock()
-	c.sendServerIdent()
+	c.sendServerIdent(nil)
 
 	got := conn.written()
 	t.Logf("input: v4-only session on a v6-disabled server")
@@ -425,7 +425,7 @@ func TestServerIdentSentWithoutAdvertisableIPv4(t *testing.T) {
 			c, conn := newReflectClient(t, rt, "2001:db8::1")
 			t.Logf("input: bindAddress=%q advertisedIP=%q remote=2001:db8::1", bind, rt.tcp().AdvertisedIP)
 
-			c.sendServerIdent()
+			c.sendServerIdent(nil)
 			payload := payloadOfOpcode(t, conn.written(), OpServerIdent)
 			b := NewBufferFromBytes(payload)
 			_ = b.Get(16)

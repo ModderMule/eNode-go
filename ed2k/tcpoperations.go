@@ -41,6 +41,9 @@ type ServerConfig struct {
 	// NatToken is this session's token (NAT-T proof and takeover), sent as TagNatToken
 	// with TagNatProof. Empty omits both.
 	NatToken []byte
+	// offerV1 is the OFFERFILES v1 advertisement, only for the post-login packet of
+	// a session that asked for it.
+	offerV1 *offerV1Policy
 }
 
 // MetaAPIAdvert is what OP_SERVERIDENT tells a client about the Meta API.
@@ -472,6 +475,11 @@ func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
 	}
 	if conf.ClientIPv6Status != 0 {
 		tags = append(tags, Tag{Type: TypeUint8, Code: TagIPv6Status, Data: conf.ClientIPv6Status})
+	}
+	// OFFERFILES v1, only in the post-login packet of a session that asked for it.
+	// The string-named tags are old format, which every client skips by name.
+	if conf.offerV1 != nil {
+		tags = append(tags, conf.offerV1.tags()...)
 	}
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpServerIdent},

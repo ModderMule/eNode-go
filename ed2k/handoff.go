@@ -60,6 +60,16 @@ type SessionState struct {
 	LoginGateTripped bool
 	BanlistHits      [][16]byte
 	KeywordHits      [][16]byte
+	// OfferV1 is the OFFERFILES v1 policy the session was advertised at login, nil
+	// for a legacy session and in a state from an older build. Its pacing bucket is
+	// not handed over: the successor starts it full.
+	OfferV1 *OfferV1State
+}
+
+// OfferV1State is tcpClient.offerV1 for a handover.
+type OfferV1State struct {
+	Soft, Hard, BatchMax uint32
+	Interval             time.Duration
 }
 
 // CryptState is the obfuscation state machine of one session. The RC4 keys carry
@@ -411,6 +421,9 @@ func (c *tcpClient) exportState() SessionState {
 	st.LoginGateTripped = c.loginGateTripped
 	st.BanlistHits = hashSetList(c.banlistHits)
 	st.KeywordHits = hashSetList(c.keywordHits)
+	if p := c.offerV1; p != nil {
+		st.OfferV1 = &OfferV1State{Soft: p.Soft, Hard: p.Hard, BatchMax: p.BatchMax, Interval: p.Interval}
+	}
 	return st
 }
 
@@ -453,6 +466,9 @@ func (c *tcpClient) applyState(st SessionState) {
 	c.loginGateTripped = st.LoginGateTripped
 	c.banlistHits = hashSetOf(st.BanlistHits)
 	c.keywordHits = hashSetOf(st.KeywordHits)
+	if v := st.OfferV1; v != nil {
+		c.offerV1 = &offerV1Session{offerV1Policy: offerV1Policy{Soft: v.Soft, Hard: v.Hard, BatchMax: v.BatchMax, Interval: v.Interval}}
+	}
 }
 
 // connFile duplicates a session's socket for the successor.

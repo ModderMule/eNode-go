@@ -80,6 +80,9 @@ type TCPRuntimeConfig struct {
 	// client is held to the numbers it was given. See docs/server-client-communication.md.
 	SoftFileLimit int
 	HardFileLimit int
+	// OfferFilesV1 is files.offerFilesV1: the batch size and pace advertised to, and
+	// enforced on, a client that asks for OFFERFILES v1 at login. See offerfiles_v1.go.
+	OfferFilesV1 OfferFilesV1Config
 	// MoreResultsMax is how many rows of a search a session keeps after the first page
 	// for OP_QUERY_MORE_RESULT; zero is defaultMoreResultsMax, negative turns paging off.
 	// MoreResultsTTL is how long they are kept; zero is defaultMoreResultsTTL. See
@@ -863,13 +866,20 @@ type tcpClient struct {
 	// was reloaded, ran into the limit with far fewer files than it allows.
 	softLimitWarned bool
 	hardLimitHit    bool
-	// banlistHits holds the distinct ban-list files this session has offered, and
-	// banlistDropped latches the handler once that got the session dropped, as
-	// hardLimitHit does. Nil until the first hit, which most sessions never have.
-	// keywordHits is the same set for files refused by a keyword.
-	banlistHits    map[[16]byte]struct{}
-	keywordHits    map[[16]byte]struct{}
+	// banlistDropped latches the handler once offering ban-list files got the
+	// session dropped, as hardLimitHit does. Kept beside the two bools above so the
+	// three share one word (see TestNatCallbackAddsNoSessionMemory).
 	banlistDropped bool
+	// offerV1 is the OFFERFILES v1 policy this session asked for at login and was
+	// advertised in its post-login OP_SERVERIDENT, with its pacing bucket; nil for a
+	// legacy session. Every file limit applied to a v1 session comes from it, not
+	// from the live config. Own goroutine only.
+	offerV1 *offerV1Session
+	// banlistHits holds the distinct ban-list files this session has offered. Nil
+	// until the first hit, which most sessions never have. keywordHits is the same
+	// set for files refused by a keyword.
+	banlistHits map[[16]byte]struct{}
+	keywordHits map[[16]byte]struct{}
 	// spamSession is the spam observer's state for this session; see SpamObserver.
 	spamSession any
 
@@ -1409,6 +1419,11 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	c.nick, c.software = loginNick(req.Tags), loginSoftware(req.Tags)
 	c.ed3kID = loginEd3k(req.Tags)
 	c.server.sessionTokens.setClaimed(c, loginSessionToken(req.Tags))
+	if LoginRequestsOfferFilesV1(req.Tags) {
+		if p := c.offerV1PolicyForLogin(); p != nil {
+			c.offerV1 = &offerV1Session{offerV1Policy: *p}
+		}
+	}
 	c.info.IPv6 = v6Bytes
 	// ipv6Capable is read cross-goroutine by the callback path (isV6Capable), so it
 	// is written under infoMu here rather than as a bare field assignment.
@@ -1530,7 +1545,8 @@ func (c *tcpClient) handShake() {
 	c.sendServerStatus()
 	c.startPeriodicServerStatus()
 	c.sendIDChange(info.ID)
-	c.sendServerIdent()
+	// The one OP_SERVERIDENT that may carry the OFFERFILES v1 advertisement.
+	c.sendServerIdent(c.offerV1.advertised())
 }
 
 // touchDeadline pushes the read deadline out by DisconnectTimeout, treating out-of-band
@@ -1568,6 +1584,14 @@ func (c *tcpClient) getCloseReason() string {
 		return "unknown"
 	}
 	return c.closeReason
+}
+
+// closing reports whether the session has been told to close, by closeWithReason or
+// its read loop ending.
+func (c *tcpClient) closing() bool {
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+	return c.closeReason != ""
 }
 
 func (c *tcpClient) closeWithReason(reason string) {
@@ -1748,7 +1772,12 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 		return
 	}
 	softLimit, hardLimit := c.server.tcp().SoftFileLimit, c.server.tcp().HardFileLimit
-	if declared, ok := declaredFileCount(data); ok && hardLimit > 0 && declared >= uint32(hardLimit) {
+	if c.offerV1 != nil {
+		// A v1 session is held to what it was advertised, not to a reloaded config.
+		softLimit, hardLimit = int(c.offerV1.Soft), int(c.offerV1.Hard)
+	}
+	declared, declaredOK := declaredFileCount(data)
+	if declaredOK && hardLimit > 0 && declared >= uint32(hardLimit) {
 		id := c.snapshotInfo().ID
 		c.hardLimitHit = true
 		c.server.blocks.hardLimit.Add(1)
@@ -1757,6 +1786,18 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 		c.sendServerMessage(fmt.Sprintf(msgHardFileLimit, hardLimit))
 		c.closeWithReason("file-hard-limit")
 		return
+	}
+	if c.offerV1 != nil && declaredOK {
+		// Over the advertised batch size but under the hard limit: not indexed, and
+		// the session stays up — the client broke the contract, not the server's
+		// capacity. Not charged against the pace either, as nothing was indexed.
+		if declared > c.offerV1.BatchMax {
+			c.server.blocks.offerOverBatch.Add(1)
+			logging.Warnf("offer files v1 over batch remote=%s id=%d declared=%d batchMax=%d: not indexed",
+				c.remoteHost, c.snapshotInfo().ID, declared, c.offerV1.BatchMax)
+			return
+		}
+		c.waitOfferDue(declared)
 	}
 	// data.Bytes() is the whole payload regardless of the read pointer (buffer.go:90-92),
 	// and GetOfferedFiles below only advances that pointer: every write to b.data lives
@@ -1877,7 +1918,8 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 func (c *tcpClient) handleGetServerList() {
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_GETSERVERLIST payload=empty", c.remoteHost)
 	c.sendServerList()
-	c.sendServerIdent()
+	// Never the v1 advertisement: it goes out once per connection, after login.
+	c.sendServerIdent(nil)
 }
 
 func (c *tcpClient) handleGetSources(data *Buffer, obfuscated bool) {
@@ -2213,7 +2255,9 @@ func (c *tcpClient) sendCallbackFailed() {
 	_ = c.writePacket(packet)
 }
 
-func (c *tcpClient) sendServerIdent() {
+// sendServerIdent sends OP_SERVERIDENT. offerV1, when not nil, adds the OFFERFILES v1
+// advertisement, which only the post-login packet of a session that asked carries.
+func (c *tcpClient) sendServerIdent(offerV1 *offerV1Policy) {
 	clientV6, v6Status := c.ipv6Reflection()
 	cfg := c.server.tcp()
 	packet, err := BuildServerIdentPacket(ServerConfig{
@@ -2231,6 +2275,7 @@ func (c *tcpClient) sendServerIdent() {
 		Ed3k:             cfg.Ed3k,
 		UDPFlags:         c.server.udp().UDPFlags,
 		NatToken:         c.server.natCallback.token(c),
+		offerV1:          offerV1,
 	})
 	if err != nil {
 		logging.Warnf("tcp server ident not sent remote=%s err=%v", c.remoteHost, err)

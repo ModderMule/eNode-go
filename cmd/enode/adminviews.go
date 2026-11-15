@@ -372,6 +372,8 @@ func (v *adminViews) Blocks() []admin.BlockRow {
 		{Reason: "UDP rate limit", Count: rt.RateLimited, What: "UDP searches and source requests over udp.rateLimitPerIPPerMinute"},
 		{Reason: "Banned login", Count: rt.BannedLogins, What: "logins from a banned user hash or address"},
 		{Reason: "Offer over hard limit", Count: rt.HardLimit, What: "OP_OFFERFILES packets declaring files.hardLimit records or more; the client is disconnected"},
+		{Reason: "Offer over v1 batch", Count: rt.OfferOverBatch, What: "OFFERFILES v1 packets declaring more than files.offerFilesV1.batchMax records; not indexed, the client stays connected"},
+		{Reason: "Offer paced (v1)", Count: rt.OfferPaced, What: "OFFERFILES v1 packets that arrived early and were held until due (observed, not blocked)"},
 		{Reason: "Ban list file", Count: uint64(content.RefusedBanlist), What: "offered files on the hash ban list"},
 		{Reason: "Filter list file", Count: uint64(content.RefusedFilter), What: "offered files on the hash filter list"},
 		{Reason: "Keyword", Count: uint64(content.RefusedKeyword), What: "offered files whose name matches filter.keywords"},
@@ -488,6 +490,8 @@ func storageFacts(cfg config.Config, engine storage.Engine) []admin.KeyValue {
 			st.Snapshot.IntervalMinutes, cfg.StorageSnapshotPath(), st.Snapshot.Compress))},
 		{Key: "Files per client", Value: fmt.Sprintf("soft limit %d, hard limit %d",
 			cfg.Files.SoftLimitOrDefault(), cfg.Files.HardLimitOrDefault())},
+		{Key: "OFFERFILES v1", Value: onOff(cfg.Files.OfferFilesV1.EnabledOrDefault(), fmt.Sprintf("%d files every %d ms",
+			cfg.Files.OfferFilesV1.BatchMaxOrDefault(), cfg.Files.OfferFilesV1.MinIntervalMsOrDefault()))},
 	}
 	return append(facts, manticoreFacts(st.Manticore.Enabled, engine)...)
 }

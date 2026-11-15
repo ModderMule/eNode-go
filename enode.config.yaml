@@ -173,6 +173,21 @@ files:
   # above 200, the most a conforming client sends in one packet. Lugdunum's default is
   # 4000.
   hardLimit: 20000
+  # OFFERFILES v1 fast publishing (docs/offerfiles-v1.md), the contract ed2k-server and
+  # aMule use. A client that asks for it at login is told, in its post-login
+  # OP_SERVERIDENT, how many files one OP_OFFERFILES may carry and how often it may send
+  # one, instead of the legacy 200 files a minute: at the defaults a 10,000-file share
+  # is published in under 30 seconds instead of 50 minutes. Clients that do not ask are
+  # never affected. Needs softLimit and hardLimit above 0 and hardLimit above batchMax;
+  # otherwise nothing is advertised and a warning is logged. Reloads reach new logins.
+  offerFilesV1:
+    enabled: true
+    # Most records one OP_OFFERFILES may declare. A v1 packet over it is not indexed;
+    # the client stays connected.
+    batchMax: 200
+    # Least time between two OP_OFFERFILES, in milliseconds (1-60000). A packet that
+    # arrives early waits until it is due; it is never dropped.
+    minIntervalMs: 500
 
 # Server-to-server gossip: the Lugdunum OP_SERVER_LIST_REQ/RES handshake. When on,
 # this server registers itself with each seed, harvests their peer lists, and answers

@@ -18,6 +18,10 @@ type Tag struct {
 	Type uint8
 	Code uint8
 	Data any
+	// Name, when set, replaces Code with a string name on the wire (old format:
+	// uint16 name length, then the name), as OFFERFILES v1's offerfiles_* tags use.
+	// Every client skips a string-named tag it does not know.
+	Name string
 }
 
 const (
@@ -298,7 +302,8 @@ func (b *Buffer) Get(length ...int) []byte {
 func TagsLength(tags []Tag) (int, error) {
 	length := 4
 	for _, t := range tags {
-		length += 4
+		// type(1) + name length(2) + name: one byte for a coded tag.
+		length += 3 + tagNameLen(t)
 		switch t.Type {
 		case TypeString:
 			v, ok := t.Data.(string)
@@ -327,10 +332,7 @@ func (b *Buffer) PutTag(tag Tag) error {
 	if err := b.PutUInt8(tag.Type); err != nil {
 		return err
 	}
-	if err := b.PutUInt16LE(1); err != nil {
-		return err
-	}
-	if err := b.PutUInt8(tag.Code); err != nil {
+	if err := b.putTagName(tag); err != nil {
 		return err
 	}
 
@@ -811,4 +813,28 @@ func (b *Buffer) getFileTags(record *FileRecord, keepExtra bool) error {
 		}
 	}
 	return nil
+}
+
+// tagNameLen is how many bytes a tag's name takes on the wire.
+func tagNameLen(t Tag) int {
+	if t.Name != "" {
+		return len(t.Name)
+	}
+	return 1
+}
+
+// putTagName writes the name half of an old-format tag header: the single-byte code,
+// or the string name when the tag has one.
+func (b *Buffer) putTagName(tag Tag) error {
+	if tag.Name == "" {
+		if err := b.PutUInt16LE(1); err != nil {
+			return err
+		}
+		return b.PutUInt8(tag.Code)
+	}
+	if len(tag.Name) > math.MaxUint16 {
+		return fmt.Errorf("%w: name of %d bytes", ErrUnsupportedTag, len(tag.Name))
+	}
+	// The name is framed exactly like a string value: uint16 length, then the bytes.
+	return b.PutString(tag.Name)
 }

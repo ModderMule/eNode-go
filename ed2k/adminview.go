@@ -77,6 +77,12 @@ type BlockStats struct {
 	HardLimit uint64
 	// Bots is how many times the bot detector flagged an address.
 	Bots uint64
+	// OfferOverBatch is OFFERFILES v1 packets not indexed for declaring more than
+	// the advertised offerfiles_batch_max; the session stays up.
+	OfferOverBatch uint64
+	// OfferPaced is OFFERFILES v1 packets that arrived before they were due and
+	// were held until they were (never dropped).
+	OfferPaced uint64
 }
 
 // blockCounters backs BlockStats.
@@ -86,6 +92,10 @@ type blockCounters struct {
 	bannedLogins atomic.Uint64
 	hardLimit    atomic.Uint64
 	bots         atomic.Uint64
+	// offerOverBatch and offerPaced are OFFERFILES v1 sessions' packets over the
+	// advertised batch size, and packets that arrived early and were held.
+	offerOverBatch atomic.Uint64
+	offerPaced     atomic.Uint64
 }
 
 // ClientSnapshot returns every logged-in session.
@@ -169,11 +179,13 @@ func (s *ServerRuntime) GossipPeers() []PeerView {
 // BlockStats returns the runtime's refusal counters.
 func (s *ServerRuntime) BlockStats() BlockStats {
 	return BlockStats{
-		RateLimited:  s.blocks.rateLimited.Load(),
-		ConnLimit:    s.blocks.connLimit.Load(),
-		BannedLogins: s.blocks.bannedLogins.Load(),
-		HardLimit:    s.blocks.hardLimit.Load(),
-		Bots:         s.blocks.bots.Load(),
+		RateLimited:    s.blocks.rateLimited.Load(),
+		ConnLimit:      s.blocks.connLimit.Load(),
+		BannedLogins:   s.blocks.bannedLogins.Load(),
+		HardLimit:      s.blocks.hardLimit.Load(),
+		OfferOverBatch: s.blocks.offerOverBatch.Load(),
+		OfferPaced:     s.blocks.offerPaced.Load(),
+		Bots:           s.blocks.bots.Load(),
 	}
 }
 
