@@ -803,6 +803,13 @@ type tcpClient struct {
 	// SrvCapHolePunchExt (0x100000): it bursts UDP OpNatKeepalive after a TCP 0x37, so
 	// a foreign requester of it gets an 0xa7. Under infoMu; in the padding too.
 	holePunchExt bool
+	// noZlib is set at login when the client did not send SRVCAP_ZLIB (FlagZlib) in
+	// CT_SERVER_FLAGS: writePacket then sends a PR_ZLIB frame unpacked. Negative, so
+	// the zero value keeps compressing, as before login and in a handed-over state
+	// from an older build. Written under infoMu before registerSession and the status
+	// ticker make the session reachable from other goroutines, so the writers on those
+	// goroutines read it without a lock. In the padding, so a session stays the same size.
+	noZlib bool
 	// ed3kID is the ed3k node ID the client sent as CT_ED3K at login, or nil. Read
 	// and written under infoMu.
 	ed3kID []byte
@@ -1413,6 +1420,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// re-publish them per source. Absent tag → 0, i.e. no crypt advertised.
 	c.info.CryptOptions = cryptOptionsFromLoginFlags(loginFlags(req.Tags))
 	c.metaCapable = loginFlags(req.Tags)&SrvCapMetaSearch != 0
+	c.noZlib = loginFlags(req.Tags)&FlagZlib == 0
 	c.nattCapable = c.server.natCallbackEnabled() && loginFlags(req.Tags)&SrvCapNatTraversal != 0
 	c.natWakeCapable = c.server.natWakeEnabled() && loginFlags(req.Tags)&SrvCapNatWake != 0
 	c.holePunchExt = c.server.foreignCallbackEnabled() && loginFlags(req.Tags)&SrvCapHolePunchExt != 0
@@ -2314,6 +2322,13 @@ func (c *tcpClient) sendCallbackRequestedIPv6(ipv6 []byte, port uint16) error {
 func (c *tcpClient) writePacket(packet *Buffer) error {
 	if packet == nil {
 		return nil
+	}
+	if c.noZlib {
+		unpacked, err := UnpackTCPPacket(packet)
+		if err != nil {
+			return err
+		}
+		packet = unpacked
 	}
 	return c.writeRaw(packet.Bytes())
 }

@@ -6,7 +6,11 @@ This document explains the main `OP_*` operation codes used by `eNode-go` and th
 
 - Transport protocols:
   - `PR_ED2K (0xe3)`: normal eD2K packets
-  - `PR_ZLIB (0xd4)`: compressed payloads
+  - `PR_ZLIB (0xd4)`: compressed payloads. The server packs a TCP reply only for a
+    client that set `SRVCAP_ZLIB 0x0001` in `CT_SERVER_FLAGS` at login
+    (`srchybrid/Opcodes.h:523`); every eMule and eMuleQt sets it. Anything sent before
+    login, and a session handed over from a build older than this rule, is packed as
+    before.
   - `PR_EMULE (0xc5)`: eMule-specific protocol family
   - `PR_NAT (0xf1)`: NAT traversal UDP protocol family
 - TCP packet format (simplified): `protocol(1) + size(4) + opcode(1) + payload`
@@ -401,8 +405,9 @@ sentinel, `CT_MOD_SVR_IP_V6 0xAF` in `OP_SERVERIDENT`, and `SRV_*FLG_IPV6 0x4000
 
 ### Hash and related search
 
-Two string terms of `OP_SEARCHREQUEST` have a meaning of their own, as on Lugdunum
-17.15 (`Is_ed2k_search`, `Is_related_search`):
+Two string terms of `OP_SEARCHREQUEST` have a meaning of their own. The forms accepted
+are Lugdunum 17.15's (`Is_ed2k_search`, `Is_related_search`); how a hash term combines
+with the rest of the query is not (see the table below).
 
 **Search by file hash.** A term in one of these forms becomes a hash leaf
 (`storage.ParseHashTerm`); a size of 0 means any size and text after the 32 hex digits
@@ -416,9 +421,28 @@ is ignored:
 | `magnet:?xt=ed2k:HASH`, `magnet:?xt=urn:ed2k:HASH`, `magnet:?xt=urn:ed2khash:HASH` | the hash, any size |
 
 The leaf is a per-file predicate in the ordinary tree, so it combines with AND, OR,
-NOT and the search window's filters. It is answered over TCP and over UDP
-(`OP_GLOBSEARCHREQ`, `…REQ2`, `…REQ3`), by every storage engine. Web front ends use it
-to ask each server about one file; ed2k.shortypower.org (ed2k-stats) is an example.
+NOT and the search window's filters, and every one of them is applied. It is answered
+over TCP and over UDP (`OP_GLOBSEARCHREQ`, `…REQ2`, `…REQ3`), by every storage engine.
+Web front ends use it to ask each server about one file; ed2k.shortypower.org
+(ed2k-stats) is an example.
+
+**This differs from Lugdunum.** eserver also reads a hash term anywhere in the tree,
+but then skips some of the conditions ANDed with it. Measured on 17.14 and 17.15 in the
+interop rig (2026-11-16), one published file `lovely tune.mp3`, Audio, 5 000 000 bytes,
+searched by its hash:
+
+| Combined with `ed2k::HASH` | eserver 17.14 / 17.15 | eNode-go |
+|---|---|---|
+| non-matching type (either order), size, or type AND size | file returned, filter ignored | no result |
+| `NOT <word in the name>` | file returned, NOT ignored | no result |
+| non-matching keyword or extension (`ext=pdf`) | no result | no result |
+| matching keyword AND non-matching type | no result | no result |
+| `OR <other word>` | both files | both files |
+
+Without a hash, eserver applies the same type, size and NOT filters normally. So an
+eMule user who pastes an ed2k link while a type is selected finds the file on eserver
+and not on eNode-go. eNode-go keeps the stricter reading on purpose: the client asked
+for both conditions.
 
 **Related search.** `related::HASH[::HASH…]` or `related:SIZE:HASH`, up to 32 files,
 is sent by eMule's and eMuleQt's "Search related files". They offer that command only

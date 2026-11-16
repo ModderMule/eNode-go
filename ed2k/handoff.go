@@ -41,6 +41,9 @@ type SessionState struct {
 	ConnectedAt time.Time
 	IPv6Capable bool
 	MetaCapable bool
+	// NoZlib is tcpClient.noZlib. False in a state from an older build, which
+	// compressed for every client, so such a session keeps being sent PR_ZLIB.
+	NoZlib bool
 	// NattCapable is tcpClient.nattCapable. A state from a build before the Lugdunum
 	// callback has it false, and its LowID may be odd: such a session is never named
 	// as a callback target, so a client that tries costs one timed-out attempt.
@@ -409,6 +412,7 @@ func (c *tcpClient) exportState() SessionState {
 	st.HeaderBuf = append([]byte(nil), c.headerBuf...)
 	st.ConnectedAt = c.connectedAt
 	st.MetaCapable = c.metaCapable
+	st.NoZlib = c.noZlib
 	c.infoMu.Lock()
 	st.NattCapable = c.nattCapable
 	st.NatWakeCapable = c.natWakeCapable
@@ -454,6 +458,7 @@ func (c *tcpClient) applyState(st SessionState) {
 		c.connectedAt = st.ConnectedAt
 	}
 	c.metaCapable = st.MetaCapable
+	c.noZlib = st.NoZlib
 	c.infoMu.Lock()
 	c.nattCapable = st.NattCapable
 	c.natWakeCapable = st.NatWakeCapable

@@ -263,6 +263,32 @@ func MaybeCompressTCPPacket(packet *Buffer, minPayloadLen int) (*Buffer, error) 
 	return out, nil
 }
 
+// UnpackTCPPacket reverses MaybeCompressTCPPacket: a PR_ZLIB frame comes back as the
+// PR_ED2K frame it was packed from, and any other frame is returned unchanged. It is
+// for a client that did not set SRVCAP_ZLIB at login (srchybrid/Opcodes.h:523).
+// Every packet MaybeCompressTCPPacket is given here is built as PR_ED2K, so PR_ED2K is
+// the protocol restored.
+func UnpackTCPPacket(packet *Buffer) (*Buffer, error) {
+	if packet == nil {
+		return nil, ErrOutOfBounds
+	}
+	raw := packet.Bytes()
+	if len(raw) < 6 || raw[0] != PrZlib {
+		return packet, nil
+	}
+	payload, err := InflateZlibPayload(raw[6:])
+	if err != nil {
+		return nil, err
+	}
+	out := NewBuffer(6 + len(payload))
+	_ = out.PutUInt8(PrED2K)
+	_ = out.PutUInt32LE(uint32(len(payload) + 1))
+	_ = out.PutUInt8(raw[5])
+	out.PutBuffer(payload)
+	out.Pos(0)
+	return out, nil
+}
+
 func InflateZlibPayload(payload []byte) ([]byte, error) {
 	r, err := zlib.NewReader(bytes.NewReader(payload))
 	if err != nil {
