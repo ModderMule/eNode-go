@@ -915,7 +915,15 @@ func mongoFilterNode(expr *SearchExpr) (filter bson.M, needsFile, prune bool) {
 		if len(terms) == 0 {
 			return mongoMatchNothing(), false, false
 		}
-		return mongoNameRegexFilter(terms), false, false
+		filter := mongoNameRegexFilter(terms)
+		if phrases := textPhrases(expr.Text); len(phrases) > 0 {
+			parts := []bson.M{filter}
+			for _, ph := range phrases {
+				parts = append(parts, bson.M{"name": bson.M{"$regex": phraseRegexp(ph)}})
+			}
+			filter = bson.M{"$and": parts}
+		}
+		return filter, false, false
 	case SearchString:
 		if expr.TagType == searchTypeText {
 			return mongoFilterNode(&SearchExpr{Kind: SearchText, Text: expr.ValueString})
@@ -1249,6 +1257,11 @@ func removeTextLeaf(expr *SearchExpr) (string, *SearchExpr, bool) {
 		return "", nil, false
 	}
 	if search, ok := textLeafSearch(expr); ok {
+		// $text finds the words only; a leaf with a quoted phrase stays in the
+		// regex filter, which pins their order.
+		if textLeafHasPhrase(expr) {
+			return search, expr, true
+		}
 		return search, nil, true
 	}
 	switch expr.Kind {
@@ -1273,6 +1286,13 @@ func removeTextLeaf(expr *SearchExpr) (string, *SearchExpr, bool) {
 		// back to regex rather than emitting a $nor-only filter.
 	}
 	return "", nil, false
+}
+
+func textLeafHasPhrase(expr *SearchExpr) bool {
+	if expr.Kind == SearchText {
+		return len(textPhrases(expr.Text)) > 0
+	}
+	return len(textPhrases(expr.ValueString)) > 0
 }
 
 // lookupSources resolves source documents to their clients in a single

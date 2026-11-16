@@ -147,6 +147,55 @@ func TestManticoreMatchesMemoryEngine(t *testing.T) {
 	}
 }
 
+// TestManticoreQuotedPhrase runs quoted phrases on Manticore itself and requires
+// the memory engine's answer, except words glued with no separator, which
+// Manticore indexes as one token.
+func TestManticoreQuotedPhrase(t *testing.T) {
+	requireIntegration(t)
+	dsn := startManticore(t)
+	db, _ := startMySQL(t, "enode")
+	inner, err := NewMySQLEngine(db.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := wrapManticore(t, inner, dsn)
+	waitFor(t, "the startup pass", m.ready.Load)
+	ref := NewMemoryEngine()
+	ci := ClientInfo{ID: 1000, Port: 4662, Hash: userHash(0)}
+	refCi := ci
+	ci.StoreID, _ = m.Connect(ci)
+	refCi.StoreID, _ = ref.Connect(refCi)
+	names := []string{"The.Matrix.Reloaded.2003.mkv", "matrix_reloaded.avi", "Matrix - Reloaded dvd",
+		"Reloaded.Matrix.avi", "Matrix.2.Reloaded.avi", "matrix matrix reloaded", "TheMatrix Reloadedz",
+		"The.Dark.Knight.mkv", "The Darkest Knight", "Batman TheDark Knightfall", "x men.avi", "東京物語 spider-man"}
+	for i, name := range names {
+		f := File{Hash: fileHash(i), Size: uint64(1000 + i), Name: name}
+		m.AddFiles([]File{f}, ci)
+		ref.AddFile(f, refCi)
+	}
+	waitFor(t, "the offers to reach the index", func() bool { return countDocs(t, m) == len(names) })
+	for _, text := range []string{`"matrix reloaded"`, `"atrix reload"`, `"matrix reloaded" dvd`,
+		`"the darkest knight"`, `"dark knight"`, `"x men"`, `"語 spider man"`} {
+		expr := &SearchExpr{Kind: SearchText, Text: text}
+		if _, outcome := buildManticoreQuery(expr); outcome != manticoreRun {
+			t.Fatalf("%s: outcome %v", text, outcome)
+		}
+		before := m.unsupported.Load()
+		got := fileHashes(m.FindBySearch(expr))
+		want := fileHashes(ref.FindBySearch(expr))
+		t.Logf("input: %s output: %d file(s)", text, len(got))
+		if m.unsupported.Load() != before || !slices.Equal(got, want) || len(got) == 0 {
+			t.Fatalf("%s: manticore %v, memory %v", text, got, want)
+		}
+	}
+	// NOT "phrase" keeps the names without it.
+	expr := &SearchExpr{Kind: SearchAndNot, Left: &SearchExpr{Kind: SearchText, Text: "matrix"},
+		Right: &SearchExpr{Kind: SearchText, Text: `"matrix reloaded"`}}
+	if got, want := fileHashes(m.FindBySearch(expr)), fileHashes(ref.FindBySearch(expr)); !slices.Equal(got, want) {
+		t.Fatalf("AndNot: manticore %v, memory %v", got, want)
+	}
+}
+
 // TestManticoreLifecycleMySQL follows sources through offer, disconnect, cleanup
 // and reconcile, and checks a startup pass fills an empty table.
 func TestManticoreLifecycleMySQL(t *testing.T) {

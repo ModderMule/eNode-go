@@ -2,8 +2,10 @@ package storage
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 type SearchKind int
@@ -170,7 +172,7 @@ func buildSearchNode(expr *SearchExpr, dialect string) whereNode {
 			// distinct from an unsupported tag, and it must not be dropped.
 			return contradictionNode
 		}
-		return ftLeaf(terms, dialect)
+		return ftLeaf(terms, textPhrases(expr.Text), dialect)
 	case SearchString:
 		if expr.TagType == searchTypeText {
 			return buildSearchNode(&SearchExpr{Kind: SearchText, Text: expr.ValueString}, dialect)
@@ -445,7 +447,11 @@ func fileExt(name string) string {
 // literal LIKE. Because the MATCH is the index access path, a residual/short-run
 // LIKE rides an indexed query; the only leading-`%` scan left is a leaf whose
 // every run is sub-token-size, which is rare and unavoidable.
-func ftLeaf(terms []string, dialect string) whereNode {
+//
+// A quoted phrase (textPhrases) adds a residual REGEXP on top: the MATCH has
+// already narrowed the rows to those holding every run, the REGEXP pins order
+// and adjacency.
+func ftLeaf(terms []string, quoted [][]string, dialect string) whereNode {
 	minTok := ftMinTokenSize(dialect)
 
 	var phrases []string // boolean-mode operators, joined into one MATCH probe
@@ -479,6 +485,11 @@ func ftLeaf(terms []string, dialect string) whereNode {
 				args = append(args, "%"+escapeLike(run)+"%")
 			}
 		}
+	}
+
+	for _, ph := range quoted {
+		parts = append(parts, "s.name REGEXP ?")
+		args = append(args, phraseRegexp(ph))
 	}
 
 	return whereNode{sql: "(" + strings.Join(parts, " AND ") + ")", args: args}
@@ -688,6 +699,8 @@ type searchMatcher struct {
 	// runs holds, per text leaf, the runs a name must contain; nil for a leaf with
 	// no term in it, which matches nothing.
 	runs map[*SearchExpr][]string
+	// phrases holds, per text leaf, its quoted phrases (textPhrases).
+	phrases map[*SearchExpr][][]string
 }
 
 func (sm *searchMatcher) match(expr *SearchExpr, file File) bool {
@@ -733,5 +746,100 @@ func (sm *searchMatcher) matchText(leaf *SearchExpr, text, lowerName string) boo
 			return false
 		}
 	}
+	for _, ph := range sm.textPhrases(leaf, text) {
+		if !containsPhrase(lowerName, ph) {
+			return false
+		}
+	}
 	return true
+}
+
+func (sm *searchMatcher) textPhrases(leaf *SearchExpr, text string) [][]string {
+	if sm == nil {
+		return textPhrases(text)
+	}
+	if ph, ok := sm.phrases[leaf]; ok {
+		return ph
+	}
+	ph := textPhrases(text)
+	if sm.phrases == nil {
+		sm.phrases = map[*SearchExpr][][]string{}
+	}
+	sm.phrases[leaf] = ph
+	return ph
+}
+
+// textPhrases returns the quoted phrases of a keyword leaf, each as its lowercased
+// runs. eMule keeps the quotes of a quoted string in the search packet (MFC
+// GetSearchPacket, LexInit(.., true)), as eserver 17.4+ expects. A quote without
+// its partner is ignored, as on Kad (TokenizeOptQuotedSearchTerm). A phrase of one
+// run says nothing the plain run match does not, so it is left out.
+func textPhrases(text string) [][]string {
+	var out [][]string
+	rest := text
+	for {
+		i := strings.IndexByte(rest, '"')
+		if i < 0 {
+			return out
+		}
+		j := strings.IndexByte(rest[i+1:], '"')
+		if j < 0 {
+			return out
+		}
+		if runs := alnumRuns(strings.ToLower(rest[i+1 : i+1+j])); len(runs) > 1 {
+			out = append(out, runs)
+		}
+		rest = rest[i+1+j+1:]
+	}
+}
+
+// containsPhrase reports whether the runs follow each other in lowerName in
+// order, with nothing but non-letters/digits between them: `matrix reloaded`
+// finds `The.Matrix.Reloaded` and `matrix_reloaded`, not `Reloaded.Matrix` or
+// `Matrix.2.Reloaded`. Like a plain run, the first may start and the last may end
+// inside a word. phraseRegexp is the same rule for the databases.
+func containsPhrase(lowerName string, runs []string) bool {
+	for start := 0; start < len(lowerName); {
+		i := strings.Index(lowerName[start:], runs[0])
+		if i < 0 {
+			return false
+		}
+		pos := start + i + len(runs[0])
+		matched := true
+		for _, r := range runs[1:] {
+			pos = skipSeparators(lowerName, pos)
+			if !strings.HasPrefix(lowerName[pos:], r) {
+				matched = false
+				break
+			}
+			pos += len(r)
+		}
+		if matched {
+			return true
+		}
+		_, size := utf8.DecodeRuneInString(lowerName[start+i:])
+		start += i + size
+	}
+	return false
+}
+
+func skipSeparators(s string, pos int) int {
+	for pos < len(s) {
+		r, size := utf8.DecodeRuneInString(s[pos:])
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			break
+		}
+		pos += size
+	}
+	return pos
+}
+
+// phraseRegexp renders a phrase as a case-insensitive regular expression that
+// MySQL (ICU), MariaDB and MongoDB (PCRE) read alike: containsPhrase's rule.
+func phraseRegexp(runs []string) string {
+	quoted := make([]string, len(runs))
+	for i, r := range runs {
+		quoted[i] = regexp.QuoteMeta(r)
+	}
+	return `(?i)` + strings.Join(quoted, `[^\p{L}\p{N}]*`)
 }

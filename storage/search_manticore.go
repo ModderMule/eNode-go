@@ -315,23 +315,60 @@ func manticoreTextLeaf(field, text string) mNode {
 			parts = append(parts, manticoreRunTerms(strings.ToLower(run))...)
 		}
 	}
+	for _, ph := range textPhrases(text) {
+		parts = append(parts, manticorePhrase(ph))
+	}
 	return mNode{match: "(@" + field + " " + strings.Join(parts, " ") + ")"}
 }
 
-// manticoreRunTerms splits a run where it changes between a spaced and an
+// manticorePhrase renders a quoted phrase as a Manticore phrase: `"*matrix
+// reloaded*"`. The first run may start and the last may end inside a word, the
+// runs between are whole words, as containsPhrase has it. Words glued together
+// with no separator (TheMatrixReloaded) are one token and not found: best effort.
+func manticorePhrase(runs []string) string {
+	var segs []string
+	for _, run := range runs {
+		segs = append(segs, manticoreScriptSegments(run)...)
+	}
+	wild := func(seg string) bool {
+		r := []rune(seg)
+		return len(r) >= manticoreMinInfix && !isContinuousScript(r[0])
+	}
+	if wild(segs[0]) {
+		segs[0] = "*" + segs[0]
+	}
+	if last := len(segs) - 1; wild(segs[last]) {
+		segs[last] += "*"
+	}
+	return `"` + strings.Join(segs, " ") + `"`
+}
+
+// manticoreScriptSegments splits a run where it changes between a spaced and an
 // unspaced script, since the tokenizer splits it there too.
-func manticoreRunTerms(run string) []string {
+func manticoreScriptSegments(run string) []string {
 	var out []string
 	var b strings.Builder
 	cont := false
-	flush := func() {
-		if b.Len() == 0 {
-			return
+	for _, r := range run {
+		if c := isContinuousScript(r); c != cont && b.Len() > 0 {
+			out = append(out, b.String())
+			b.Reset()
 		}
-		seg := b.String()
-		b.Reset()
+		cont = isContinuousScript(r)
+		b.WriteRune(r)
+	}
+	if b.Len() > 0 {
+		out = append(out, b.String())
+	}
+	return out
+}
+
+// manticoreRunTerms renders a run as MATCH terms, one per script segment.
+func manticoreRunTerms(run string) []string {
+	var out []string
+	for _, seg := range manticoreScriptSegments(run) {
 		switch {
-		case cont:
+		case isContinuousScript([]rune(seg)[0]):
 			out = append(out, `"`+seg+`"`)
 		case len([]rune(seg)) < manticoreMinInfix:
 			out = append(out, seg)
@@ -339,15 +376,6 @@ func manticoreRunTerms(run string) []string {
 			out = append(out, "*"+seg+"*")
 		}
 	}
-	for _, r := range run {
-		c := isContinuousScript(r)
-		if c != cont {
-			flush()
-			cont = c
-		}
-		b.WriteRune(r)
-	}
-	flush()
 	return out
 }
 
