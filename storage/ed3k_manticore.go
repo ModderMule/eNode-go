@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -252,7 +253,7 @@ func (m *ManticoreEngine) ed3kCreateTable(ctx context.Context) error {
 	if err := m.db.PingContext(ctx); err != nil {
 		return fmt.Errorf("connecting to %s: %w", m.cfg.DSN, err)
 	}
-	if m.cfg.Recreate {
+	if m.cfg.Recreate || m.ed3kOldTable(ctx) {
 		if _, err := m.db.ExecContext(ctx, "DROP TABLE IF EXISTS "+m.Ed3kTable()); err != nil {
 			return fmt.Errorf("manticore: dropping %s: %w", m.Ed3kTable(), err)
 		}
@@ -261,7 +262,8 @@ func (m *ManticoreEngine) ed3kCreateTable(ctx context.Context) error {
 		terms text indexed, target string attribute, root string attribute, pubkey string attribute,
 		publisher string attribute, signed string attribute, page_key string attribute, ext string attribute,
 		ed2k string attribute, host string attribute, site string attribute,
-		size bigint, sources bigint, expires bigint, stored_at bigint, via_signer bool
+		size bigint, sources bigint, expires bigint, stored_at bigint, via_signer bool,
+		duration bigint, bitrate bigint, codec string attribute
 	) charset_table='0..9, a..z' min_word_len='1'`)
 	if err != nil {
 		return fmt.Errorf("manticore: creating %s: %w", m.Ed3kTable(), err)
@@ -354,19 +356,19 @@ func (m *ManticoreEngine) ed3kSyncFile(ctx context.Context, src ed3kMirrorSource
 
 func (m *ManticoreEngine) ed3kReplace(ctx context.Context, secret []byte, recs []Ed3kKeyword) error {
 	var b strings.Builder
-	args := make([]any, 0, len(recs)*17)
+	args := make([]any, 0, len(recs)*20)
 	b.WriteString("REPLACE INTO " + m.Ed3kTable() + ` (id, terms, target, root, pubkey, publisher, signed, page_key, ext,
-		ed2k, host, site, size, sources, expires, stored_at, via_signer) VALUES `)
+		ed2k, host, site, size, sources, expires, stored_at, via_signer, duration, bitrate, codec) VALUES `)
 	for i, r := range recs {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+		b.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 		page := Ed3kPageKey(secret, r.Root[:], r.PubKey[:])
 		args = append(args, ed3kDocID(r), ed3kTerms(r.Words), hex.EncodeToString(r.Target[:]), hex.EncodeToString(r.Root[:]),
 			hex.EncodeToString(r.PubKey[:]), hex.EncodeToString(r.PublisherID[:]), hex.EncodeToString(r.Signed),
 			hex.EncodeToString(page[:]), r.Ext, hex.EncodeToString(r.ED2K), r.Host, r.Site, int64(r.Size), int64(r.Sources),
-			r.Expires.UnixMilli(), r.StoredAt.UnixMilli(), r.ViaSigner)
+			r.Expires.UnixMilli(), r.StoredAt.UnixMilli(), r.ViaSigner, int64(r.Duration), int64(r.Bitrate), r.Codec)
 	}
 	wctx, cancel := context.WithTimeout(ctx, manticoreWriteTimeout)
 	defer cancel()
@@ -399,14 +401,26 @@ func (m *ManticoreEngine) ed3kSearch(ctx context.Context, src ed3kMirrorSource, 
 	if q.MinSources > 0 {
 		where, args = append(where, "sources>=?"), append(args, int64(q.MinSources))
 	}
-	if q.Ext != "" {
-		where, args = append(where, "ext=?"), append(args, q.Ext)
+	if exts := q.ExtList(); len(exts) > 0 {
+		where = append(where, "ext IN (?"+strings.Repeat(",?", len(exts)-1)+")")
+		for _, e := range exts {
+			args = append(args, e)
+		}
+	}
+	if q.MinDuration > 0 {
+		where, args = append(where, "duration>=?"), append(args, int64(q.MinDuration))
+	}
+	if q.MinBitrate > 0 {
+		where, args = append(where, "bitrate>=?"), append(args, int64(q.MinBitrate))
+	}
+	if q.Codec != "" {
+		where, args = append(where, "codec=?"), append(args, q.Codec)
 	}
 	args = append(args, offset, limit+1, offset+limit+1)
 	sctx, cancel := context.WithTimeout(ctx, m.cfg.Timeout)
 	defer cancel()
 	rows, err := m.db.QueryContext(sctx, `SELECT target, root, pubkey, publisher, signed, ext, ed2k, host, site,
-		size, sources, expires, stored_at, via_signer FROM `+m.Ed3kTable()+` WHERE `+strings.Join(where, " AND ")+
+		size, sources, expires, stored_at, via_signer, duration, bitrate, codec FROM `+m.Ed3kTable()+` WHERE `+strings.Join(where, " AND ")+
 		` ORDER BY page_key ASC LIMIT ?,? OPTION max_matches=?`, args...)
 	if err != nil {
 		return p, err
@@ -414,10 +428,10 @@ func (m *ManticoreEngine) ed3kSearch(ctx context.Context, src ed3kMirrorSource, 
 	defer rows.Close()
 	for rows.Next() {
 		var t, root, pub, pid, signed, ed2k string
-		var size, sources, exp, stored int64
+		var size, sources, exp, stored, duration, bitrate int64
 		var r Ed3kKeyword
 		if err := rows.Scan(&t, &root, &pub, &pid, &signed, &r.Ext, &ed2k, &r.Host, &r.Site,
-			&size, &sources, &exp, &stored, &r.ViaSigner); err != nil {
+			&size, &sources, &exp, &stored, &r.ViaSigner, &duration, &bitrate, &r.Codec); err != nil {
 			return p, err
 		}
 		if err := ed3kUnhex(r.Target[:], t); err != nil {
@@ -433,6 +447,7 @@ func (m *ManticoreEngine) ed3kSearch(ctx context.Context, src ed3kMirrorSource, 
 			r.ED2K, _ = hex.DecodeString(ed2k)
 		}
 		r.Size, r.Sources = uint64(size), uint32(sources)
+		r.Duration, r.Bitrate = uint32(duration), uint32(bitrate)
 		r.Expires, r.StoredAt = time.UnixMilli(exp), time.UnixMilli(stored)
 		p.Records = append(p.Records, r)
 	}
@@ -475,4 +490,31 @@ func ed3kUnhex(dst []byte, s string) error {
 	}
 	copy(dst, b)
 	return nil
+}
+
+// ed3kOldTable reports a mirror table of an older build, one without the media
+// columns of Query (§10.3). The mirror is refilled at start, so it is recreated.
+func (m *ManticoreEngine) ed3kOldTable(ctx context.Context) bool {
+	rows, err := m.db.QueryContext(ctx, "DESCRIBE "+m.Ed3kTable())
+	if err != nil {
+		return false // no table yet
+	}
+	defer rows.Close()
+	cols, _ := rows.Columns()
+	vals := make([]sql.RawBytes, len(cols))
+	dest := make([]any, len(cols))
+	for i := range vals {
+		dest[i] = &vals[i]
+	}
+	seen := false
+	for rows.Next() {
+		if rows.Scan(dest...) != nil {
+			return false
+		}
+		seen = true
+		if string(vals[0]) == "codec" {
+			return false
+		}
+	}
+	return seen
 }

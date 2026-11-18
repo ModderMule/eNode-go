@@ -35,7 +35,7 @@ const (
 	MaxPerAnswer   = 100 // files, notes or sources in one answer
 	MaxStoreRecs   = 256 // records in one Store; later ones are REJECTED
 	MaxAlso        = 256 // targets of `also`
-	MaxQueryTerms  = 64  // all and none together
+	MaxQueryTerms  = 64  // all, none and exts together
 	MaxRelays      = 2   // relays per family in a source record
 	MaxLevel       = 15  // KEYWORD levels a storing node accepts
 	SourceLifetime = 5 * time.Hour
@@ -219,7 +219,7 @@ func (x *Index) layout(req *ed3kpb.KadRequest) *ed3kpb.Error {
 	if req.Search != nil && req.Store != nil {
 		return malformed
 	}
-	if q := req.Search; q != nil && len(q.All)+len(q.None) > MaxQueryTerms {
+	if q := req.Search; q != nil && len(q.All)+len(q.None)+len(q.Exts) > MaxQueryTerms {
 		return malformed
 	}
 	if s := req.Store; s != nil {
@@ -254,6 +254,7 @@ func (x *Index) search(ctx context.Context, req *ed3kpb.KadRequest, target [16]b
 		q := req.Search
 		page, err := x.cfg.Store.SearchEd3kKeywords(ctx, target, storage.Ed3kQuery{
 			All: q.All, None: q.None, MinSize: q.MinSize, MaxSize: q.MaxSize, MinSources: q.MinSources, Ext: q.Ext,
+			Exts: q.Exts, MinDuration: q.MinDuration, MinBitrate: q.MinBitrate, Codec: q.Codec,
 		}, offset, MaxPerAnswer, now)
 		if err != nil {
 			return nil, nil, err
@@ -462,6 +463,7 @@ func (x *Index) storeKeyword(ctx context.Context, s *ed3kpb.Signed, target [16]b
 	}
 	r := storage.Ed3kKeyword{Target: target, Signed: canonicalSigned(s), Words: split.Words, Ext: split.Ext,
 		Size: f.Size, Sources: f.Sources, ED2K: f.Ed2K, Host: host, Site: site,
+		Duration: f.Duration, Bitrate: f.Bitrate, Codec: codecOf(f.Codec),
 		Expires: time.Unix(int64(rec.Expires), 0), ViaSigner: viaSigner}
 	copy(r.Root[:], f.Root)
 	copy(r.PubKey[:], key)
@@ -567,6 +569,15 @@ func hasRecordOf(kind ed3kpb.Kind, s *ed3kpb.Store) bool {
 
 // hasExtensionField reports whether a record carries a field of an extension
 // that is neither KEYWORD's nor NOTE's: on_air, joint, part, gates, alias.
+// codecOf normalises FileInfo.codec for Query.codec; one longer than storage
+// takes counts as unknown.
+func codecOf(c string) string {
+	if c = token.Normalize(c); len(c) > storage.Ed3kMaxCodec {
+		return ""
+	}
+	return c
+}
+
 func hasExtensionField(r *ed3kpb.Record) bool {
 	return r.OnAir != nil || r.Joint != nil || r.Part != nil || r.Gates != nil || r.Alias != nil
 }

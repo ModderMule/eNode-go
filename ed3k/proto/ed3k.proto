@@ -20,11 +20,12 @@
 //  13 ReachTest       14 Browse          15 BrowseAnswer    16 Chat
 //  17 SlotOffer       18 ChatAck         19 LiveJoin        20 LiveState
 //  21 LiveGet         22 TopicJoin       23 TopicState      24 LanQuery
-//  25 LanAnswer       26 HopCreate       27 HopCreated      28 HopExtend
+//  25 LanAnswer       26 HopCreate       27 HopCreated      28 (unused)
 //  29 HopGate         30 HopLookup       31 HopLookupAnswer 32 HopStream
 //  33 HopConnect      34 HopJoin         35 Receipt         36 CreditRelay
 //  37 CreditRelayAnswer 38 BadBlock      39 HopOk          40 KeyRequest
-//  41 KeyAnswer
+//  41 KeyAnswer      42 RoomJoin        43 RoomState       44 NameQuery
+//  45 NameAnswer      46 Market          47 MarketAck
 //  48–63 reserved (Protocol.md §10.6)
 //
 // Messages without a type are file formats or sub-messages carried inside another message.
@@ -62,6 +63,10 @@ message FileInfo {
   uint32 set_files = 8;       // number of files, inner sets included; 0 = not a set   file-set.md §3
   uint64 set_size = 9;        // sum of their sizes                            file-set.md §3
   uint32 partial = 10;        // sources known to the sender that hold the file in part   Protocol.md §10.3
+  string artist = 11;         // media tags, optional, at most 128 B of UTF-8 each      Protocol.md §5.4
+  string album = 12;
+  string title = 13;
+  string codec = 14;          // at most 32 B
 }
 
 // ---------------------------------------------------------------------------------------
@@ -110,6 +115,7 @@ message ReachTest {           // type 13
 message Relay {               // type 12
   bool   reserve = 1;         // request: true = hold a slot, false = release   Protocol.md §9.4
   uint32 ttl = 2;             // answer: seconds the slot is held without traffic
+  bool   hop = 3;             // request: the leaf forwards for others' paths   hops.md §2.5
 }
 
 message Punch {               // type 11
@@ -133,13 +139,16 @@ enum Kind {
   HEAD = 4;                   // file-set.md §5.2
   MEMBER = 5;                 // file-set.md §6
   LIVE = 6;                   // live.md §5
-  SUB = 7;                    // pubsub.md §5
+  SUB = 7;                    // pubsub.md §5; also the members of a room, room.md §5
   HIDDEN = 8;                 // hidden-set.md §3
   PART = 9;                   // multi-author-set.md §3.4
   FRIEND = 10;                // friend.md §4
   ANON = 11;                  // hops.md §4.3
   GATE = 12;                  // hops.md §4.3
   ALIAS = 13;                 // alias.md §1
+  NAME = 14;                  // name.md §3.2
+  CLAIM = 15;                 // name.md §4.2
+  MAIL = 16;                  // mail.md §4
 }
 
 message KadRequest {          // type 3
@@ -148,7 +157,8 @@ message KadRequest {          // type 3
   Kind   kind = 3;            // NONE = find nodes only
   Query  search = 4;          // present, also when empty: search for records of `kind`
   Store  store = 5;           // present: store records of `kind`; never together with `search`
-  uint32 level = 6;           // KEYWORD: level the target was computed for; 0 in version 1   Protocol.md §10.1
+  uint32 level = 6;           // KEYWORD: level the target was computed for; 0 on Kad in version 1, 0 to 15 at an index node   Protocol.md §10.1, §11
+  bool   hops = 7;            // list leaf hops holding a relay reservation here   hops.md §2.5
 }
 
 message Query {
@@ -159,6 +169,10 @@ message Query {
   uint32 min_sources = 5;     // compared with FileInfo.sources of the record
   string ext = 6;             // extension of the name without the `.`, normalised by the sender; empty = any   Protocol.md §10.1
   uint32 offset = 7;          // skip this many matching records               Protocol.md §10.3
+  repeated string exts = 8;   // further extensions as `ext`: the name's is `ext` or one of these; at most 64 terms with `all` and `none`   Protocol.md §10.3
+  uint32 min_duration = 9;    // compared with FileInfo.duration; 0 = no limit; unknown duration fails
+  uint32 min_bitrate = 10;    // compared with FileInfo.bitrate; 0 = no limit; unknown bitrate fails
+  string codec = 11;          // equals FileInfo.codec, both normalised as §10.1 step 1; empty = any
 }
 
 message Store {
@@ -167,18 +181,22 @@ message Store {
   Signed   note = 3;          // NOTE                                          Protocol.md §10.7
   repeated HttpSource http = 4;   // SOURCE: HTTP sources of the file; 3 per publisher and file   http-source.md §2
   Signed   head = 5;          // HEAD, HIDDEN or PART                          file-set.md §5.2
-  bytes    signer = 6;        // 32 B key under which the records of this Store are checked and counted when it is not the key of the connection; allowed for every signed kind; ignored for SOURCE, LIVE, SUB and FRIEND   Protocol.md §10.7
+  bytes    signer = 6;        // 32 B key under which the records of this Store are checked and counted when it is not the key of the connection; allowed for every signed kind; ignored for SOURCE, LIVE, SUB, FRIEND and MAIL   Protocol.md §10.7
   repeated Signed members = 7;    // MEMBER                                    file-set.md §6
   bytes    also = 8;          // SOURCE: n × 16 B further targets that get the same record; at most 256   Protocol.md §10.4
   bytes    sealed = 9;        // FRIEND: exactly 384 B, padded before sealing; any other length than 384 B: REJECTED   friend.md §4
   Signed   anon = 10;         // ANON or GATE; `signer` is always present      hops.md §4.3
   repeated Signed aliases = 11;   // ALIAS                                     alias.md §1
   repeated HttpSource links = 12; // SOURCE: links at file hosters; 3 per publisher and file   hoster.md §2
+  repeated Signed names = 13;     // NAME or CLAIM                             name.md §3.2, §4.2
+  repeated string file_names = 14;  // SOURCE: name the publisher gives the file, for `target` then each target of `also`; each at most 255 B   Protocol.md §10.3
+  repeated bytes mail = 15;   // MAIL: each exactly 1,024 B; any other length: REJECTED   mail.md §4
 }
 
 message Note {
   uint32 rating = 1;          // 1..5, 0 = none                                Protocol.md §10.3
   string text = 2;            // at most 512 B of UTF-8                        Protocol.md §10.7
+  string nick = 3;            // optional, at most 64 B of UTF-8; empty under the anonymous key   Protocol.md §10.7
 }
 
 message KadAnswer {           // type 4
@@ -193,7 +211,7 @@ message KadAnswer {           // type 4
   repeated bytes  keys = 9;   // 32 B publisher keys, referenced by Signed.key
   repeated StoreResult results = 10;  // one per record of the Store, in order, then one per target of `also`; absent = all stored; entries missing from a shorter list read as STORED
   bool   spill = 11;          // this node answered FULL for this target within the last record lifetime
-  repeated uint32 sites = 12; // one per entry of `files`, of `sets` in a MEMBER answer, or of `aliases`: publisher sites counted; 0 = not counted
+  repeated uint32 sites = 12; // one per entry of `files`, of `sets` in a MEMBER answer, of `aliases`, or of `names` in a CLAIM answer: publisher sites counted; 0 = not counted
   repeated HttpSource http = 13;  // SOURCE search: HTTP sources; 16 per answer   http-source.md §2
   repeated Signed sets = 14;  // answer to a search of kind HEAD, HIDDEN, PART or MEMBER   file-set.md §5.2
   repeated bytes  friends = 15;   // answer to a search of kind FRIEND          friend.md §4
@@ -201,6 +219,12 @@ message KadAnswer {           // type 4
   Signed gate = 17;           // GATE search                                   hops.md §4.3
   repeated Signed aliases = 18;   // answer to a search of kind ALIAS          alias.md §1
   repeated HttpSource links = 19; // SOURCE search: links at file hosters; 16 per answer   hoster.md §2
+  repeated Signed names = 20;     // answer to a search of kind NAME or CLAIM  name.md §3.2, §4.2
+  bytes  leaves4 = 21;        // n × 22 B compact nodes: leaf hops with a reservation here, endpoint as observed   hops.md §2.5
+  bytes  leaves6 = 22;        // n × 34 B; likewise
+  repeated string file_names = 23;  // SOURCE search: one per entry of `sources`, the name its publisher gave the file; empty = none   Protocol.md §10.3
+  repeated bytes  mail = 24;  // answer to a search of kind MAIL; arrival order   mail.md §4
+  fixed64 mail_epoch = 25;    // MAIL search: random, fixed while this node holds the target; 0 = none held
 }
 
 enum StoreResult {
@@ -210,6 +234,7 @@ enum StoreResult {
   REJECTED = 3;               // failed a check (Protocol.md §10.7), or over a limit per address or per publisher on what is held
   FAR = 4;                    // a target of `also` this node is not responsible for
   OLDER = 5;                  // a newer or winning record is held; nothing changed
+  DECLINED = 6;               // not held by this node's own policy; says nothing about the record, the target or other nodes   Protocol.md §10.3
 }
 
 // ---------------------------------------------------------------------------------------
@@ -228,6 +253,8 @@ message Record {
   Part     part = 9;          // PART                                          multi-author-set.md §3.4
   Gates    gates = 10;        // GATE                                          hops.md §4.3
   Alias    alias = 11;        // ALIAS                                         alias.md §1
+  Name     name = 12;         // NAME                                          name.md §3.2
+  Claim    claim = 13;        // CLAIM                                         name.md §4.2
 }
 
 message Signature {
@@ -256,6 +283,7 @@ message FileRequest {         // type 5
   repeated HttpResult http_results = 7;   // outcome per HTTP source or link used   http-source.md §2.1
   bool   want_members = 8;    // on the stream of a manifest: tell me which members you have   file-set.md §4.1
   CreditBid credit = 9;       // credit.md §4.1
+  bytes  room = 10;           // 16 B: media of this room, served from a neighbour of it only   room.md §4.6
 }
 
 message FileStatus {          // type 6
@@ -322,6 +350,7 @@ message BrowseAnswer {        // type 15
 message Chat {                // type 16
   string  text = 1;           // at most 4,096 bytes in UTF-8                  chat.md §1
   fixed64 id = 2;             // random per message, the same again when it is repeated: a replay id, not a request id
+  string  subject = 3;        // optional, at most 64 B: thread, e.g. market order id in hex   chat.md §1
 }
 
 message ChatAck {             // type 18
@@ -397,6 +426,7 @@ message FileSet {
   SignedOffer offer = 12;     // paid set                                      subscription.md §3
   EpochKey released = 13;     // newest released epoch key                     subscription.md §4.3
   SignedChain released_chain = 14;  // the season of `released`
+  repeated string exts = 15;  // suggested extensions for followers' downloads   file-set.md §5.3
 }
 
 message Member {
@@ -561,6 +591,70 @@ message Alias {
 }
 
 // ---------------------------------------------------------------------------------------
+// Readable names (name.md)
+// ---------------------------------------------------------------------------------------
+
+message Delegation {
+  bytes  key = 1;             // 32 B Ed25519 signing key                      name.md §2
+  uint64 issued = 2;          // Unix time in seconds
+  uint64 expires = 3;         // Unix time in seconds; at most 90 days after `issued`
+  uint64 scope = 4;           // bit 0: NAME records; every other bit is reserved
+  repeated Signature sigs = 5;    // by the root key, over "ed3k v1 delegation" ‖ root key(32) ‖ key(32) ‖ issued(8) ‖ expires(8) ‖ scope(8)
+}
+
+message Name {
+  bytes  zone = 1;            // 32 B root key of the zone                     name.md §3.2
+  string label = 2;           // the name in the zone, lower-case labels joined by "."; empty = the apex
+  uint64 seq = 3;             // version, higher = newer
+  repeated string links = 4;  // ed3k links the name stands for; at most 4, 512 B together at most, one per kind of link
+  bytes  sub = 5;             // optional: 32 B root key of the zone that holds the names below this one
+  Delegation delegation = 6;  // present when a signing key signed the record
+}
+
+message Claim {
+  string name = 1;            // a global label, without ".ed3k"               name.md §4.2
+  bytes  zone = 2;            // 32 B root key of the zone the publisher says it stands for
+}
+
+message NameQuery {           // type 44
+  repeated string names = 1;  // global labels, without ".ed3k"; at most 16    name.md §4.3
+}
+
+message NameAnswer {          // type 45
+  repeated NameHit hits = 1;  // at most one per name asked                    name.md §4.3
+  string list = 2;            // optional: ed3k:set link of the name list this node publishes
+}
+
+message NameHit {
+  string     name = 1;        // name.md §4.3
+  bytes      zone = 2;        // 32 B
+  NameSource source = 3;
+  uint64     since = 4;       // Unix time since when the node holds it; 0 = not told
+}
+
+enum NameSource {
+  NAME_NONE = 0;              // name.md §4.3
+  NAME_OWN = 1;               // the node's own zone
+  NAME_PETNAME = 2;           // a petname its user marked as shareable, a global label
+  NAME_PINNED = 3;            // a pin its user vouched for
+  NAME_LISTED = 4;            // a name list its user follows
+}
+
+// The name list file is "ed3knam" ‖ 0x01 ‖ NameList (name.md §4.5).
+message NameList {
+  string title = 1;           // name.md §4.5
+  string comment = 2;
+  uint64 created = 3;         // Unix time in seconds; 0 = not told
+  repeated NameEntry entries = 4;
+}
+
+message NameEntry {
+  string name = 1;            // a global label, without ".ed3k"               name.md §4.5
+  bytes  zone = 2;            // 32 B
+  string note = 3;            // at most 256 B of UTF-8
+}
+
+// ---------------------------------------------------------------------------------------
 // Live streams (live.md)
 // ---------------------------------------------------------------------------------------
 
@@ -654,6 +748,7 @@ enum TopicType {
   SET_HEAD = 1;               // key and id of a set that changes (file-set.md §5.1)
   ON_AIR = 2;                 // key and id of a live channel (live.md §1.1)
   PAID = 3;                   // pass holders of a paid scope; topic = scope   subscription.md §8.4
+  DIRECTORY = 4;              // list of nodes, no item; key 32 zero bytes, id = directory name   market.md §3.2
 }
 
 message TopicJoin {           // type 22
@@ -700,6 +795,124 @@ message OnAir {
 }
 
 // ---------------------------------------------------------------------------------------
+// Rooms (room.md)
+// ---------------------------------------------------------------------------------------
+
+message RoomItem {
+  bytes body = 1;             // a serialised RoomBody, verified over exactly these bytes   room.md §2
+  bytes key = 2;              // 32 B signer
+  repeated Signature sigs = 3;    // over "ed3k v1 room item" ‖ room(16) ‖ body
+}
+
+message RoomBody {            // exactly one field is set                      room.md §2
+  RoomInfo info = 1;          // signed by the room key
+  Admit    admit = 2;         // signed by the room key or a moderator
+  Ban      ban = 3;           // likewise
+  Presence presence = 4;      // signed by a member key
+  RoomPost post = 5;          // likewise
+  KeyDrop  key_drop = 6;      // signed by the room key or a moderator
+}
+
+message RoomInfo {
+  uint64 seq = 1;             // 1 or higher; a higher seq replaces a lower one   room.md §2.1
+  uint64 issued = 2;
+  string title = 3;           // at most 128 B of UTF-8
+  string about = 4;           // at most 1,024 B of UTF-8
+  repeated bytes mods = 5;    // 32 B member keys of the moderators; at most 8
+  bool   closed = 6;          // only admitted members join, read and post; a room with a secret only
+  bool   moderated = 7;       // only admitted members post and are listed present
+  bytes  banned = 8;          // n × 16 B member IDs banned for good, ascending, each once; at most 4,096
+  uint64 media_max = 9;       // largest media file of a post, bytes, read as at most 16 MiB; 0 = no media   room.md §2.6
+  uint32 keep_hours = 10;     // history kept, read as 24 to 720; 0 = 24   room.md §4.3
+  uint32 keep_posts = 11;     // posts kept, read as 1,000 to 10,000; 0 = 1,000
+  bool   files = 12;          // other small files allowed with media_max; off = media only   room.md §2.6
+}
+
+message Admit {
+  bytes  member = 1;          // 32 B member key                               room.md §2.2
+  uint64 issued = 2;
+  uint64 until = 3;           // 0 = no end
+}
+
+message Ban {
+  bytes  member = 1;          // 32 B member key                               room.md §2.3
+  uint64 issued = 2;
+  uint64 until = 3;           // at most issued + 30 days; until ≤ issued lifts the ban
+}
+
+message Presence {
+  uint64 issued = 1;          // room.md §2.4
+  uint64 expires = 2;         // at most issued + 15 min
+  string nick = 3;            // at most 64 B of UTF-8
+  bool   left = 4;
+  uint64 gen = 5;             // closed room: the newest generation whose key I hold; 0 = none
+}
+
+message RoomPost {
+  uint64   sent = 1;          // Unix time in seconds, by the author's clock   room.md §2.5
+  RoomText text = 2;          // public room
+  bytes    sealed = 3;        // private and closed room: nonce(12) ‖ ChaCha20(k_post, nonce, serialised RoomText)   room.md §3
+  uint64   gen = 4;           // closed room: the generation of k_post; 0 otherwise
+  bytes    key_id = 5;        // closed room: 8 B
+}
+
+message RoomText {
+  string text = 1;            // 1 to 4,096 B of UTF-8                         room.md §2.5
+  bytes  reply_to = 2;        // 16 B post id; absent = none
+  RoomMedia media = 3;        // a file: media or, with RoomInfo.files, another small file   room.md §2.6; absent = none
+}
+message RoomMedia {           // room.md §2.6; checked when used, never as content
+  bytes  root = 1;            // 32 B, root of the file as transferred (sealed in a room with a secret)
+  uint64 size = 2;            // 1 to the room's media_max
+  string type = 3;            // media type, at most 64 B
+  string name = 4;            // file name, at most 255 B of UTF-8
+  bytes  key = 5;             // room with a secret: 32 B, ChaCha20 key, zero nonce; public room: absent
+  uint32 width = 6;           // pixels, hint; 0 = not told
+  uint32 height = 7;
+}
+
+message KeyDrop {
+  uint64 gen = 1;             // 1 or higher                                   room.md §3.2
+  bytes  key_id = 2;          // 8 B, H("ed3k v1 room key id", k ‖ g)[0..8)
+  uint64 issued = 3;
+  bytes  e = 4;               // 32 B X25519 public value, new for every KeyDrop
+  bytes  wraps = 5;           // n × 64 B: member ID(16) ‖ wrap(48); at most 1,032, ascending by member ID, each once
+}
+
+message RoomJoin {            // type 42
+  bytes  room = 1;            // 16 B                                          room.md §4
+  uint32 want_peers = 2;      // max number of peers wanted, 0 = none
+  bytes  relays4 = 3;         // n × 22 B compact nodes: my relays, if I am a leaf
+  bytes  relays6 = 4;         // n × 34 B
+  bytes  proof = 5;           // private and closed room: 16 B, H("ed3k v1 room join", k ‖ joiner's node ID ‖ peer's node ID)[0..16)
+  uint64 since = 6;           // my clock when I last had a neighbour of this room; 0 = never   room.md §4.3
+  uint64 info_seq = 7;        // seq of the room info I hold; 0 = none
+}
+
+message RoomState {           // type 43
+  repeated RoomItem items = 1;    // room.md §4
+  repeated Peer peers = 2;    // other members of this room
+  RoomRefusal refusal = 3;    // set: I do not take you as a neighbour
+  bytes  proof = 4;           // private and closed room: 16 B, H("ed3k v1 room answer", k ‖ joiner's node ID ‖ peer's node ID)[0..16)
+  bytes  member = 5;          // closed room: 32 B, my member key             room.md §4.2
+  RoomProof member_proof = 6; // with `member`
+  bool   synced = 7;          // the last RoomState of my first answer, or of my catch-up as joiner   room.md §4.3
+}
+
+message RoomProof {
+  uint64 minute = 1;          // Unix time / 60, rounded down                  room.md §4.2
+  bytes  sig = 2;             // 64 B, by the member key over "ed3k v1 room proof" ‖ room(16) ‖ sender's node ID(16) ‖ receiver's node ID(16) ‖ minute(8)
+}
+
+enum RoomRefusal {
+  ROOM_OK = 0;                // room.md §4
+  ROOM_FULL = 1;
+  ROOM_LEFT = 2;
+  ROOM_BLOCKED = 3;           // refused for 24 h, or banned
+  ROOM_MEMBER = 4;            // closed room: no valid admit shown
+}
+
+// ---------------------------------------------------------------------------------------
 // Finding nodes in the local network (lan-discovery.md)
 // ---------------------------------------------------------------------------------------
 
@@ -724,18 +937,16 @@ message LanAnswer {           // type 25
 
 message HopCreate {           // type 26. First frame of an exchange between two neighbours
   bytes path = 1;             // 8 B, random, chosen by the sender; names the path on this connection only, in both directions   hops.md §2.2
-  bytes e = 2;                // 32 B, X25519 public value made by the owner for this hop alone
+  reserved 2;                 // was `e`, draft 0.1
+  bytes build = 3;            // 768 B: 3 slots of 256 B, one record per hop    hops.md §2.2, §2.3
 }
 
 message HopCreated {          // type 27
-  bytes f = 1;                // 32 B, X25519 public value made by the hop for this path   hops.md §2.2
-  bytes proof = 2;            // 32 B                                          hops.md §2.3
+  reserved 1, 2;              // were `f` and `proof`, draft 0.1
+  bytes build = 3;            // 768 B: the build on its way back, an answer per hop   hops.md §2.2, §2.3
 }
 
-message HopExtend {           // type 28. From the owner to the last hop, on the control stream
-  bytes node = 1;             // compact node, 22 or 34 B: the hop to add      hops.md §2.2
-  HopCreate create = 2;       // `path` is left empty; the last hop fills it in
-}
+// type 28 unused (was HopExtend, draft 0.1)
 
 message HopGate {             // type 29. Request and answer on the control stream
   bytes gate = 1;             // answer: 8 B, random, chosen by the last hop   hops.md §3.1
@@ -1012,4 +1223,241 @@ enum Verdict {
   HARMFUL = 2;                // malware, or a file that damages a player or an unpacker
   SPAM = 3;                   // published in bulk to fill search results
   GOOD = 4;                   // checked by the list's author and found to be what it says
+}
+
+// ---------------------------------------------------------------------------------------
+// Offline messages (mail.md)
+// ---------------------------------------------------------------------------------------
+
+// A MAIL record = e(32) ‖ nonce(12) ‖ ChaCha20-Poly1305(k_mail, nonce, len(2) ‖ MailPart ‖ zeros), 1,024 B (mail.md §2).
+message MailPart {
+  bytes    msg = 1;           // 16 B random message id, same in every part
+  uint32   index = 2;         // 0 .. count − 1
+  uint32   count = 3;         // 1 to 64, same in every part
+  bytes    data = 4;          // this part's slice of the payload, in index order
+  MailHead head = 5;          // part 0 only
+}
+
+message MailHead {
+  bytes    from = 1;          // 32 B Ed25519 key of the sender
+  uint64   size = 2;          // payload bytes, all parts together
+  bytes    hash = 3;          // 32 B H("ed3k v1 mail payload", payload)
+  uint64   sent = 4;          // Unix time in seconds
+  string   type = 5;          // payload type, at most 64 B (§3 here)
+  optional uint32 reply = 6;  // `b` of the sender's mailbox under `from`; absent = sender takes no mail
+  repeated Signature sigs = 7;  // by `from`, over the layout below
+}
+
+message MailAck {
+  repeated bytes msgs = 1;    // 16 B ids of messages delivered (§2 here step 5); at most 64
+}
+
+message MailFile {
+  bytes  root = 1;            // 32 B root of the sealed file
+  uint64 size = 2;            // its size
+  bytes  key = 3;             // 32 B key it is sealed with
+  string type = 4;            // payload type of the opened file, as MailHead.type
+  string name = 5;            // optional, at most 255 B
+}
+
+// ---------------------------------------------------------------------------------------
+// Market (market.md)
+// ---------------------------------------------------------------------------------------
+
+// Files: "ed3kprf" ‖ 0x01, "ed3klst" ‖ 0x01, "ed3krat" ‖ 0x01, each followed by MarketDoc (market.md §2.2).
+message MarketDoc {
+  bytes  body = 1;            // serialised Profile, Listing or Rating
+  bytes  key = 2;             // 32 B signing key: store key (profile, listing), rating key (rating)
+  repeated Signature sigs = 3;  // over "ed3k v1 market doc" ‖ magic(8) ‖ body
+}
+
+message Profile {
+  string name = 1;            // at most 64 B
+  string handle = 2;          // optional ed3k:name of the store (name.md §1.3)
+  string about = 3;           // at most 16 KiB
+  bytes  avatar = 4;          // optional 32 B root of an image
+  bytes  header = 5;          // optional 32 B root of an image
+  repeated bytes nodes = 6;   // 32 B node keys acting for this key (§1); at most 8
+  string link = 7;            // ed3k:friend open link of a node in `nodes` (friend.md §2)
+  MailBox mailbox = 8;        // where orders go while offline
+  repeated string coins = 9;  // accepted coins, ticker strings (§5)
+  Moderator moderator = 10;   // present = this store offers moderation
+  string location = 11;       // free text, at most 128 B
+  repeated string contact = 12;  // free-form contact lines, each at most 256 B, at most 8
+  bool   nsfw = 13;
+  uint64 updated = 14;        // Unix time in seconds
+}
+
+message MailBox {
+  bytes  key = 1;             // 32 B mailbox key (mail.md §1); usually the store key
+  uint32 b = 2;               // bucket width 0 to 16
+}
+
+message Moderator {
+  string terms = 1;           // at most 16 KiB
+  repeated string languages = 2;  // BCP 47 tags
+  Price  fee_fixed = 3;       // optional
+  uint32 fee_permille = 4;    // of the disputed amount
+  repeated string coins = 5;  // coins it moderates
+}
+
+message Listing {
+  string slug = 1;            // 1 to 64 B of [a-z0-9-]; file name is <slug>.ed3klst
+  ListingType type = 2;
+  string title = 3;           // at most 140 B
+  string description = 4;     // at most 64 KiB
+  repeated string tags = 5;   // each at most 40 B, at most 16
+  repeated string categories = 6;
+  repeated Image images = 7;  // at most 32
+  Price  price = 8;           // per item; for CRYPTO: per unit of `coin`
+  repeated string coins = 9;  // accepted; empty = profile's
+  repeated Option options = 10;
+  repeated Sku skus = 11;
+  repeated Shipping shipping = 12;  // PHYSICAL only
+  repeated bytes moderators = 13;   // 32 B store keys of moderators the vendor accepts
+  string terms = 14;
+  string refund_policy = 15;
+  string condition = 16;
+  bool   nsfw = 17;
+  uint64 expires = 18;        // Unix time; 0 = none
+  uint32 escrow_hours = 19;   // moderated order: vendor may claim after; 0 = coin default
+  repeated bytes coupons = 20;  // 32 B H("ed3k v1 market coupon", code); discounts in `coupon_off`
+  repeated Price coupon_off = 21;  // one per coupon
+  string coin = 22;           // CRYPTO: coin sold
+  uint64 seq = 23;            // version; higher replaces, also across a slug rename
+}
+
+enum ListingType { LISTING_NONE = 0; PHYSICAL = 1; DIGITAL = 2; SERVICE = 3; CRYPTO = 4; }
+
+message Price {
+  string currency = 1;        // ISO 4217 or coin ticker
+  uint64 amount = 2;          // in smallest unit
+  uint32 divisibility = 3;    // decimal places of `amount`
+}
+
+message Image { bytes root = 1; uint64 size = 2; string name = 3; }  // 32 B root
+
+message Option { string name = 1; repeated string values = 2; }
+
+message Sku {
+  repeated uint32 choice = 1; // index into each option's values, in option order
+  int64  surcharge = 2;       // added to price.amount, may be negative
+  int64  quantity = 3;        // −1 = unlimited
+  string product_id = 4;
+}
+
+message Shipping {
+  string name = 1;
+  repeated string regions = 2;  // ISO 3166-1 alpha-2, or "ALL"
+  repeated Service services = 3;
+}
+
+message Service { string name = 1; Price price = 2; Price extra_item = 3; string estimate = 4; }
+
+message Market {              // type 46, request
+  fixed64 id = 1;             // replay id, as Chat.id (chat.md §2); same by mail and online
+  bytes   from = 2;           // 32 B key the sender acts for (§1)
+  bytes   to = 3;             // 32 B key addressed: store, buyer or moderator key
+  bytes   order = 4;          // 32 B order id (§4.2); empty for `who`
+  repeated Section sections = 5;  // new sections, in chain order
+  bool    who = 6;            // ask which keys the node acts for; nothing else set
+  bool    resend = 7;         // ask the receiver for every section of `order` it has
+}
+
+message MarketAck {           // type 47, answer
+  repeated bytes stores = 1;  // answer to `who`: 32 B keys this node acts for
+  uint32  have = 2;           // sections of `order` the receiver now holds
+  string  error = 3;          // section refused: reason, at most 256 B; nothing appended
+}
+
+message Section {
+  SectionKind kind = 1;
+  bytes  body = 2;            // serialised message of `kind` (§4.3)
+  bytes  key = 3;             // 32 B signer
+  repeated Signature sigs = 4;  // over "ed3k v1 market section" ‖ prev(32) ‖ kind(1) ‖ body
+}
+
+enum SectionKind {
+  SECTION_NONE = 0;
+  ORDER = 1;  CONFIRM = 2;  REJECT = 3;  CANCEL = 4;  PAYMENT = 5;
+  FULFILL = 6;  COMPLETE = 7;  DISPUTE = 8;  DISPUTE_UPDATE = 9;  RESOLUTION = 10;
+  ACCEPT = 11;  REFUND = 12;  FINALIZED = 13;  FAILURE = 14;
+}
+
+message Order {
+  bytes  vendor = 1;          // 32 B store key
+  repeated bytes listings = 2;  // whole listing files ordered from, as published
+  repeated Item items = 3;
+  PayMethod method = 4;
+  string coin = 5;
+  bytes  moderator = 6;       // 32 B, MODERATED only; one of the listing's `moderators`
+  bytes  chain = 7;           // coin-specific: buyer's escrow key, refund address (§5)
+  string ship_to = 8;         // address text; the order travels sealed
+  string contact = 9;
+  MailBox mailbox = 10;       // buyer's, for offline answers
+  string link = 11;           // optional open friend link of the buyer's node
+  uint64 issued = 12;
+  Price  total = 13;          // as the buyer computed it
+}
+
+message Item {
+  bytes  listing = 1;         // 32 B listing hash (§2.3)
+  uint64 quantity = 2;
+  repeated uint32 choice = 3; // as Sku.choice
+  string shipping = 4;        // Shipping.name ‖ "/" ‖ Service.name
+  repeated string coupons = 5;  // codes, checked against Listing.coupons
+  bytes  rating_key = 6;      // 32 B one-off Ed25519 key (§6)
+  string memo = 7;
+}
+
+enum PayMethod { PAY_NONE = 0; DIRECT = 1; OFFLINE = 2; MODERATED = 3; }
+
+message Confirm {
+  bytes  chain = 1;           // coin-specific: vendor's escrow key, payment address/script, amount due
+  repeated bytes rating_sigs = 2;  // per Item, 64 B Ed25519 by vendor over "ed3k v1 market rating key" ‖ order id ‖ index(4) ‖ rating_key
+  Price  total = 3;           // vendor's figure; client shows any difference to the buyer
+}
+
+message Payment { string coin = 1; repeated string txids = 2; uint64 amount = 3; bytes chain = 4; }  // chain: signatures, scripts
+
+message Fulfill {
+  repeated Delivery delivery = 1;  // one per Item
+  bytes  chain = 2;           // vendor's release signatures (OFFLINE, MODERATED), payout address
+  string note = 3;
+}
+
+message Delivery {
+  string carrier = 1;
+  string tracking = 2;
+  MailFile file = 3;          // DIGITAL: sealed file, mail.md §3.3
+  string text = 4;            // SERVICE / CRYPTO: what was done or sent
+}
+
+message Complete {
+  repeated bytes ratings = 1; // whole rating files (§6), one per Item the buyer rates
+  bytes  chain = 2;           // buyer's release signatures
+}
+
+message Resolution {
+  uint64 to_buyer = 1;        // smallest units of `coin`
+  uint64 to_vendor = 2;
+  uint64 to_moderator = 3;
+  bytes  chain = 4;           // moderator's signatures
+  string text = 5;
+}
+
+message MarketNote { string text = 1; }   // at most 4 KiB
+
+message Rating {
+  bytes  vendor = 1;          // 32 B store key
+  bytes  order = 2;           // 32 B order id
+  uint32 index = 3;           // Item index
+  bytes  vendor_sig = 4;      // the rating_sigs entry
+  string slug = 5;
+  uint32 overall = 6;         // 1..5
+  uint32 quality = 7;  uint32 description = 8;  uint32 delivery = 9;  uint32 service = 10;   // 0 = none, else 1..5
+  string review = 11;         // at most 4 KiB
+  uint64 issued = 12;
+  bytes  buyer = 13;          // optional 32 B buyer key, not anonymous
+  bytes  buyer_sig = 14;      // by `buyer` over "ed3k v1 market rating buyer" ‖ rating key(32)
 }

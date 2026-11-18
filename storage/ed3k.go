@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"net/netip"
+	"slices"
 	"time"
 
 	"lukechampine.com/blake3"
@@ -149,10 +150,14 @@ type Ed3kKeyword struct {
 	Ext     string
 	Size    uint64
 	Sources uint32
-	ED2K    []byte // 16-byte MD4 hash from FileInfo.ed2k, or nil
-	Host    string
-	Site    string
-	Expires time.Time
+	// Duration, Bitrate and Codec are FileInfo's media fields; Codec normalised.
+	Duration uint32
+	Bitrate  uint32
+	Codec    string
+	ED2K     []byte // 16-byte MD4 hash from FileInfo.ed2k, or nil
+	Host     string
+	Site     string
+	Expires  time.Time
 	// ViaSigner is set when the Store carried signer (§10.8 rule on signer).
 	ViaSigner bool
 	// StoredAt is when this node last stored the record; set by the store.
@@ -169,6 +174,9 @@ type Ed3kNote struct {
 	Expires time.Time
 }
 
+// Ed3kMaxCodec is the longest normalised codec stored, in bytes.
+const Ed3kMaxCodec = 255
+
 // Ed3kQuery is the part of a KEYWORD Query a store evaluates (§10.3).
 type Ed3kQuery struct {
 	All        []string
@@ -177,6 +185,19 @@ type Ed3kQuery struct {
 	MaxSize    uint64 // 0 = no limit
 	MinSources uint32
 	Ext        string
+	// Exts are further extensions: the name's is Ext or one of these.
+	Exts        []string
+	MinDuration uint32
+	MinBitrate  uint32
+	Codec       string
+}
+
+// ExtList is Ext and Exts together; empty = any extension.
+func (q Ed3kQuery) ExtList() []string {
+	if q.Ext == "" {
+		return q.Exts
+	}
+	return append([]string{q.Ext}, q.Exts...)
 }
 
 // Ed3kKeywordPage is one page of a keyword search.
@@ -474,12 +495,15 @@ func decideNote(v ed3kNoteView, r Ed3kNote, lim Ed3kLimits) ed3kNoteDecision {
 }
 
 // ed3kMatches evaluates a Query against a keyword record (§10.3): every word of
-// all is a word of the name, no word of none is, size, sources and extension.
+// all is a word of the name, no word of none is, size, sources, extension and media.
 func ed3kMatches(r *Ed3kKeyword, q Ed3kQuery) bool {
 	if r.Size < q.MinSize || (q.MaxSize != 0 && r.Size > q.MaxSize) || r.Sources < q.MinSources {
 		return false
 	}
-	if q.Ext != "" && r.Ext != q.Ext {
+	if exts := q.ExtList(); len(exts) > 0 && !slices.Contains(exts, r.Ext) {
+		return false
+	}
+	if r.Duration < q.MinDuration || r.Bitrate < q.MinBitrate || (q.Codec != "" && r.Codec != q.Codec) {
 		return false
 	}
 	has := func(w string) bool {

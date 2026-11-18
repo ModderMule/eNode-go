@@ -97,6 +97,9 @@ type mongoEd3kKeyword struct {
 	Ext         string   `bson:"ext"`
 	Size        int64    `bson:"size"`
 	Sources     int64    `bson:"sources"`
+	Duration    int64    `bson:"duration"`
+	Bitrate     int64    `bson:"bitrate"`
+	Codec       string   `bson:"codec"`
 	ED2K        []byte   `bson:"ed2k,omitempty"`
 	Host        string   `bson:"host"`
 	Site        string   `bson:"site"`
@@ -284,7 +287,8 @@ func (m *MongoDBEngine) StoreEd3kKeyword(ctx context.Context, r Ed3kKeyword, lim
 	}
 	doc := mongoEd3kKeyword{Target: r.Target[:], Root: r.Root[:], RootTarget: r.Root[:16], PubKey: r.PubKey[:],
 		PublisherID: r.PublisherID[:], Signed: r.Signed, SignedHash: hash[:], Words: words, Ext: r.Ext,
-		Size: int64(r.Size), Sources: int64(r.Sources), ED2K: r.ED2K, Host: r.Host, Site: r.Site, ViaSigner: r.ViaSigner,
+		Size: int64(r.Size), Sources: int64(r.Sources), Duration: int64(r.Duration), Bitrate: int64(r.Bitrate), Codec: r.Codec,
+		ED2K: r.ED2K, Host: r.Host, Site: r.Site, ViaSigner: r.ViaSigner,
 		StoredAt: nowMs, Expires: r.Expires.UnixMilli(), PageKey: page[:]}
 	if _, err := c.InsertOne(ctx, doc); err != nil {
 		return 0, err
@@ -418,7 +422,8 @@ func (m *MongoDBEngine) SearchEd3kKeywords(ctx context.Context, target [16]byte,
 	}
 	for _, d := range docs {
 		r := Ed3kKeyword{Target: target, Signed: d.Signed, Words: d.Words, Ext: d.Ext, Size: uint64(d.Size),
-			Sources: uint32(d.Sources), ED2K: d.ED2K, Host: d.Host, Site: d.Site, ViaSigner: d.ViaSigner,
+			Sources: uint32(d.Sources), Duration: uint32(d.Duration), Bitrate: uint32(d.Bitrate), Codec: d.Codec,
+			ED2K: d.ED2K, Host: d.Host, Site: d.Site, ViaSigner: d.ViaSigner,
 			StoredAt: time.UnixMilli(d.StoredAt), Expires: time.UnixMilli(d.Expires)}
 		copy(r.Root[:], d.Root)
 		copy(r.PubKey[:], d.PubKey)
@@ -823,8 +828,17 @@ func ed3kMongoKeywordFilter(target [16]byte, q Ed3kQuery, now time.Time) bson.M 
 	if q.MinSources > 0 {
 		f["sources"] = bson.M{"$gte": int64(q.MinSources)}
 	}
-	if q.Ext != "" {
-		f["ext"] = q.Ext
+	if exts := q.ExtList(); len(exts) > 0 {
+		f["ext"] = bson.M{"$in": exts}
+	}
+	if q.MinDuration > 0 {
+		f["duration"] = bson.M{"$gte": int64(q.MinDuration)}
+	}
+	if q.MinBitrate > 0 {
+		f["bitrate"] = bson.M{"$gte": int64(q.MinBitrate)}
+	}
+	if q.Codec != "" {
+		f["codec"] = q.Codec
 	}
 	words := bson.M{}
 	if len(q.All) > 0 {
@@ -905,7 +919,7 @@ func (m *MongoDBEngine) Ed3kTarget(ctx context.Context, kind uint8, target [16]b
 
 func (d mongoEd3kKeyword) keyword() Ed3kKeyword {
 	r := Ed3kKeyword{Signed: d.Signed, Words: d.Words, Ext: d.Ext, Size: uint64(d.Size), Sources: uint32(d.Sources),
-		ED2K: d.ED2K, Host: d.Host, Site: d.Site, ViaSigner: d.ViaSigner,
+		Duration: uint32(d.Duration), Bitrate: uint32(d.Bitrate), Codec: d.Codec, ED2K: d.ED2K, Host: d.Host, Site: d.Site, ViaSigner: d.ViaSigner,
 		StoredAt: time.UnixMilli(d.StoredAt), Expires: time.UnixMilli(d.Expires)}
 	copy(r.Target[:], d.Target)
 	copy(r.Root[:], d.Root)

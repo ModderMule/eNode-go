@@ -42,6 +42,9 @@ func (m *MySQLEngine) InitEd3k(ctx context.Context) error {
 			return fmt.Errorf("mysql create ed3k tables: %w", err)
 		}
 	}
+	if err := m.ed3kAddColumns(ctx); err != nil {
+		return err
+	}
 	_, err := m.ed3kSecret(ctx, time.Now(), true)
 	return err
 }
@@ -204,11 +207,11 @@ func (m *MySQLEngine) StoreEd3kKeyword(ctx context.Context, r Ed3kKeyword, lim E
 		}
 		page := Ed3kPageKey(secret, r.Root[:], r.PubKey[:])
 		if _, err := tx.ExecContext(ctx, `INSERT INTO ed3k_keywords
-			(target,root,root_target,pubkey,publisher_id,signed,signed_hash,words,ext,size,sources,ed2k,host,site,
-			 via_signer,stored_at,expires,page_key,created_at,updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			(target,root,root_target,pubkey,publisher_id,signed,signed_hash,words,ext,size,sources,duration,bitrate,codec,
+			 ed2k,host,site,via_signer,stored_at,expires,page_key,created_at,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			r.Target[:], r.Root[:], r.Root[:16], r.PubKey[:], r.PublisherID[:], r.Signed, hash[:], ed3kWordList(r.Words),
-			r.Ext, r.Size, r.Sources, nullBytes(r.ED2K), r.Host, r.Site, r.ViaSigner, nowMs, r.Expires.UnixMilli(),
+			r.Ext, r.Size, r.Sources, r.Duration, r.Bitrate, r.Codec, nullBytes(r.ED2K), r.Host, r.Site, r.ViaSigner, nowMs, r.Expires.UnixMilli(),
 			page[:], now.UTC(), now.UTC()); err != nil {
 			return err
 		}
@@ -351,7 +354,7 @@ func (m *MySQLEngine) SearchEd3kKeywords(ctx context.Context, target [16]byte, q
 	p.Spill = fullAt > 0 && now.Sub(time.UnixMilli(fullAt)) < ed3kFullMemory(Ed3kKindKeyword)
 	where, args := ed3kKeywordWhere(target, q, now)
 	args = append(args, limit+1, offset)
-	rows, err := m.db.QueryContext(ctx, `SELECT root, pubkey, publisher_id, signed, words, ext, size, sources, ed2k,
+	rows, err := m.db.QueryContext(ctx, `SELECT root, pubkey, publisher_id, signed, words, ext, size, sources, duration, bitrate, codec, ed2k,
 		host, site, stored_at, expires FROM ed3k_keywords WHERE `+where+` ORDER BY page_key LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return p, err
@@ -362,7 +365,7 @@ func (m *MySQLEngine) SearchEd3kKeywords(ctx context.Context, target [16]byte, q
 		var root, pub, pid, ed2k []byte
 		var words string
 		var stored, exp int64
-		if err := rows.Scan(&root, &pub, &pid, &r.Signed, &words, &r.Ext, &r.Size, &r.Sources, &ed2k,
+		if err := rows.Scan(&root, &pub, &pid, &r.Signed, &words, &r.Ext, &r.Size, &r.Sources, &r.Duration, &r.Bitrate, &r.Codec, &ed2k,
 			&r.Host, &r.Site, &stored, &exp); err != nil {
 			return p, err
 		}
@@ -790,8 +793,20 @@ func ed3kKeywordWhere(target [16]byte, q Ed3kQuery, now time.Time) (string, []an
 	if q.MinSources > 0 {
 		where, args = append(where, "sources>=?"), append(args, q.MinSources)
 	}
-	if q.Ext != "" {
-		where, args = append(where, "ext=?"), append(args, q.Ext)
+	if exts := q.ExtList(); len(exts) > 0 {
+		where = append(where, "ext IN (?"+strings.Repeat(",?", len(exts)-1)+")")
+		for _, e := range exts {
+			args = append(args, e)
+		}
+	}
+	if q.MinDuration > 0 {
+		where, args = append(where, "duration>=?"), append(args, q.MinDuration)
+	}
+	if q.MinBitrate > 0 {
+		where, args = append(where, "bitrate>=?"), append(args, q.MinBitrate)
+	}
+	if q.Codec != "" {
+		where, args = append(where, "codec=?"), append(args, q.Codec)
 	}
 	for _, w := range q.All {
 		where, args = append(where, "words LIKE ?"), append(args, ed3kWordPattern(w))
@@ -843,7 +858,7 @@ func (m *MySQLEngine) ed3kPageSecret(ctx context.Context, now time.Time) ([]byte
 	return m.ed3kSecret(ctx, now, false)
 }
 
-const ed3kMySQLKeywordCols = `target, root, pubkey, publisher_id, signed, words, ext, size, sources, ed2k, host, site, via_signer, stored_at, expires`
+const ed3kMySQLKeywordCols = `target, root, pubkey, publisher_id, signed, words, ext, size, sources, duration, bitrate, codec, ed2k, host, site, via_signer, stored_at, expires`
 
 func (m *MySQLEngine) ed3kFileKeywords(ctx context.Context, target [16]byte, root [32]byte) ([]Ed3kKeyword, error) {
 	rows, err := m.db.QueryContext(ctx, `SELECT `+ed3kMySQLKeywordCols+` FROM ed3k_keywords WHERE target=? AND root=?`, target[:], root[:])
@@ -920,7 +935,7 @@ func scanEd3kKeywordWithID(rows rowScanner2, id *uint64) (Ed3kKeyword, error) {
 	var target, root, pub, pid, ed2k []byte
 	var words string
 	var stored, exp int64
-	dest := []any{&target, &root, &pub, &pid, &r.Signed, &words, &r.Ext, &r.Size, &r.Sources, &ed2k,
+	dest := []any{&target, &root, &pub, &pid, &r.Signed, &words, &r.Ext, &r.Size, &r.Sources, &r.Duration, &r.Bitrate, &r.Codec, &ed2k,
 		&r.Host, &r.Site, &r.ViaSigner, &stored, &exp}
 	if id != nil {
 		dest = append([]any{id}, dest...)
@@ -936,4 +951,27 @@ func scanEd3kKeywordWithID(rows rowScanner2, id *uint64) (Ed3kKeyword, error) {
 	r.Words = ed3kParseWordList(words)
 	r.StoredAt, r.Expires = time.UnixMilli(stored), time.UnixMilli(exp)
 	return r, nil
+}
+
+// ed3kAddColumns gives an ed3k_keywords table of an older build the media
+// columns of Query (§10.3); its records match them once republished.
+func (m *MySQLEngine) ed3kAddColumns(ctx context.Context) error {
+	for _, c := range []struct{ name, decl string }{
+		{"duration", "int(10) unsigned NOT NULL DEFAULT '0' AFTER `sources`"},
+		{"bitrate", "int(10) unsigned NOT NULL DEFAULT '0' AFTER `duration`"},
+		{"codec", "varbinary(255) NOT NULL DEFAULT '' AFTER `bitrate`"},
+	} {
+		var n int
+		if err := m.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='ed3k_keywords' AND COLUMN_NAME=?`, c.name).Scan(&n); err != nil {
+			return fmt.Errorf("mysql ed3k columns: %w", err)
+		}
+		if n > 0 {
+			continue
+		}
+		if _, err := m.db.ExecContext(ctx, "ALTER TABLE ed3k_keywords ADD COLUMN `"+c.name+"` "+c.decl); err != nil {
+			return fmt.Errorf("mysql ed3k add column %s: %w", c.name, err)
+		}
+	}
+	return nil
 }

@@ -125,6 +125,15 @@ func TestKeywordStoreAndSearch(t *testing.T) {
 	if n := len(search(&ed3kpb.Query{All: []string{"big"}, None: []string{"1946"}}).Files); n != 0 {
 		t.Fatalf("none=1946 matched %d", n)
 	}
+	if n := len(search(&ed3kpb.Query{All: []string{"big"}, Exts: []string{"avi", "mkv"}}).Files); n != 1 {
+		t.Fatalf("exts avi,mkv matched %d", n)
+	}
+	if n := len(search(&ed3kpb.Query{All: []string{"big"}, Exts: []string{"mp3"}}).Files); n != 0 {
+		t.Fatalf("exts mp3 matched %d", n)
+	}
+	if n := len(search(&ed3kpb.Query{All: []string{"big"}, MinDuration: 1}).Files); n != 0 {
+		t.Fatalf("min_duration 1 matched a record without duration: %d", n)
+	}
 
 	// Records that fail a check.
 	b := newPub(t, "81.2.4.5:4662")

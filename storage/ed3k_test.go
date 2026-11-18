@@ -307,16 +307,17 @@ func testEd3kStore(t *testing.T, s Ed3kStore) {
 
 	t.Run("keyword query", func(t *testing.T) {
 		target := rnd16()
-		mk := func(words []string, ext string, size uint64, sources uint32) {
+		mk := func(words []string, ext string, size uint64, sources, duration, bitrate uint32, codec string) {
 			r := testKeyword(target, rnd32(), rnd32(), "q-site-"+fmt.Sprint(size), now.Add(time.Hour))
 			r.Words, r.Ext, r.Size, r.Sources = words, ext, size, sources
+			r.Duration, r.Bitrate, r.Codec = duration, bitrate, codec
 			if res, _ := s.StoreEd3kKeyword(ctx, r, Ed3kLimits{}, now, nil); res != Ed3kStored {
 				t.Fatalf("store: %v", res)
 			}
 		}
-		mk([]string{"big", "sleep", "mkv"}, "mkv", 100, 5)
-		mk([]string{"big", "lebowski", "avi"}, "avi", 200, 1)
-		mk([]string{"big", "sleep", "1946", "avi"}, "avi", 300, 9)
+		mk([]string{"big", "sleep", "mkv"}, "mkv", 100, 5, 6000, 2000, "h264")
+		mk([]string{"big", "lebowski", "avi"}, "avi", 200, 1, 0, 0, "")
+		mk([]string{"big", "sleep", "1946", "avi"}, "avi", 300, 9, 3000, 900, "xvid")
 		cases := []struct {
 			name string
 			q    Ed3kQuery
@@ -330,6 +331,14 @@ func testEd3kStore(t *testing.T, s Ed3kStore) {
 			{"min_sources 5", Ed3kQuery{MinSources: 5}, 2},
 			{"substring sle", Ed3kQuery{All: []string{"sle"}}, 0},
 			{"percent sign", Ed3kQuery{All: []string{"%"}}, 0},
+			{"exts mkv,mp4", Ed3kQuery{Exts: []string{"mkv", "mp4"}}, 1},
+			{"ext avi + exts mkv", Ed3kQuery{Ext: "avi", Exts: []string{"mkv"}}, 3},
+			{"exts mp3", Ed3kQuery{Exts: []string{"mp3"}}, 0},
+			{"min_duration 3000", Ed3kQuery{MinDuration: 3000}, 2},
+			{"min_duration 1, unknown fails", Ed3kQuery{MinDuration: 1}, 2},
+			{"min_bitrate 1000", Ed3kQuery{MinBitrate: 1000}, 1},
+			{"codec xvid", Ed3kQuery{Codec: "xvid"}, 1},
+			{"codec + exts mismatch", Ed3kQuery{Codec: "xvid", Exts: []string{"mkv"}}, 0},
 		}
 		for _, c := range cases {
 			p, err := s.SearchEd3kKeywords(ctx, target, c.q, 0, 10, now)

@@ -20,11 +20,12 @@
 //  13 ReachTest       14 Browse          15 BrowseAnswer    16 Chat
 //  17 SlotOffer       18 ChatAck         19 LiveJoin        20 LiveState
 //  21 LiveGet         22 TopicJoin       23 TopicState      24 LanQuery
-//  25 LanAnswer       26 HopCreate       27 HopCreated      28 HopExtend
+//  25 LanAnswer       26 HopCreate       27 HopCreated      28 (unused)
 //  29 HopGate         30 HopLookup       31 HopLookupAnswer 32 HopStream
 //  33 HopConnect      34 HopJoin         35 Receipt         36 CreditRelay
 //  37 CreditRelayAnswer 38 BadBlock      39 HopOk          40 KeyRequest
-//  41 KeyAnswer
+//  41 KeyAnswer      42 RoomJoin        43 RoomState       44 NameQuery
+//  45 NameAnswer      46 Market          47 MarketAck
 //  48–63 reserved (Protocol.md §10.6)
 //
 // Messages without a type are file formats or sub-messages carried inside another message.
@@ -62,13 +63,16 @@ const (
 	Kind_HEAD    Kind = 4  // file-set.md §5.2
 	Kind_MEMBER  Kind = 5  // file-set.md §6
 	Kind_LIVE    Kind = 6  // live.md §5
-	Kind_SUB     Kind = 7  // pubsub.md §5
+	Kind_SUB     Kind = 7  // pubsub.md §5; also the members of a room, room.md §5
 	Kind_HIDDEN  Kind = 8  // hidden-set.md §3
 	Kind_PART    Kind = 9  // multi-author-set.md §3.4
 	Kind_FRIEND  Kind = 10 // friend.md §4
 	Kind_ANON    Kind = 11 // hops.md §4.3
 	Kind_GATE    Kind = 12 // hops.md §4.3
 	Kind_ALIAS   Kind = 13 // alias.md §1
+	Kind_NAME    Kind = 14 // name.md §3.2
+	Kind_CLAIM   Kind = 15 // name.md §4.2
+	Kind_MAIL    Kind = 16 // mail.md §4
 )
 
 // Enum value maps for Kind.
@@ -88,6 +92,9 @@ var (
 		11: "ANON",
 		12: "GATE",
 		13: "ALIAS",
+		14: "NAME",
+		15: "CLAIM",
+		16: "MAIL",
 	}
 	Kind_value = map[string]int32{
 		"NONE":    0,
@@ -104,6 +111,9 @@ var (
 		"ANON":    11,
 		"GATE":    12,
 		"ALIAS":   13,
+		"NAME":    14,
+		"CLAIM":   15,
+		"MAIL":    16,
 	}
 )
 
@@ -143,6 +153,7 @@ const (
 	StoreResult_REJECTED StoreResult = 3 // failed a check (Protocol.md §10.7), or over a limit per address or per publisher on what is held
 	StoreResult_FAR      StoreResult = 4 // a target of `also` this node is not responsible for
 	StoreResult_OLDER    StoreResult = 5 // a newer or winning record is held; nothing changed
+	StoreResult_DECLINED StoreResult = 6 // not held by this node's own policy; says nothing about the record, the target or other nodes   Protocol.md §10.3
 )
 
 // Enum value maps for StoreResult.
@@ -154,6 +165,7 @@ var (
 		3: "REJECTED",
 		4: "FAR",
 		5: "OLDER",
+		6: "DECLINED",
 	}
 	StoreResult_value = map[string]int32{
 		"STORED":   0,
@@ -162,6 +174,7 @@ var (
 		"REJECTED": 3,
 		"FAR":      4,
 		"OLDER":    5,
+		"DECLINED": 6,
 	}
 )
 
@@ -190,6 +203,61 @@ func (x StoreResult) Number() protoreflect.EnumNumber {
 // Deprecated: Use StoreResult.Descriptor instead.
 func (StoreResult) EnumDescriptor() ([]byte, []int) {
 	return file_ed3k_proto_rawDescGZIP(), []int{1}
+}
+
+type NameSource int32
+
+const (
+	NameSource_NAME_NONE    NameSource = 0 // name.md §4.3
+	NameSource_NAME_OWN     NameSource = 1 // the node's own zone
+	NameSource_NAME_PETNAME NameSource = 2 // a petname its user marked as shareable, a global label
+	NameSource_NAME_PINNED  NameSource = 3 // a pin its user vouched for
+	NameSource_NAME_LISTED  NameSource = 4 // a name list its user follows
+)
+
+// Enum value maps for NameSource.
+var (
+	NameSource_name = map[int32]string{
+		0: "NAME_NONE",
+		1: "NAME_OWN",
+		2: "NAME_PETNAME",
+		3: "NAME_PINNED",
+		4: "NAME_LISTED",
+	}
+	NameSource_value = map[string]int32{
+		"NAME_NONE":    0,
+		"NAME_OWN":     1,
+		"NAME_PETNAME": 2,
+		"NAME_PINNED":  3,
+		"NAME_LISTED":  4,
+	}
+)
+
+func (x NameSource) Enum() *NameSource {
+	p := new(NameSource)
+	*p = x
+	return p
+}
+
+func (x NameSource) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (NameSource) Descriptor() protoreflect.EnumDescriptor {
+	return file_ed3k_proto_enumTypes[2].Descriptor()
+}
+
+func (NameSource) Type() protoreflect.EnumType {
+	return &file_ed3k_proto_enumTypes[2]
+}
+
+func (x NameSource) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use NameSource.Descriptor instead.
+func (NameSource) EnumDescriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{2}
 }
 
 type Refusal int32
@@ -231,11 +299,11 @@ func (x Refusal) String() string {
 }
 
 func (Refusal) Descriptor() protoreflect.EnumDescriptor {
-	return file_ed3k_proto_enumTypes[2].Descriptor()
+	return file_ed3k_proto_enumTypes[3].Descriptor()
 }
 
 func (Refusal) Type() protoreflect.EnumType {
-	return &file_ed3k_proto_enumTypes[2]
+	return &file_ed3k_proto_enumTypes[3]
 }
 
 func (x Refusal) Number() protoreflect.EnumNumber {
@@ -244,7 +312,7 @@ func (x Refusal) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Refusal.Descriptor instead.
 func (Refusal) EnumDescriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{2}
+	return file_ed3k_proto_rawDescGZIP(), []int{3}
 }
 
 type TopicType int32
@@ -254,6 +322,7 @@ const (
 	TopicType_SET_HEAD   TopicType = 1 // key and id of a set that changes (file-set.md §5.1)
 	TopicType_ON_AIR     TopicType = 2 // key and id of a live channel (live.md §1.1)
 	TopicType_PAID       TopicType = 3 // pass holders of a paid scope; topic = scope   subscription.md §8.4
+	TopicType_DIRECTORY  TopicType = 4 // list of nodes, no item; key 32 zero bytes, id = directory name   market.md §3.2
 )
 
 // Enum value maps for TopicType.
@@ -263,12 +332,14 @@ var (
 		1: "SET_HEAD",
 		2: "ON_AIR",
 		3: "PAID",
+		4: "DIRECTORY",
 	}
 	TopicType_value = map[string]int32{
 		"TOPIC_NONE": 0,
 		"SET_HEAD":   1,
 		"ON_AIR":     2,
 		"PAID":       3,
+		"DIRECTORY":  4,
 	}
 )
 
@@ -283,11 +354,11 @@ func (x TopicType) String() string {
 }
 
 func (TopicType) Descriptor() protoreflect.EnumDescriptor {
-	return file_ed3k_proto_enumTypes[3].Descriptor()
+	return file_ed3k_proto_enumTypes[4].Descriptor()
 }
 
 func (TopicType) Type() protoreflect.EnumType {
-	return &file_ed3k_proto_enumTypes[3]
+	return &file_ed3k_proto_enumTypes[4]
 }
 
 func (x TopicType) Number() protoreflect.EnumNumber {
@@ -296,7 +367,7 @@ func (x TopicType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TopicType.Descriptor instead.
 func (TopicType) EnumDescriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{3}
+	return file_ed3k_proto_rawDescGZIP(), []int{4}
 }
 
 type TopicRefusal int32
@@ -335,11 +406,11 @@ func (x TopicRefusal) String() string {
 }
 
 func (TopicRefusal) Descriptor() protoreflect.EnumDescriptor {
-	return file_ed3k_proto_enumTypes[4].Descriptor()
+	return file_ed3k_proto_enumTypes[5].Descriptor()
 }
 
 func (TopicRefusal) Type() protoreflect.EnumType {
-	return &file_ed3k_proto_enumTypes[4]
+	return &file_ed3k_proto_enumTypes[5]
 }
 
 func (x TopicRefusal) Number() protoreflect.EnumNumber {
@@ -348,7 +419,62 @@ func (x TopicRefusal) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use TopicRefusal.Descriptor instead.
 func (TopicRefusal) EnumDescriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{4}
+	return file_ed3k_proto_rawDescGZIP(), []int{5}
+}
+
+type RoomRefusal int32
+
+const (
+	RoomRefusal_ROOM_OK      RoomRefusal = 0 // room.md §4
+	RoomRefusal_ROOM_FULL    RoomRefusal = 1
+	RoomRefusal_ROOM_LEFT    RoomRefusal = 2
+	RoomRefusal_ROOM_BLOCKED RoomRefusal = 3 // refused for 24 h, or banned
+	RoomRefusal_ROOM_MEMBER  RoomRefusal = 4 // closed room: no valid admit shown
+)
+
+// Enum value maps for RoomRefusal.
+var (
+	RoomRefusal_name = map[int32]string{
+		0: "ROOM_OK",
+		1: "ROOM_FULL",
+		2: "ROOM_LEFT",
+		3: "ROOM_BLOCKED",
+		4: "ROOM_MEMBER",
+	}
+	RoomRefusal_value = map[string]int32{
+		"ROOM_OK":      0,
+		"ROOM_FULL":    1,
+		"ROOM_LEFT":    2,
+		"ROOM_BLOCKED": 3,
+		"ROOM_MEMBER":  4,
+	}
+)
+
+func (x RoomRefusal) Enum() *RoomRefusal {
+	p := new(RoomRefusal)
+	*p = x
+	return p
+}
+
+func (x RoomRefusal) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RoomRefusal) Descriptor() protoreflect.EnumDescriptor {
+	return file_ed3k_proto_enumTypes[6].Descriptor()
+}
+
+func (RoomRefusal) Type() protoreflect.EnumType {
+	return &file_ed3k_proto_enumTypes[6]
+}
+
+func (x RoomRefusal) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RoomRefusal.Descriptor instead.
+func (RoomRefusal) EnumDescriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{6}
 }
 
 type PassRole int32
@@ -381,11 +507,11 @@ func (x PassRole) String() string {
 }
 
 func (PassRole) Descriptor() protoreflect.EnumDescriptor {
-	return file_ed3k_proto_enumTypes[5].Descriptor()
+	return file_ed3k_proto_enumTypes[7].Descriptor()
 }
 
 func (PassRole) Type() protoreflect.EnumType {
-	return &file_ed3k_proto_enumTypes[5]
+	return &file_ed3k_proto_enumTypes[7]
 }
 
 func (x PassRole) Number() protoreflect.EnumNumber {
@@ -394,7 +520,7 @@ func (x PassRole) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PassRole.Descriptor instead.
 func (PassRole) EnumDescriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{5}
+	return file_ed3k_proto_rawDescGZIP(), []int{7}
 }
 
 type KeyRefusal int32
@@ -436,11 +562,11 @@ func (x KeyRefusal) String() string {
 }
 
 func (KeyRefusal) Descriptor() protoreflect.EnumDescriptor {
-	return file_ed3k_proto_enumTypes[6].Descriptor()
+	return file_ed3k_proto_enumTypes[8].Descriptor()
 }
 
 func (KeyRefusal) Type() protoreflect.EnumType {
-	return &file_ed3k_proto_enumTypes[6]
+	return &file_ed3k_proto_enumTypes[8]
 }
 
 func (x KeyRefusal) Number() protoreflect.EnumNumber {
@@ -449,7 +575,7 @@ func (x KeyRefusal) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use KeyRefusal.Descriptor instead.
 func (KeyRefusal) EnumDescriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{6}
+	return file_ed3k_proto_rawDescGZIP(), []int{8}
 }
 
 type Subject int32
@@ -488,11 +614,11 @@ func (x Subject) String() string {
 }
 
 func (Subject) Descriptor() protoreflect.EnumDescriptor {
-	return file_ed3k_proto_enumTypes[7].Descriptor()
+	return file_ed3k_proto_enumTypes[9].Descriptor()
 }
 
 func (Subject) Type() protoreflect.EnumType {
-	return &file_ed3k_proto_enumTypes[7]
+	return &file_ed3k_proto_enumTypes[9]
 }
 
 func (x Subject) Number() protoreflect.EnumNumber {
@@ -501,7 +627,7 @@ func (x Subject) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Subject.Descriptor instead.
 func (Subject) EnumDescriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{7}
+	return file_ed3k_proto_rawDescGZIP(), []int{9}
 }
 
 type Verdict int32
@@ -543,11 +669,11 @@ func (x Verdict) String() string {
 }
 
 func (Verdict) Descriptor() protoreflect.EnumDescriptor {
-	return file_ed3k_proto_enumTypes[8].Descriptor()
+	return file_ed3k_proto_enumTypes[10].Descriptor()
 }
 
 func (Verdict) Type() protoreflect.EnumType {
-	return &file_ed3k_proto_enumTypes[8]
+	return &file_ed3k_proto_enumTypes[10]
 }
 
 func (x Verdict) Number() protoreflect.EnumNumber {
@@ -556,7 +682,199 @@ func (x Verdict) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Verdict.Descriptor instead.
 func (Verdict) EnumDescriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{8}
+	return file_ed3k_proto_rawDescGZIP(), []int{10}
+}
+
+type ListingType int32
+
+const (
+	ListingType_LISTING_NONE ListingType = 0
+	ListingType_PHYSICAL     ListingType = 1
+	ListingType_DIGITAL      ListingType = 2
+	ListingType_SERVICE      ListingType = 3
+	ListingType_CRYPTO       ListingType = 4
+)
+
+// Enum value maps for ListingType.
+var (
+	ListingType_name = map[int32]string{
+		0: "LISTING_NONE",
+		1: "PHYSICAL",
+		2: "DIGITAL",
+		3: "SERVICE",
+		4: "CRYPTO",
+	}
+	ListingType_value = map[string]int32{
+		"LISTING_NONE": 0,
+		"PHYSICAL":     1,
+		"DIGITAL":      2,
+		"SERVICE":      3,
+		"CRYPTO":       4,
+	}
+)
+
+func (x ListingType) Enum() *ListingType {
+	p := new(ListingType)
+	*p = x
+	return p
+}
+
+func (x ListingType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ListingType) Descriptor() protoreflect.EnumDescriptor {
+	return file_ed3k_proto_enumTypes[11].Descriptor()
+}
+
+func (ListingType) Type() protoreflect.EnumType {
+	return &file_ed3k_proto_enumTypes[11]
+}
+
+func (x ListingType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ListingType.Descriptor instead.
+func (ListingType) EnumDescriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{11}
+}
+
+type SectionKind int32
+
+const (
+	SectionKind_SECTION_NONE   SectionKind = 0
+	SectionKind_ORDER          SectionKind = 1
+	SectionKind_CONFIRM        SectionKind = 2
+	SectionKind_REJECT         SectionKind = 3
+	SectionKind_CANCEL         SectionKind = 4
+	SectionKind_PAYMENT        SectionKind = 5
+	SectionKind_FULFILL        SectionKind = 6
+	SectionKind_COMPLETE       SectionKind = 7
+	SectionKind_DISPUTE        SectionKind = 8
+	SectionKind_DISPUTE_UPDATE SectionKind = 9
+	SectionKind_RESOLUTION     SectionKind = 10
+	SectionKind_ACCEPT         SectionKind = 11
+	SectionKind_REFUND         SectionKind = 12
+	SectionKind_FINALIZED      SectionKind = 13
+	SectionKind_FAILURE        SectionKind = 14
+)
+
+// Enum value maps for SectionKind.
+var (
+	SectionKind_name = map[int32]string{
+		0:  "SECTION_NONE",
+		1:  "ORDER",
+		2:  "CONFIRM",
+		3:  "REJECT",
+		4:  "CANCEL",
+		5:  "PAYMENT",
+		6:  "FULFILL",
+		7:  "COMPLETE",
+		8:  "DISPUTE",
+		9:  "DISPUTE_UPDATE",
+		10: "RESOLUTION",
+		11: "ACCEPT",
+		12: "REFUND",
+		13: "FINALIZED",
+		14: "FAILURE",
+	}
+	SectionKind_value = map[string]int32{
+		"SECTION_NONE":   0,
+		"ORDER":          1,
+		"CONFIRM":        2,
+		"REJECT":         3,
+		"CANCEL":         4,
+		"PAYMENT":        5,
+		"FULFILL":        6,
+		"COMPLETE":       7,
+		"DISPUTE":        8,
+		"DISPUTE_UPDATE": 9,
+		"RESOLUTION":     10,
+		"ACCEPT":         11,
+		"REFUND":         12,
+		"FINALIZED":      13,
+		"FAILURE":        14,
+	}
+)
+
+func (x SectionKind) Enum() *SectionKind {
+	p := new(SectionKind)
+	*p = x
+	return p
+}
+
+func (x SectionKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SectionKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_ed3k_proto_enumTypes[12].Descriptor()
+}
+
+func (SectionKind) Type() protoreflect.EnumType {
+	return &file_ed3k_proto_enumTypes[12]
+}
+
+func (x SectionKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SectionKind.Descriptor instead.
+func (SectionKind) EnumDescriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{12}
+}
+
+type PayMethod int32
+
+const (
+	PayMethod_PAY_NONE  PayMethod = 0
+	PayMethod_DIRECT    PayMethod = 1
+	PayMethod_OFFLINE   PayMethod = 2
+	PayMethod_MODERATED PayMethod = 3
+)
+
+// Enum value maps for PayMethod.
+var (
+	PayMethod_name = map[int32]string{
+		0: "PAY_NONE",
+		1: "DIRECT",
+		2: "OFFLINE",
+		3: "MODERATED",
+	}
+	PayMethod_value = map[string]int32{
+		"PAY_NONE":  0,
+		"DIRECT":    1,
+		"OFFLINE":   2,
+		"MODERATED": 3,
+	}
+)
+
+func (x PayMethod) Enum() *PayMethod {
+	p := new(PayMethod)
+	*p = x
+	return p
+}
+
+func (x PayMethod) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PayMethod) Descriptor() protoreflect.EnumDescriptor {
+	return file_ed3k_proto_enumTypes[13].Descriptor()
+}
+
+func (PayMethod) Type() protoreflect.EnumType {
+	return &file_ed3k_proto_enumTypes[13]
+}
+
+func (x PayMethod) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PayMethod.Descriptor instead.
+func (PayMethod) EnumDescriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{13}
 }
 
 type Error_Code int32
@@ -601,11 +919,11 @@ func (x Error_Code) String() string {
 }
 
 func (Error_Code) Descriptor() protoreflect.EnumDescriptor {
-	return file_ed3k_proto_enumTypes[9].Descriptor()
+	return file_ed3k_proto_enumTypes[14].Descriptor()
 }
 
 func (Error_Code) Type() protoreflect.EnumType {
-	return &file_ed3k_proto_enumTypes[9]
+	return &file_ed3k_proto_enumTypes[14]
 }
 
 func (x Error_Code) Number() protoreflect.EnumNumber {
@@ -674,11 +992,11 @@ func (x HttpResult_Code) String() string {
 }
 
 func (HttpResult_Code) Descriptor() protoreflect.EnumDescriptor {
-	return file_ed3k_proto_enumTypes[10].Descriptor()
+	return file_ed3k_proto_enumTypes[15].Descriptor()
 }
 
 func (HttpResult_Code) Type() protoreflect.EnumType {
-	return &file_ed3k_proto_enumTypes[10]
+	return &file_ed3k_proto_enumTypes[15]
 }
 
 func (x HttpResult_Code) Number() protoreflect.EnumNumber {
@@ -723,11 +1041,11 @@ func (x Alias_Relation) String() string {
 }
 
 func (Alias_Relation) Descriptor() protoreflect.EnumDescriptor {
-	return file_ed3k_proto_enumTypes[11].Descriptor()
+	return file_ed3k_proto_enumTypes[16].Descriptor()
 }
 
 func (Alias_Relation) Type() protoreflect.EnumType {
-	return &file_ed3k_proto_enumTypes[11]
+	return &file_ed3k_proto_enumTypes[16]
 }
 
 func (x Alias_Relation) Number() protoreflect.EnumNumber {
@@ -827,6 +1145,10 @@ type FileInfo struct {
 	SetFiles      uint32                 `protobuf:"varint,8,opt,name=set_files,json=setFiles,proto3" json:"set_files,omitempty"` // number of files, inner sets included; 0 = not a set   file-set.md §3
 	SetSize       uint64                 `protobuf:"varint,9,opt,name=set_size,json=setSize,proto3" json:"set_size,omitempty"`    // sum of their sizes                            file-set.md §3
 	Partial       uint32                 `protobuf:"varint,10,opt,name=partial,proto3" json:"partial,omitempty"`                  // sources known to the sender that hold the file in part   Protocol.md §10.3
+	Artist        string                 `protobuf:"bytes,11,opt,name=artist,proto3" json:"artist,omitempty"`                     // media tags, optional, at most 128 B of UTF-8 each      Protocol.md §5.4
+	Album         string                 `protobuf:"bytes,12,opt,name=album,proto3" json:"album,omitempty"`
+	Title         string                 `protobuf:"bytes,13,opt,name=title,proto3" json:"title,omitempty"`
+	Codec         string                 `protobuf:"bytes,14,opt,name=codec,proto3" json:"codec,omitempty"` // at most 32 B
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -929,6 +1251,34 @@ func (x *FileInfo) GetPartial() uint32 {
 		return x.Partial
 	}
 	return 0
+}
+
+func (x *FileInfo) GetArtist() string {
+	if x != nil {
+		return x.Artist
+	}
+	return ""
+}
+
+func (x *FileInfo) GetAlbum() string {
+	if x != nil {
+		return x.Album
+	}
+	return ""
+}
+
+func (x *FileInfo) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *FileInfo) GetCodec() string {
+	if x != nil {
+		return x.Codec
+	}
+	return ""
 }
 
 type Hello struct {
@@ -1171,6 +1521,7 @@ type Relay struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Reserve       bool                   `protobuf:"varint,1,opt,name=reserve,proto3" json:"reserve,omitempty"` // request: true = hold a slot, false = release   Protocol.md §9.4
 	Ttl           uint32                 `protobuf:"varint,2,opt,name=ttl,proto3" json:"ttl,omitempty"`         // answer: seconds the slot is held without traffic
+	Hop           bool                   `protobuf:"varint,3,opt,name=hop,proto3" json:"hop,omitempty"`         // request: the leaf forwards for others' paths   hops.md §2.5
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1217,6 +1568,13 @@ func (x *Relay) GetTtl() uint32 {
 		return x.Ttl
 	}
 	return 0
+}
+
+func (x *Relay) GetHop() bool {
+	if x != nil {
+		return x.Hop
+	}
+	return false
 }
 
 type Punch struct {
@@ -1310,7 +1668,8 @@ type KadRequest struct {
 	Kind          Kind                   `protobuf:"varint,3,opt,name=kind,proto3,enum=ed3k.v1.Kind" json:"kind,omitempty"` // NONE = find nodes only
 	Search        *Query                 `protobuf:"bytes,4,opt,name=search,proto3" json:"search,omitempty"`                // present, also when empty: search for records of `kind`
 	Store         *Store                 `protobuf:"bytes,5,opt,name=store,proto3" json:"store,omitempty"`                  // present: store records of `kind`; never together with `search`
-	Level         uint32                 `protobuf:"varint,6,opt,name=level,proto3" json:"level,omitempty"`                 // KEYWORD: level the target was computed for; 0 in version 1   Protocol.md §10.1
+	Level         uint32                 `protobuf:"varint,6,opt,name=level,proto3" json:"level,omitempty"`                 // KEYWORD: level the target was computed for; 0 on Kad in version 1, 0 to 15 at an index node   Protocol.md §10.1, §11
+	Hops          bool                   `protobuf:"varint,7,opt,name=hops,proto3" json:"hops,omitempty"`                   // list leaf hops holding a relay reservation here   hops.md §2.5
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1387,15 +1746,26 @@ func (x *KadRequest) GetLevel() uint32 {
 	return 0
 }
 
+func (x *KadRequest) GetHops() bool {
+	if x != nil {
+		return x.Hops
+	}
+	return false
+}
+
 type Query struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	All           []string               `protobuf:"bytes,1,rep,name=all,proto3" json:"all,omitempty"`   // every word must be a word of the name; normalised by the sender   Protocol.md §10.1
 	None          []string               `protobuf:"bytes,2,rep,name=none,proto3" json:"none,omitempty"` // no word may be a word of the name; normalised by the sender; at most 64 terms with `all`
 	MinSize       uint64                 `protobuf:"varint,3,opt,name=min_size,json=minSize,proto3" json:"min_size,omitempty"`
-	MaxSize       uint64                 `protobuf:"varint,4,opt,name=max_size,json=maxSize,proto3" json:"max_size,omitempty"`          // 0 = no limit
-	MinSources    uint32                 `protobuf:"varint,5,opt,name=min_sources,json=minSources,proto3" json:"min_sources,omitempty"` // compared with FileInfo.sources of the record
-	Ext           string                 `protobuf:"bytes,6,opt,name=ext,proto3" json:"ext,omitempty"`                                  // extension of the name without the `.`, normalised by the sender; empty = any   Protocol.md §10.1
-	Offset        uint32                 `protobuf:"varint,7,opt,name=offset,proto3" json:"offset,omitempty"`                           // skip this many matching records               Protocol.md §10.3
+	MaxSize       uint64                 `protobuf:"varint,4,opt,name=max_size,json=maxSize,proto3" json:"max_size,omitempty"`             // 0 = no limit
+	MinSources    uint32                 `protobuf:"varint,5,opt,name=min_sources,json=minSources,proto3" json:"min_sources,omitempty"`    // compared with FileInfo.sources of the record
+	Ext           string                 `protobuf:"bytes,6,opt,name=ext,proto3" json:"ext,omitempty"`                                     // extension of the name without the `.`, normalised by the sender; empty = any   Protocol.md §10.1
+	Offset        uint32                 `protobuf:"varint,7,opt,name=offset,proto3" json:"offset,omitempty"`                              // skip this many matching records               Protocol.md §10.3
+	Exts          []string               `protobuf:"bytes,8,rep,name=exts,proto3" json:"exts,omitempty"`                                   // further extensions as `ext`: the name's is `ext` or one of these; at most 64 terms with `all` and `none`   Protocol.md §10.3
+	MinDuration   uint32                 `protobuf:"varint,9,opt,name=min_duration,json=minDuration,proto3" json:"min_duration,omitempty"` // compared with FileInfo.duration; 0 = no limit; unknown duration fails
+	MinBitrate    uint32                 `protobuf:"varint,10,opt,name=min_bitrate,json=minBitrate,proto3" json:"min_bitrate,omitempty"`   // compared with FileInfo.bitrate; 0 = no limit; unknown bitrate fails
+	Codec         string                 `protobuf:"bytes,11,opt,name=codec,proto3" json:"codec,omitempty"`                                // equals FileInfo.codec, both normalised as §10.1 step 1; empty = any
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1479,20 +1849,51 @@ func (x *Query) GetOffset() uint32 {
 	return 0
 }
 
+func (x *Query) GetExts() []string {
+	if x != nil {
+		return x.Exts
+	}
+	return nil
+}
+
+func (x *Query) GetMinDuration() uint32 {
+	if x != nil {
+		return x.MinDuration
+	}
+	return 0
+}
+
+func (x *Query) GetMinBitrate() uint32 {
+	if x != nil {
+		return x.MinBitrate
+	}
+	return 0
+}
+
+func (x *Query) GetCodec() string {
+	if x != nil {
+		return x.Codec
+	}
+	return ""
+}
+
 type Store struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Source        *Peer                  `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`    // SOURCE, and the kinds stored like it (LIVE, SUB): my endpoints and relays; `id` MUST be empty   Protocol.md §10.3
-	Files         []*Signed              `protobuf:"bytes,2,rep,name=files,proto3" json:"files,omitempty"`      // KEYWORD: files whose name contains the keyword; a Store holds at most 256 records   Protocol.md §10.3, §10.7
-	Note          *Signed                `protobuf:"bytes,3,opt,name=note,proto3" json:"note,omitempty"`        // NOTE                                          Protocol.md §10.7
-	Http          []*HttpSource          `protobuf:"bytes,4,rep,name=http,proto3" json:"http,omitempty"`        // SOURCE: HTTP sources of the file; 3 per publisher and file   http-source.md §2
-	Head          *Signed                `protobuf:"bytes,5,opt,name=head,proto3" json:"head,omitempty"`        // HEAD, HIDDEN or PART                          file-set.md §5.2
-	Signer        []byte                 `protobuf:"bytes,6,opt,name=signer,proto3" json:"signer,omitempty"`    // 32 B key under which the records of this Store are checked and counted when it is not the key of the connection; allowed for every signed kind; ignored for SOURCE, LIVE, SUB and FRIEND   Protocol.md §10.7
-	Members       []*Signed              `protobuf:"bytes,7,rep,name=members,proto3" json:"members,omitempty"`  // MEMBER                                    file-set.md §6
-	Also          []byte                 `protobuf:"bytes,8,opt,name=also,proto3" json:"also,omitempty"`        // SOURCE: n × 16 B further targets that get the same record; at most 256   Protocol.md §10.4
-	Sealed        []byte                 `protobuf:"bytes,9,opt,name=sealed,proto3" json:"sealed,omitempty"`    // FRIEND: exactly 384 B, padded before sealing; any other length than 384 B: REJECTED   friend.md §4
-	Anon          *Signed                `protobuf:"bytes,10,opt,name=anon,proto3" json:"anon,omitempty"`       // ANON or GATE; `signer` is always present      hops.md §4.3
-	Aliases       []*Signed              `protobuf:"bytes,11,rep,name=aliases,proto3" json:"aliases,omitempty"` // ALIAS                                     alias.md §1
-	Links         []*HttpSource          `protobuf:"bytes,12,rep,name=links,proto3" json:"links,omitempty"`     // SOURCE: links at file hosters; 3 per publisher and file   hoster.md §2
+	Source        *Peer                  `protobuf:"bytes,1,opt,name=source,proto3" json:"source,omitempty"`                         // SOURCE, and the kinds stored like it (LIVE, SUB): my endpoints and relays; `id` MUST be empty   Protocol.md §10.3
+	Files         []*Signed              `protobuf:"bytes,2,rep,name=files,proto3" json:"files,omitempty"`                           // KEYWORD: files whose name contains the keyword; a Store holds at most 256 records   Protocol.md §10.3, §10.7
+	Note          *Signed                `protobuf:"bytes,3,opt,name=note,proto3" json:"note,omitempty"`                             // NOTE                                          Protocol.md §10.7
+	Http          []*HttpSource          `protobuf:"bytes,4,rep,name=http,proto3" json:"http,omitempty"`                             // SOURCE: HTTP sources of the file; 3 per publisher and file   http-source.md §2
+	Head          *Signed                `protobuf:"bytes,5,opt,name=head,proto3" json:"head,omitempty"`                             // HEAD, HIDDEN or PART                          file-set.md §5.2
+	Signer        []byte                 `protobuf:"bytes,6,opt,name=signer,proto3" json:"signer,omitempty"`                         // 32 B key under which the records of this Store are checked and counted when it is not the key of the connection; allowed for every signed kind; ignored for SOURCE, LIVE, SUB, FRIEND and MAIL   Protocol.md §10.7
+	Members       []*Signed              `protobuf:"bytes,7,rep,name=members,proto3" json:"members,omitempty"`                       // MEMBER                                    file-set.md §6
+	Also          []byte                 `protobuf:"bytes,8,opt,name=also,proto3" json:"also,omitempty"`                             // SOURCE: n × 16 B further targets that get the same record; at most 256   Protocol.md §10.4
+	Sealed        []byte                 `protobuf:"bytes,9,opt,name=sealed,proto3" json:"sealed,omitempty"`                         // FRIEND: exactly 384 B, padded before sealing; any other length than 384 B: REJECTED   friend.md §4
+	Anon          *Signed                `protobuf:"bytes,10,opt,name=anon,proto3" json:"anon,omitempty"`                            // ANON or GATE; `signer` is always present      hops.md §4.3
+	Aliases       []*Signed              `protobuf:"bytes,11,rep,name=aliases,proto3" json:"aliases,omitempty"`                      // ALIAS                                     alias.md §1
+	Links         []*HttpSource          `protobuf:"bytes,12,rep,name=links,proto3" json:"links,omitempty"`                          // SOURCE: links at file hosters; 3 per publisher and file   hoster.md §2
+	Names         []*Signed              `protobuf:"bytes,13,rep,name=names,proto3" json:"names,omitempty"`                          // NAME or CLAIM                             name.md §3.2, §4.2
+	FileNames     []string               `protobuf:"bytes,14,rep,name=file_names,json=fileNames,proto3" json:"file_names,omitempty"` // SOURCE: name the publisher gives the file, for `target` then each target of `also`; each at most 255 B   Protocol.md §10.3
+	Mail          [][]byte               `protobuf:"bytes,15,rep,name=mail,proto3" json:"mail,omitempty"`                            // MAIL: each exactly 1,024 B; any other length: REJECTED   mail.md §4
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1611,10 +2012,32 @@ func (x *Store) GetLinks() []*HttpSource {
 	return nil
 }
 
+func (x *Store) GetNames() []*Signed {
+	if x != nil {
+		return x.Names
+	}
+	return nil
+}
+
+func (x *Store) GetFileNames() []string {
+	if x != nil {
+		return x.FileNames
+	}
+	return nil
+}
+
+func (x *Store) GetMail() [][]byte {
+	if x != nil {
+		return x.Mail
+	}
+	return nil
+}
+
 type Note struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Rating        uint32                 `protobuf:"varint,1,opt,name=rating,proto3" json:"rating,omitempty"` // 1..5, 0 = none                                Protocol.md §10.3
 	Text          string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`      // at most 512 B of UTF-8                        Protocol.md §10.7
+	Nick          string                 `protobuf:"bytes,3,opt,name=nick,proto3" json:"nick,omitempty"`      // optional, at most 64 B of UTF-8; empty under the anonymous key   Protocol.md §10.7
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1663,6 +2086,13 @@ func (x *Note) GetText() string {
 	return ""
 }
 
+func (x *Note) GetNick() string {
+	if x != nil {
+		return x.Nick
+	}
+	return ""
+}
+
 type KadAnswer struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Nodes4        []byte                 `protobuf:"bytes,1,opt,name=nodes4,proto3" json:"nodes4,omitempty"`            // n × 22 B compact nodes, closest first          Protocol.md §10.3
@@ -1676,7 +2106,7 @@ type KadAnswer struct {
 	Keys          [][]byte               `protobuf:"bytes,9,rep,name=keys,proto3" json:"keys,omitempty"`                                         // 32 B publisher keys, referenced by Signed.key
 	Results       []StoreResult          `protobuf:"varint,10,rep,packed,name=results,proto3,enum=ed3k.v1.StoreResult" json:"results,omitempty"` // one per record of the Store, in order, then one per target of `also`; absent = all stored; entries missing from a shorter list read as STORED
 	Spill         bool                   `protobuf:"varint,11,opt,name=spill,proto3" json:"spill,omitempty"`                                     // this node answered FULL for this target within the last record lifetime
-	Sites         []uint32               `protobuf:"varint,12,rep,packed,name=sites,proto3" json:"sites,omitempty"`                              // one per entry of `files`, of `sets` in a MEMBER answer, or of `aliases`: publisher sites counted; 0 = not counted
+	Sites         []uint32               `protobuf:"varint,12,rep,packed,name=sites,proto3" json:"sites,omitempty"`                              // one per entry of `files`, of `sets` in a MEMBER answer, of `aliases`, or of `names` in a CLAIM answer: publisher sites counted; 0 = not counted
 	Http          []*HttpSource          `protobuf:"bytes,13,rep,name=http,proto3" json:"http,omitempty"`                                        // SOURCE search: HTTP sources; 16 per answer   http-source.md §2
 	Sets          []*Signed              `protobuf:"bytes,14,rep,name=sets,proto3" json:"sets,omitempty"`                                        // answer to a search of kind HEAD, HIDDEN, PART or MEMBER   file-set.md §5.2
 	Friends       [][]byte               `protobuf:"bytes,15,rep,name=friends,proto3" json:"friends,omitempty"`                                  // answer to a search of kind FRIEND          friend.md §4
@@ -1684,6 +2114,12 @@ type KadAnswer struct {
 	Gate          *Signed                `protobuf:"bytes,17,opt,name=gate,proto3" json:"gate,omitempty"`                                        // GATE search                                   hops.md §4.3
 	Aliases       []*Signed              `protobuf:"bytes,18,rep,name=aliases,proto3" json:"aliases,omitempty"`                                  // answer to a search of kind ALIAS          alias.md §1
 	Links         []*HttpSource          `protobuf:"bytes,19,rep,name=links,proto3" json:"links,omitempty"`                                      // SOURCE search: links at file hosters; 16 per answer   hoster.md §2
+	Names         []*Signed              `protobuf:"bytes,20,rep,name=names,proto3" json:"names,omitempty"`                                      // answer to a search of kind NAME or CLAIM  name.md §3.2, §4.2
+	Leaves4       []byte                 `protobuf:"bytes,21,opt,name=leaves4,proto3" json:"leaves4,omitempty"`                                  // n × 22 B compact nodes: leaf hops with a reservation here, endpoint as observed   hops.md §2.5
+	Leaves6       []byte                 `protobuf:"bytes,22,opt,name=leaves6,proto3" json:"leaves6,omitempty"`                                  // n × 34 B; likewise
+	FileNames     []string               `protobuf:"bytes,23,rep,name=file_names,json=fileNames,proto3" json:"file_names,omitempty"`             // SOURCE search: one per entry of `sources`, the name its publisher gave the file; empty = none   Protocol.md §10.3
+	Mail          [][]byte               `protobuf:"bytes,24,rep,name=mail,proto3" json:"mail,omitempty"`                                        // answer to a search of kind MAIL; arrival order   mail.md §4
+	MailEpoch     uint64                 `protobuf:"fixed64,25,opt,name=mail_epoch,json=mailEpoch,proto3" json:"mail_epoch,omitempty"`           // MAIL search: random, fixed while this node holds the target; 0 = none held
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1851,6 +2287,48 @@ func (x *KadAnswer) GetLinks() []*HttpSource {
 	return nil
 }
 
+func (x *KadAnswer) GetNames() []*Signed {
+	if x != nil {
+		return x.Names
+	}
+	return nil
+}
+
+func (x *KadAnswer) GetLeaves4() []byte {
+	if x != nil {
+		return x.Leaves4
+	}
+	return nil
+}
+
+func (x *KadAnswer) GetLeaves6() []byte {
+	if x != nil {
+		return x.Leaves6
+	}
+	return nil
+}
+
+func (x *KadAnswer) GetFileNames() []string {
+	if x != nil {
+		return x.FileNames
+	}
+	return nil
+}
+
+func (x *KadAnswer) GetMail() [][]byte {
+	if x != nil {
+		return x.Mail
+	}
+	return nil
+}
+
+func (x *KadAnswer) GetMailEpoch() uint64 {
+	if x != nil {
+		return x.MailEpoch
+	}
+	return 0
+}
+
 type Record struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Expires       uint64                 `protobuf:"varint,1,opt,name=expires,proto3" json:"expires,omitempty"`         // Unix time in seconds                          Protocol.md §10.7
@@ -1864,6 +2342,8 @@ type Record struct {
 	Part          *Part                  `protobuf:"bytes,9,opt,name=part,proto3" json:"part,omitempty"`                // PART                                          multi-author-set.md §3.4
 	Gates         *Gates                 `protobuf:"bytes,10,opt,name=gates,proto3" json:"gates,omitempty"`             // GATE                                          hops.md §4.3
 	Alias         *Alias                 `protobuf:"bytes,11,opt,name=alias,proto3" json:"alias,omitempty"`             // ALIAS                                         alias.md §1
+	Name          *Name                  `protobuf:"bytes,12,opt,name=name,proto3" json:"name,omitempty"`               // NAME                                          name.md §3.2
+	Claim         *Claim                 `protobuf:"bytes,13,opt,name=claim,proto3" json:"claim,omitempty"`             // CLAIM                                         name.md §4.2
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1971,6 +2451,20 @@ func (x *Record) GetGates() *Gates {
 func (x *Record) GetAlias() *Alias {
 	if x != nil {
 		return x.Alias
+	}
+	return nil
+}
+
+func (x *Record) GetName() *Name {
+	if x != nil {
+		return x.Name
+	}
+	return nil
+}
+
+func (x *Record) GetClaim() *Claim {
+	if x != nil {
+		return x.Claim
 	}
 	return nil
 }
@@ -2098,6 +2592,7 @@ type FileRequest struct {
 	HttpResults   []*HttpResult          `protobuf:"bytes,7,rep,name=http_results,json=httpResults,proto3" json:"http_results,omitempty"`  // outcome per HTTP source or link used   http-source.md §2.1
 	WantMembers   bool                   `protobuf:"varint,8,opt,name=want_members,json=wantMembers,proto3" json:"want_members,omitempty"` // on the stream of a manifest: tell me which members you have   file-set.md §4.1
 	Credit        *CreditBid             `protobuf:"bytes,9,opt,name=credit,proto3" json:"credit,omitempty"`                               // credit.md §4.1
+	Room          []byte                 `protobuf:"bytes,10,opt,name=room,proto3" json:"room,omitempty"`                                  // 16 B: media of this room, served from a neighbour of it only   room.md §4.6
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2191,6 +2686,13 @@ func (x *FileRequest) GetWantMembers() bool {
 func (x *FileRequest) GetCredit() *CreditBid {
 	if x != nil {
 		return x.Credit
+	}
+	return nil
+}
+
+func (x *FileRequest) GetRoom() []byte {
+	if x != nil {
+		return x.Room
 	}
 	return nil
 }
@@ -2761,8 +3263,9 @@ func (x *BrowseAnswer) GetMore() bool {
 
 type Chat struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"` // at most 4,096 bytes in UTF-8                  chat.md §1
-	Id            uint64                 `protobuf:"fixed64,2,opt,name=id,proto3" json:"id,omitempty"`   // random per message, the same again when it is repeated: a replay id, not a request id
+	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`       // at most 4,096 bytes in UTF-8                  chat.md §1
+	Id            uint64                 `protobuf:"fixed64,2,opt,name=id,proto3" json:"id,omitempty"`         // random per message, the same again when it is repeated: a replay id, not a request id
+	Subject       string                 `protobuf:"bytes,3,opt,name=subject,proto3" json:"subject,omitempty"` // optional, at most 64 B: thread, e.g. market order id in hex   chat.md §1
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2809,6 +3312,13 @@ func (x *Chat) GetId() uint64 {
 		return x.Id
 	}
 	return 0
+}
+
+func (x *Chat) GetSubject() string {
+	if x != nil {
+		return x.Subject
+	}
+	return ""
 }
 
 type ChatAck struct {
@@ -3160,6 +3670,7 @@ type FileSet struct {
 	Offer         *SignedOffer           `protobuf:"bytes,12,opt,name=offer,proto3" json:"offer,omitempty"`                                      // paid set                                      subscription.md §3
 	Released      *EpochKey              `protobuf:"bytes,13,opt,name=released,proto3" json:"released,omitempty"`                                // newest released epoch key                     subscription.md §4.3
 	ReleasedChain *SignedChain           `protobuf:"bytes,14,opt,name=released_chain,json=releasedChain,proto3" json:"released_chain,omitempty"` // the season of `released`
+	Exts          []string               `protobuf:"bytes,15,rep,name=exts,proto3" json:"exts,omitempty"`                                        // suggested extensions for followers' downloads   file-set.md §5.3
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3288,6 +3799,13 @@ func (x *FileSet) GetReleased() *EpochKey {
 func (x *FileSet) GetReleasedChain() *SignedChain {
 	if x != nil {
 		return x.ReleasedChain
+	}
+	return nil
+}
+
+func (x *FileSet) GetExts() []string {
+	if x != nil {
+		return x.Exts
 	}
 	return nil
 }
@@ -4733,6 +5251,511 @@ func (x *Alias) GetPassword() string {
 	return ""
 }
 
+type Delegation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           []byte                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`          // 32 B Ed25519 signing key                      name.md §2
+	Issued        uint64                 `protobuf:"varint,2,opt,name=issued,proto3" json:"issued,omitempty"`   // Unix time in seconds
+	Expires       uint64                 `protobuf:"varint,3,opt,name=expires,proto3" json:"expires,omitempty"` // Unix time in seconds; at most 90 days after `issued`
+	Scope         uint64                 `protobuf:"varint,4,opt,name=scope,proto3" json:"scope,omitempty"`     // bit 0: NAME records; every other bit is reserved
+	Sigs          []*Signature           `protobuf:"bytes,5,rep,name=sigs,proto3" json:"sigs,omitempty"`        // by the root key, over "ed3k v1 delegation" ‖ root key(32) ‖ key(32) ‖ issued(8) ‖ expires(8) ‖ scope(8)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Delegation) Reset() {
+	*x = Delegation{}
+	mi := &file_ed3k_proto_msgTypes[52]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Delegation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Delegation) ProtoMessage() {}
+
+func (x *Delegation) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[52]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Delegation.ProtoReflect.Descriptor instead.
+func (*Delegation) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{52}
+}
+
+func (x *Delegation) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *Delegation) GetIssued() uint64 {
+	if x != nil {
+		return x.Issued
+	}
+	return 0
+}
+
+func (x *Delegation) GetExpires() uint64 {
+	if x != nil {
+		return x.Expires
+	}
+	return 0
+}
+
+func (x *Delegation) GetScope() uint64 {
+	if x != nil {
+		return x.Scope
+	}
+	return 0
+}
+
+func (x *Delegation) GetSigs() []*Signature {
+	if x != nil {
+		return x.Sigs
+	}
+	return nil
+}
+
+type Name struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Zone          []byte                 `protobuf:"bytes,1,opt,name=zone,proto3" json:"zone,omitempty"`             // 32 B root key of the zone                     name.md §3.2
+	Label         string                 `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`           // the name in the zone, lower-case labels joined by "."; empty = the apex
+	Seq           uint64                 `protobuf:"varint,3,opt,name=seq,proto3" json:"seq,omitempty"`              // version, higher = newer
+	Links         []string               `protobuf:"bytes,4,rep,name=links,proto3" json:"links,omitempty"`           // ed3k links the name stands for; at most 4, 512 B together at most, one per kind of link
+	Sub           []byte                 `protobuf:"bytes,5,opt,name=sub,proto3" json:"sub,omitempty"`               // optional: 32 B root key of the zone that holds the names below this one
+	Delegation    *Delegation            `protobuf:"bytes,6,opt,name=delegation,proto3" json:"delegation,omitempty"` // present when a signing key signed the record
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Name) Reset() {
+	*x = Name{}
+	mi := &file_ed3k_proto_msgTypes[53]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Name) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Name) ProtoMessage() {}
+
+func (x *Name) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[53]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Name.ProtoReflect.Descriptor instead.
+func (*Name) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{53}
+}
+
+func (x *Name) GetZone() []byte {
+	if x != nil {
+		return x.Zone
+	}
+	return nil
+}
+
+func (x *Name) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
+func (x *Name) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *Name) GetLinks() []string {
+	if x != nil {
+		return x.Links
+	}
+	return nil
+}
+
+func (x *Name) GetSub() []byte {
+	if x != nil {
+		return x.Sub
+	}
+	return nil
+}
+
+func (x *Name) GetDelegation() *Delegation {
+	if x != nil {
+		return x.Delegation
+	}
+	return nil
+}
+
+type Claim struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"` // a global label, without ".ed3k"               name.md §4.2
+	Zone          []byte                 `protobuf:"bytes,2,opt,name=zone,proto3" json:"zone,omitempty"` // 32 B root key of the zone the publisher says it stands for
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Claim) Reset() {
+	*x = Claim{}
+	mi := &file_ed3k_proto_msgTypes[54]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Claim) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Claim) ProtoMessage() {}
+
+func (x *Claim) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[54]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Claim.ProtoReflect.Descriptor instead.
+func (*Claim) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{54}
+}
+
+func (x *Claim) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Claim) GetZone() []byte {
+	if x != nil {
+		return x.Zone
+	}
+	return nil
+}
+
+type NameQuery struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Names         []string               `protobuf:"bytes,1,rep,name=names,proto3" json:"names,omitempty"` // global labels, without ".ed3k"; at most 16    name.md §4.3
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NameQuery) Reset() {
+	*x = NameQuery{}
+	mi := &file_ed3k_proto_msgTypes[55]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NameQuery) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NameQuery) ProtoMessage() {}
+
+func (x *NameQuery) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[55]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NameQuery.ProtoReflect.Descriptor instead.
+func (*NameQuery) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{55}
+}
+
+func (x *NameQuery) GetNames() []string {
+	if x != nil {
+		return x.Names
+	}
+	return nil
+}
+
+type NameAnswer struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Hits          []*NameHit             `protobuf:"bytes,1,rep,name=hits,proto3" json:"hits,omitempty"` // at most one per name asked                    name.md §4.3
+	List          string                 `protobuf:"bytes,2,opt,name=list,proto3" json:"list,omitempty"` // optional: ed3k:set link of the name list this node publishes
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NameAnswer) Reset() {
+	*x = NameAnswer{}
+	mi := &file_ed3k_proto_msgTypes[56]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NameAnswer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NameAnswer) ProtoMessage() {}
+
+func (x *NameAnswer) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[56]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NameAnswer.ProtoReflect.Descriptor instead.
+func (*NameAnswer) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{56}
+}
+
+func (x *NameAnswer) GetHits() []*NameHit {
+	if x != nil {
+		return x.Hits
+	}
+	return nil
+}
+
+func (x *NameAnswer) GetList() string {
+	if x != nil {
+		return x.List
+	}
+	return ""
+}
+
+type NameHit struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"` // name.md §4.3
+	Zone          []byte                 `protobuf:"bytes,2,opt,name=zone,proto3" json:"zone,omitempty"` // 32 B
+	Source        NameSource             `protobuf:"varint,3,opt,name=source,proto3,enum=ed3k.v1.NameSource" json:"source,omitempty"`
+	Since         uint64                 `protobuf:"varint,4,opt,name=since,proto3" json:"since,omitempty"` // Unix time since when the node holds it; 0 = not told
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NameHit) Reset() {
+	*x = NameHit{}
+	mi := &file_ed3k_proto_msgTypes[57]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NameHit) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NameHit) ProtoMessage() {}
+
+func (x *NameHit) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[57]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NameHit.ProtoReflect.Descriptor instead.
+func (*NameHit) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{57}
+}
+
+func (x *NameHit) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *NameHit) GetZone() []byte {
+	if x != nil {
+		return x.Zone
+	}
+	return nil
+}
+
+func (x *NameHit) GetSource() NameSource {
+	if x != nil {
+		return x.Source
+	}
+	return NameSource_NAME_NONE
+}
+
+func (x *NameHit) GetSince() uint64 {
+	if x != nil {
+		return x.Since
+	}
+	return 0
+}
+
+// The name list file is "ed3knam" ‖ 0x01 ‖ NameList (name.md §4.5).
+type NameList struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Title         string                 `protobuf:"bytes,1,opt,name=title,proto3" json:"title,omitempty"` // name.md §4.5
+	Comment       string                 `protobuf:"bytes,2,opt,name=comment,proto3" json:"comment,omitempty"`
+	Created       uint64                 `protobuf:"varint,3,opt,name=created,proto3" json:"created,omitempty"` // Unix time in seconds; 0 = not told
+	Entries       []*NameEntry           `protobuf:"bytes,4,rep,name=entries,proto3" json:"entries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NameList) Reset() {
+	*x = NameList{}
+	mi := &file_ed3k_proto_msgTypes[58]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NameList) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NameList) ProtoMessage() {}
+
+func (x *NameList) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[58]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NameList.ProtoReflect.Descriptor instead.
+func (*NameList) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{58}
+}
+
+func (x *NameList) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *NameList) GetComment() string {
+	if x != nil {
+		return x.Comment
+	}
+	return ""
+}
+
+func (x *NameList) GetCreated() uint64 {
+	if x != nil {
+		return x.Created
+	}
+	return 0
+}
+
+func (x *NameList) GetEntries() []*NameEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+type NameEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"` // a global label, without ".ed3k"               name.md §4.5
+	Zone          []byte                 `protobuf:"bytes,2,opt,name=zone,proto3" json:"zone,omitempty"` // 32 B
+	Note          string                 `protobuf:"bytes,3,opt,name=note,proto3" json:"note,omitempty"` // at most 256 B of UTF-8
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NameEntry) Reset() {
+	*x = NameEntry{}
+	mi := &file_ed3k_proto_msgTypes[59]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NameEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NameEntry) ProtoMessage() {}
+
+func (x *NameEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[59]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NameEntry.ProtoReflect.Descriptor instead.
+func (*NameEntry) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{59}
+}
+
+func (x *NameEntry) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *NameEntry) GetZone() []byte {
+	if x != nil {
+		return x.Zone
+	}
+	return nil
+}
+
+func (x *NameEntry) GetNote() string {
+	if x != nil {
+		return x.Note
+	}
+	return ""
+}
+
 // The channel file is "ed3klive" ‖ 0x01 ‖ LiveFile (live.md §1.2).
 type LiveFile struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -4745,7 +5768,7 @@ type LiveFile struct {
 
 func (x *LiveFile) Reset() {
 	*x = LiveFile{}
-	mi := &file_ed3k_proto_msgTypes[52]
+	mi := &file_ed3k_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4757,7 +5780,7 @@ func (x *LiveFile) String() string {
 func (*LiveFile) ProtoMessage() {}
 
 func (x *LiveFile) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[52]
+	mi := &file_ed3k_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4770,7 +5793,7 @@ func (x *LiveFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveFile.ProtoReflect.Descriptor instead.
 func (*LiveFile) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{52}
+	return file_ed3k_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *LiveFile) GetBody() []byte {
@@ -4813,7 +5836,7 @@ type Channel struct {
 
 func (x *Channel) Reset() {
 	*x = Channel{}
-	mi := &file_ed3k_proto_msgTypes[53]
+	mi := &file_ed3k_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4825,7 +5848,7 @@ func (x *Channel) String() string {
 func (*Channel) ProtoMessage() {}
 
 func (x *Channel) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[53]
+	mi := &file_ed3k_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4838,7 +5861,7 @@ func (x *Channel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Channel.ProtoReflect.Descriptor instead.
 func (*Channel) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{53}
+	return file_ed3k_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *Channel) GetId() []byte {
@@ -4928,7 +5951,7 @@ type LiveRecord struct {
 
 func (x *LiveRecord) Reset() {
 	*x = LiveRecord{}
-	mi := &file_ed3k_proto_msgTypes[54]
+	mi := &file_ed3k_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4940,7 +5963,7 @@ func (x *LiveRecord) String() string {
 func (*LiveRecord) ProtoMessage() {}
 
 func (x *LiveRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[54]
+	mi := &file_ed3k_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4953,7 +5976,7 @@ func (x *LiveRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveRecord.ProtoReflect.Descriptor instead.
 func (*LiveRecord) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{54}
+	return file_ed3k_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *LiveRecord) GetBody() []byte {
@@ -4989,7 +6012,7 @@ type LiveSegment struct {
 
 func (x *LiveSegment) Reset() {
 	*x = LiveSegment{}
-	mi := &file_ed3k_proto_msgTypes[55]
+	mi := &file_ed3k_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5001,7 +6024,7 @@ func (x *LiveSegment) String() string {
 func (*LiveSegment) ProtoMessage() {}
 
 func (x *LiveSegment) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[55]
+	mi := &file_ed3k_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5014,7 +6037,7 @@ func (x *LiveSegment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveSegment.ProtoReflect.Descriptor instead.
 func (*LiveSegment) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{55}
+	return file_ed3k_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *LiveSegment) GetStart() uint64 {
@@ -5109,7 +6132,7 @@ type LiveJoin struct {
 
 func (x *LiveJoin) Reset() {
 	*x = LiveJoin{}
-	mi := &file_ed3k_proto_msgTypes[56]
+	mi := &file_ed3k_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5121,7 +6144,7 @@ func (x *LiveJoin) String() string {
 func (*LiveJoin) ProtoMessage() {}
 
 func (x *LiveJoin) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[56]
+	mi := &file_ed3k_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5134,7 +6157,7 @@ func (x *LiveJoin) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveJoin.ProtoReflect.Descriptor instead.
 func (*LiveJoin) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{56}
+	return file_ed3k_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *LiveJoin) GetStream() []byte {
@@ -5208,7 +6231,7 @@ type LiveState struct {
 
 func (x *LiveState) Reset() {
 	*x = LiveState{}
-	mi := &file_ed3k_proto_msgTypes[57]
+	mi := &file_ed3k_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5220,7 +6243,7 @@ func (x *LiveState) String() string {
 func (*LiveState) ProtoMessage() {}
 
 func (x *LiveState) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[57]
+	mi := &file_ed3k_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5233,7 +6256,7 @@ func (x *LiveState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveState.ProtoReflect.Descriptor instead.
 func (*LiveState) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{57}
+	return file_ed3k_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *LiveState) GetStart() uint64 {
@@ -5344,7 +6367,7 @@ type LiveGet struct {
 
 func (x *LiveGet) Reset() {
 	*x = LiveGet{}
-	mi := &file_ed3k_proto_msgTypes[58]
+	mi := &file_ed3k_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5356,7 +6379,7 @@ func (x *LiveGet) String() string {
 func (*LiveGet) ProtoMessage() {}
 
 func (x *LiveGet) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[58]
+	mi := &file_ed3k_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5369,7 +6392,7 @@ func (x *LiveGet) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LiveGet.ProtoReflect.Descriptor instead.
 func (*LiveGet) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{58}
+	return file_ed3k_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *LiveGet) GetStream() []byte {
@@ -5402,7 +6425,7 @@ type TopicJoin struct {
 
 func (x *TopicJoin) Reset() {
 	*x = TopicJoin{}
-	mi := &file_ed3k_proto_msgTypes[59]
+	mi := &file_ed3k_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5414,7 +6437,7 @@ func (x *TopicJoin) String() string {
 func (*TopicJoin) ProtoMessage() {}
 
 func (x *TopicJoin) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[59]
+	mi := &file_ed3k_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5427,7 +6450,7 @@ func (x *TopicJoin) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TopicJoin.ProtoReflect.Descriptor instead.
 func (*TopicJoin) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{59}
+	return file_ed3k_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *TopicJoin) GetTopic() []byte {
@@ -5502,7 +6525,7 @@ type TopicState struct {
 
 func (x *TopicState) Reset() {
 	*x = TopicState{}
-	mi := &file_ed3k_proto_msgTypes[60]
+	mi := &file_ed3k_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5514,7 +6537,7 @@ func (x *TopicState) String() string {
 func (*TopicState) ProtoMessage() {}
 
 func (x *TopicState) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[60]
+	mi := &file_ed3k_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5527,7 +6550,7 @@ func (x *TopicState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TopicState.ProtoReflect.Descriptor instead.
 func (*TopicState) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{60}
+	return file_ed3k_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *TopicState) GetItem() *TopicItem {
@@ -5597,7 +6620,7 @@ type TopicItem struct {
 
 func (x *TopicItem) Reset() {
 	*x = TopicItem{}
-	mi := &file_ed3k_proto_msgTypes[61]
+	mi := &file_ed3k_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5609,7 +6632,7 @@ func (x *TopicItem) String() string {
 func (*TopicItem) ProtoMessage() {}
 
 func (x *TopicItem) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[61]
+	mi := &file_ed3k_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5622,7 +6645,7 @@ func (x *TopicItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TopicItem.ProtoReflect.Descriptor instead.
 func (*TopicItem) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{61}
+	return file_ed3k_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *TopicItem) GetHead() *Signed {
@@ -5658,7 +6681,7 @@ type OnAir struct {
 
 func (x *OnAir) Reset() {
 	*x = OnAir{}
-	mi := &file_ed3k_proto_msgTypes[62]
+	mi := &file_ed3k_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5670,7 +6693,7 @@ func (x *OnAir) String() string {
 func (*OnAir) ProtoMessage() {}
 
 func (x *OnAir) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[62]
+	mi := &file_ed3k_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5683,7 +6706,7 @@ func (x *OnAir) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OnAir.ProtoReflect.Descriptor instead.
 func (*OnAir) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{62}
+	return file_ed3k_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *OnAir) GetId() []byte {
@@ -5714,6 +6737,1018 @@ func (x *OnAir) GetEnd() bool {
 	return false
 }
 
+type RoomItem struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Body          []byte                 `protobuf:"bytes,1,opt,name=body,proto3" json:"body,omitempty"` // a serialised RoomBody, verified over exactly these bytes   room.md §2
+	Key           []byte                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`   // 32 B signer
+	Sigs          []*Signature           `protobuf:"bytes,3,rep,name=sigs,proto3" json:"sigs,omitempty"` // over "ed3k v1 room item" ‖ room(16) ‖ body
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RoomItem) Reset() {
+	*x = RoomItem{}
+	mi := &file_ed3k_proto_msgTypes[71]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoomItem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoomItem) ProtoMessage() {}
+
+func (x *RoomItem) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[71]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoomItem.ProtoReflect.Descriptor instead.
+func (*RoomItem) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{71}
+}
+
+func (x *RoomItem) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *RoomItem) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *RoomItem) GetSigs() []*Signature {
+	if x != nil {
+		return x.Sigs
+	}
+	return nil
+}
+
+type RoomBody struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Info          *RoomInfo              `protobuf:"bytes,1,opt,name=info,proto3" json:"info,omitempty"`                      // signed by the room key
+	Admit         *Admit                 `protobuf:"bytes,2,opt,name=admit,proto3" json:"admit,omitempty"`                    // signed by the room key or a moderator
+	Ban           *Ban                   `protobuf:"bytes,3,opt,name=ban,proto3" json:"ban,omitempty"`                        // likewise
+	Presence      *Presence              `protobuf:"bytes,4,opt,name=presence,proto3" json:"presence,omitempty"`              // signed by a member key
+	Post          *RoomPost              `protobuf:"bytes,5,opt,name=post,proto3" json:"post,omitempty"`                      // likewise
+	KeyDrop       *KeyDrop               `protobuf:"bytes,6,opt,name=key_drop,json=keyDrop,proto3" json:"key_drop,omitempty"` // signed by the room key or a moderator
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RoomBody) Reset() {
+	*x = RoomBody{}
+	mi := &file_ed3k_proto_msgTypes[72]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoomBody) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoomBody) ProtoMessage() {}
+
+func (x *RoomBody) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[72]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoomBody.ProtoReflect.Descriptor instead.
+func (*RoomBody) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{72}
+}
+
+func (x *RoomBody) GetInfo() *RoomInfo {
+	if x != nil {
+		return x.Info
+	}
+	return nil
+}
+
+func (x *RoomBody) GetAdmit() *Admit {
+	if x != nil {
+		return x.Admit
+	}
+	return nil
+}
+
+func (x *RoomBody) GetBan() *Ban {
+	if x != nil {
+		return x.Ban
+	}
+	return nil
+}
+
+func (x *RoomBody) GetPresence() *Presence {
+	if x != nil {
+		return x.Presence
+	}
+	return nil
+}
+
+func (x *RoomBody) GetPost() *RoomPost {
+	if x != nil {
+		return x.Post
+	}
+	return nil
+}
+
+func (x *RoomBody) GetKeyDrop() *KeyDrop {
+	if x != nil {
+		return x.KeyDrop
+	}
+	return nil
+}
+
+type RoomInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"` // 1 or higher; a higher seq replaces a lower one   room.md §2.1
+	Issued        uint64                 `protobuf:"varint,2,opt,name=issued,proto3" json:"issued,omitempty"`
+	Title         string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`                            // at most 128 B of UTF-8
+	About         string                 `protobuf:"bytes,4,opt,name=about,proto3" json:"about,omitempty"`                            // at most 1,024 B of UTF-8
+	Mods          [][]byte               `protobuf:"bytes,5,rep,name=mods,proto3" json:"mods,omitempty"`                              // 32 B member keys of the moderators; at most 8
+	Closed        bool                   `protobuf:"varint,6,opt,name=closed,proto3" json:"closed,omitempty"`                         // only admitted members join, read and post; a room with a secret only
+	Moderated     bool                   `protobuf:"varint,7,opt,name=moderated,proto3" json:"moderated,omitempty"`                   // only admitted members post and are listed present
+	Banned        []byte                 `protobuf:"bytes,8,opt,name=banned,proto3" json:"banned,omitempty"`                          // n × 16 B member IDs banned for good, ascending, each once; at most 4,096
+	MediaMax      uint64                 `protobuf:"varint,9,opt,name=media_max,json=mediaMax,proto3" json:"media_max,omitempty"`     // largest media file of a post, bytes, read as at most 16 MiB; 0 = no media   room.md §2.6
+	KeepHours     uint32                 `protobuf:"varint,10,opt,name=keep_hours,json=keepHours,proto3" json:"keep_hours,omitempty"` // history kept, read as 24 to 720; 0 = 24   room.md §4.3
+	KeepPosts     uint32                 `protobuf:"varint,11,opt,name=keep_posts,json=keepPosts,proto3" json:"keep_posts,omitempty"` // posts kept, read as 1,000 to 10,000; 0 = 1,000
+	Files         bool                   `protobuf:"varint,12,opt,name=files,proto3" json:"files,omitempty"`                          // other small files allowed with media_max; off = media only   room.md §2.6
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RoomInfo) Reset() {
+	*x = RoomInfo{}
+	mi := &file_ed3k_proto_msgTypes[73]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoomInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoomInfo) ProtoMessage() {}
+
+func (x *RoomInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[73]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoomInfo.ProtoReflect.Descriptor instead.
+func (*RoomInfo) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{73}
+}
+
+func (x *RoomInfo) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *RoomInfo) GetIssued() uint64 {
+	if x != nil {
+		return x.Issued
+	}
+	return 0
+}
+
+func (x *RoomInfo) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *RoomInfo) GetAbout() string {
+	if x != nil {
+		return x.About
+	}
+	return ""
+}
+
+func (x *RoomInfo) GetMods() [][]byte {
+	if x != nil {
+		return x.Mods
+	}
+	return nil
+}
+
+func (x *RoomInfo) GetClosed() bool {
+	if x != nil {
+		return x.Closed
+	}
+	return false
+}
+
+func (x *RoomInfo) GetModerated() bool {
+	if x != nil {
+		return x.Moderated
+	}
+	return false
+}
+
+func (x *RoomInfo) GetBanned() []byte {
+	if x != nil {
+		return x.Banned
+	}
+	return nil
+}
+
+func (x *RoomInfo) GetMediaMax() uint64 {
+	if x != nil {
+		return x.MediaMax
+	}
+	return 0
+}
+
+func (x *RoomInfo) GetKeepHours() uint32 {
+	if x != nil {
+		return x.KeepHours
+	}
+	return 0
+}
+
+func (x *RoomInfo) GetKeepPosts() uint32 {
+	if x != nil {
+		return x.KeepPosts
+	}
+	return 0
+}
+
+func (x *RoomInfo) GetFiles() bool {
+	if x != nil {
+		return x.Files
+	}
+	return false
+}
+
+type Admit struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Member        []byte                 `protobuf:"bytes,1,opt,name=member,proto3" json:"member,omitempty"` // 32 B member key                               room.md §2.2
+	Issued        uint64                 `protobuf:"varint,2,opt,name=issued,proto3" json:"issued,omitempty"`
+	Until         uint64                 `protobuf:"varint,3,opt,name=until,proto3" json:"until,omitempty"` // 0 = no end
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Admit) Reset() {
+	*x = Admit{}
+	mi := &file_ed3k_proto_msgTypes[74]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Admit) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Admit) ProtoMessage() {}
+
+func (x *Admit) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[74]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Admit.ProtoReflect.Descriptor instead.
+func (*Admit) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{74}
+}
+
+func (x *Admit) GetMember() []byte {
+	if x != nil {
+		return x.Member
+	}
+	return nil
+}
+
+func (x *Admit) GetIssued() uint64 {
+	if x != nil {
+		return x.Issued
+	}
+	return 0
+}
+
+func (x *Admit) GetUntil() uint64 {
+	if x != nil {
+		return x.Until
+	}
+	return 0
+}
+
+type Ban struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Member        []byte                 `protobuf:"bytes,1,opt,name=member,proto3" json:"member,omitempty"` // 32 B member key                               room.md §2.3
+	Issued        uint64                 `protobuf:"varint,2,opt,name=issued,proto3" json:"issued,omitempty"`
+	Until         uint64                 `protobuf:"varint,3,opt,name=until,proto3" json:"until,omitempty"` // at most issued + 30 days; until ≤ issued lifts the ban
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Ban) Reset() {
+	*x = Ban{}
+	mi := &file_ed3k_proto_msgTypes[75]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Ban) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Ban) ProtoMessage() {}
+
+func (x *Ban) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[75]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Ban.ProtoReflect.Descriptor instead.
+func (*Ban) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{75}
+}
+
+func (x *Ban) GetMember() []byte {
+	if x != nil {
+		return x.Member
+	}
+	return nil
+}
+
+func (x *Ban) GetIssued() uint64 {
+	if x != nil {
+		return x.Issued
+	}
+	return 0
+}
+
+func (x *Ban) GetUntil() uint64 {
+	if x != nil {
+		return x.Until
+	}
+	return 0
+}
+
+type Presence struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Issued        uint64                 `protobuf:"varint,1,opt,name=issued,proto3" json:"issued,omitempty"`   // room.md §2.4
+	Expires       uint64                 `protobuf:"varint,2,opt,name=expires,proto3" json:"expires,omitempty"` // at most issued + 15 min
+	Nick          string                 `protobuf:"bytes,3,opt,name=nick,proto3" json:"nick,omitempty"`        // at most 64 B of UTF-8
+	Left          bool                   `protobuf:"varint,4,opt,name=left,proto3" json:"left,omitempty"`
+	Gen           uint64                 `protobuf:"varint,5,opt,name=gen,proto3" json:"gen,omitempty"` // closed room: the newest generation whose key I hold; 0 = none
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Presence) Reset() {
+	*x = Presence{}
+	mi := &file_ed3k_proto_msgTypes[76]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Presence) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Presence) ProtoMessage() {}
+
+func (x *Presence) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[76]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Presence.ProtoReflect.Descriptor instead.
+func (*Presence) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{76}
+}
+
+func (x *Presence) GetIssued() uint64 {
+	if x != nil {
+		return x.Issued
+	}
+	return 0
+}
+
+func (x *Presence) GetExpires() uint64 {
+	if x != nil {
+		return x.Expires
+	}
+	return 0
+}
+
+func (x *Presence) GetNick() string {
+	if x != nil {
+		return x.Nick
+	}
+	return ""
+}
+
+func (x *Presence) GetLeft() bool {
+	if x != nil {
+		return x.Left
+	}
+	return false
+}
+
+func (x *Presence) GetGen() uint64 {
+	if x != nil {
+		return x.Gen
+	}
+	return 0
+}
+
+type RoomPost struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Sent          uint64                 `protobuf:"varint,1,opt,name=sent,proto3" json:"sent,omitempty"`               // Unix time in seconds, by the author's clock   room.md §2.5
+	Text          *RoomText              `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`                // public room
+	Sealed        []byte                 `protobuf:"bytes,3,opt,name=sealed,proto3" json:"sealed,omitempty"`            // private and closed room: nonce(12) ‖ ChaCha20(k_post, nonce, serialised RoomText)   room.md §3
+	Gen           uint64                 `protobuf:"varint,4,opt,name=gen,proto3" json:"gen,omitempty"`                 // closed room: the generation of k_post; 0 otherwise
+	KeyId         []byte                 `protobuf:"bytes,5,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"` // closed room: 8 B
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RoomPost) Reset() {
+	*x = RoomPost{}
+	mi := &file_ed3k_proto_msgTypes[77]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoomPost) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoomPost) ProtoMessage() {}
+
+func (x *RoomPost) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[77]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoomPost.ProtoReflect.Descriptor instead.
+func (*RoomPost) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{77}
+}
+
+func (x *RoomPost) GetSent() uint64 {
+	if x != nil {
+		return x.Sent
+	}
+	return 0
+}
+
+func (x *RoomPost) GetText() *RoomText {
+	if x != nil {
+		return x.Text
+	}
+	return nil
+}
+
+func (x *RoomPost) GetSealed() []byte {
+	if x != nil {
+		return x.Sealed
+	}
+	return nil
+}
+
+func (x *RoomPost) GetGen() uint64 {
+	if x != nil {
+		return x.Gen
+	}
+	return 0
+}
+
+func (x *RoomPost) GetKeyId() []byte {
+	if x != nil {
+		return x.KeyId
+	}
+	return nil
+}
+
+type RoomText struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`                      // 1 to 4,096 B of UTF-8                         room.md §2.5
+	ReplyTo       []byte                 `protobuf:"bytes,2,opt,name=reply_to,json=replyTo,proto3" json:"reply_to,omitempty"` // 16 B post id; absent = none
+	Media         *RoomMedia             `protobuf:"bytes,3,opt,name=media,proto3" json:"media,omitempty"`                    // a file: media or, with RoomInfo.files, another small file   room.md §2.6; absent = none
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RoomText) Reset() {
+	*x = RoomText{}
+	mi := &file_ed3k_proto_msgTypes[78]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoomText) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoomText) ProtoMessage() {}
+
+func (x *RoomText) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[78]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoomText.ProtoReflect.Descriptor instead.
+func (*RoomText) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{78}
+}
+
+func (x *RoomText) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *RoomText) GetReplyTo() []byte {
+	if x != nil {
+		return x.ReplyTo
+	}
+	return nil
+}
+
+func (x *RoomText) GetMedia() *RoomMedia {
+	if x != nil {
+		return x.Media
+	}
+	return nil
+}
+
+type RoomMedia struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Root          []byte                 `protobuf:"bytes,1,opt,name=root,proto3" json:"root,omitempty"`    // 32 B, root of the file as transferred (sealed in a room with a secret)
+	Size          uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`   // 1 to the room's media_max
+	Type          string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`    // media type, at most 64 B
+	Name          string                 `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`    // file name, at most 255 B of UTF-8
+	Key           []byte                 `protobuf:"bytes,5,opt,name=key,proto3" json:"key,omitempty"`      // room with a secret: 32 B, ChaCha20 key, zero nonce; public room: absent
+	Width         uint32                 `protobuf:"varint,6,opt,name=width,proto3" json:"width,omitempty"` // pixels, hint; 0 = not told
+	Height        uint32                 `protobuf:"varint,7,opt,name=height,proto3" json:"height,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RoomMedia) Reset() {
+	*x = RoomMedia{}
+	mi := &file_ed3k_proto_msgTypes[79]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoomMedia) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoomMedia) ProtoMessage() {}
+
+func (x *RoomMedia) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[79]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoomMedia.ProtoReflect.Descriptor instead.
+func (*RoomMedia) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{79}
+}
+
+func (x *RoomMedia) GetRoot() []byte {
+	if x != nil {
+		return x.Root
+	}
+	return nil
+}
+
+func (x *RoomMedia) GetSize() uint64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *RoomMedia) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *RoomMedia) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *RoomMedia) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *RoomMedia) GetWidth() uint32 {
+	if x != nil {
+		return x.Width
+	}
+	return 0
+}
+
+func (x *RoomMedia) GetHeight() uint32 {
+	if x != nil {
+		return x.Height
+	}
+	return 0
+}
+
+type KeyDrop struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Gen           uint64                 `protobuf:"varint,1,opt,name=gen,proto3" json:"gen,omitempty"`                 // 1 or higher                                   room.md §3.2
+	KeyId         []byte                 `protobuf:"bytes,2,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"` // 8 B, H("ed3k v1 room key id", k ‖ g)[0..8)
+	Issued        uint64                 `protobuf:"varint,3,opt,name=issued,proto3" json:"issued,omitempty"`
+	E             []byte                 `protobuf:"bytes,4,opt,name=e,proto3" json:"e,omitempty"`         // 32 B X25519 public value, new for every KeyDrop
+	Wraps         []byte                 `protobuf:"bytes,5,opt,name=wraps,proto3" json:"wraps,omitempty"` // n × 64 B: member ID(16) ‖ wrap(48); at most 1,032, ascending by member ID, each once
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *KeyDrop) Reset() {
+	*x = KeyDrop{}
+	mi := &file_ed3k_proto_msgTypes[80]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *KeyDrop) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*KeyDrop) ProtoMessage() {}
+
+func (x *KeyDrop) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[80]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use KeyDrop.ProtoReflect.Descriptor instead.
+func (*KeyDrop) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{80}
+}
+
+func (x *KeyDrop) GetGen() uint64 {
+	if x != nil {
+		return x.Gen
+	}
+	return 0
+}
+
+func (x *KeyDrop) GetKeyId() []byte {
+	if x != nil {
+		return x.KeyId
+	}
+	return nil
+}
+
+func (x *KeyDrop) GetIssued() uint64 {
+	if x != nil {
+		return x.Issued
+	}
+	return 0
+}
+
+func (x *KeyDrop) GetE() []byte {
+	if x != nil {
+		return x.E
+	}
+	return nil
+}
+
+func (x *KeyDrop) GetWraps() []byte {
+	if x != nil {
+		return x.Wraps
+	}
+	return nil
+}
+
+type RoomJoin struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Room          []byte                 `protobuf:"bytes,1,opt,name=room,proto3" json:"room,omitempty"`                             // 16 B                                          room.md §4
+	WantPeers     uint32                 `protobuf:"varint,2,opt,name=want_peers,json=wantPeers,proto3" json:"want_peers,omitempty"` // max number of peers wanted, 0 = none
+	Relays4       []byte                 `protobuf:"bytes,3,opt,name=relays4,proto3" json:"relays4,omitempty"`                       // n × 22 B compact nodes: my relays, if I am a leaf
+	Relays6       []byte                 `protobuf:"bytes,4,opt,name=relays6,proto3" json:"relays6,omitempty"`                       // n × 34 B
+	Proof         []byte                 `protobuf:"bytes,5,opt,name=proof,proto3" json:"proof,omitempty"`                           // private and closed room: 16 B, H("ed3k v1 room join", k ‖ joiner's node ID ‖ peer's node ID)[0..16)
+	Since         uint64                 `protobuf:"varint,6,opt,name=since,proto3" json:"since,omitempty"`                          // my clock when I last had a neighbour of this room; 0 = never   room.md §4.3
+	InfoSeq       uint64                 `protobuf:"varint,7,opt,name=info_seq,json=infoSeq,proto3" json:"info_seq,omitempty"`       // seq of the room info I hold; 0 = none
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RoomJoin) Reset() {
+	*x = RoomJoin{}
+	mi := &file_ed3k_proto_msgTypes[81]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoomJoin) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoomJoin) ProtoMessage() {}
+
+func (x *RoomJoin) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[81]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoomJoin.ProtoReflect.Descriptor instead.
+func (*RoomJoin) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{81}
+}
+
+func (x *RoomJoin) GetRoom() []byte {
+	if x != nil {
+		return x.Room
+	}
+	return nil
+}
+
+func (x *RoomJoin) GetWantPeers() uint32 {
+	if x != nil {
+		return x.WantPeers
+	}
+	return 0
+}
+
+func (x *RoomJoin) GetRelays4() []byte {
+	if x != nil {
+		return x.Relays4
+	}
+	return nil
+}
+
+func (x *RoomJoin) GetRelays6() []byte {
+	if x != nil {
+		return x.Relays6
+	}
+	return nil
+}
+
+func (x *RoomJoin) GetProof() []byte {
+	if x != nil {
+		return x.Proof
+	}
+	return nil
+}
+
+func (x *RoomJoin) GetSince() uint64 {
+	if x != nil {
+		return x.Since
+	}
+	return 0
+}
+
+func (x *RoomJoin) GetInfoSeq() uint64 {
+	if x != nil {
+		return x.InfoSeq
+	}
+	return 0
+}
+
+type RoomState struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Items         []*RoomItem            `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`                                // room.md §4
+	Peers         []*Peer                `protobuf:"bytes,2,rep,name=peers,proto3" json:"peers,omitempty"`                                // other members of this room
+	Refusal       RoomRefusal            `protobuf:"varint,3,opt,name=refusal,proto3,enum=ed3k.v1.RoomRefusal" json:"refusal,omitempty"`  // set: I do not take you as a neighbour
+	Proof         []byte                 `protobuf:"bytes,4,opt,name=proof,proto3" json:"proof,omitempty"`                                // private and closed room: 16 B, H("ed3k v1 room answer", k ‖ joiner's node ID ‖ peer's node ID)[0..16)
+	Member        []byte                 `protobuf:"bytes,5,opt,name=member,proto3" json:"member,omitempty"`                              // closed room: 32 B, my member key             room.md §4.2
+	MemberProof   *RoomProof             `protobuf:"bytes,6,opt,name=member_proof,json=memberProof,proto3" json:"member_proof,omitempty"` // with `member`
+	Synced        bool                   `protobuf:"varint,7,opt,name=synced,proto3" json:"synced,omitempty"`                             // the last RoomState of my first answer, or of my catch-up as joiner   room.md §4.3
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RoomState) Reset() {
+	*x = RoomState{}
+	mi := &file_ed3k_proto_msgTypes[82]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoomState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoomState) ProtoMessage() {}
+
+func (x *RoomState) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[82]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoomState.ProtoReflect.Descriptor instead.
+func (*RoomState) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{82}
+}
+
+func (x *RoomState) GetItems() []*RoomItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+func (x *RoomState) GetPeers() []*Peer {
+	if x != nil {
+		return x.Peers
+	}
+	return nil
+}
+
+func (x *RoomState) GetRefusal() RoomRefusal {
+	if x != nil {
+		return x.Refusal
+	}
+	return RoomRefusal_ROOM_OK
+}
+
+func (x *RoomState) GetProof() []byte {
+	if x != nil {
+		return x.Proof
+	}
+	return nil
+}
+
+func (x *RoomState) GetMember() []byte {
+	if x != nil {
+		return x.Member
+	}
+	return nil
+}
+
+func (x *RoomState) GetMemberProof() *RoomProof {
+	if x != nil {
+		return x.MemberProof
+	}
+	return nil
+}
+
+func (x *RoomState) GetSynced() bool {
+	if x != nil {
+		return x.Synced
+	}
+	return false
+}
+
+type RoomProof struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Minute        uint64                 `protobuf:"varint,1,opt,name=minute,proto3" json:"minute,omitempty"` // Unix time / 60, rounded down                  room.md §4.2
+	Sig           []byte                 `protobuf:"bytes,2,opt,name=sig,proto3" json:"sig,omitempty"`        // 64 B, by the member key over "ed3k v1 room proof" ‖ room(16) ‖ sender's node ID(16) ‖ receiver's node ID(16) ‖ minute(8)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RoomProof) Reset() {
+	*x = RoomProof{}
+	mi := &file_ed3k_proto_msgTypes[83]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoomProof) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoomProof) ProtoMessage() {}
+
+func (x *RoomProof) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[83]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoomProof.ProtoReflect.Descriptor instead.
+func (*RoomProof) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{83}
+}
+
+func (x *RoomProof) GetMinute() uint64 {
+	if x != nil {
+		return x.Minute
+	}
+	return 0
+}
+
+func (x *RoomProof) GetSig() []byte {
+	if x != nil {
+		return x.Sig
+	}
+	return nil
+}
+
 // Carried in the multicast datagram salt(8) ‖ mask(magic(4) ‖ body), outside any connection.
 type LanAnnounce struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -5726,7 +7761,7 @@ type LanAnnounce struct {
 
 func (x *LanAnnounce) Reset() {
 	*x = LanAnnounce{}
-	mi := &file_ed3k_proto_msgTypes[63]
+	mi := &file_ed3k_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5738,7 +7773,7 @@ func (x *LanAnnounce) String() string {
 func (*LanAnnounce) ProtoMessage() {}
 
 func (x *LanAnnounce) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[63]
+	mi := &file_ed3k_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5751,7 +7786,7 @@ func (x *LanAnnounce) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LanAnnounce.ProtoReflect.Descriptor instead.
 func (*LanAnnounce) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{63}
+	return file_ed3k_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *LanAnnounce) GetId() []byte {
@@ -5784,7 +7819,7 @@ type LanQuery struct {
 
 func (x *LanQuery) Reset() {
 	*x = LanQuery{}
-	mi := &file_ed3k_proto_msgTypes[64]
+	mi := &file_ed3k_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5796,7 +7831,7 @@ func (x *LanQuery) String() string {
 func (*LanQuery) ProtoMessage() {}
 
 func (x *LanQuery) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[64]
+	mi := &file_ed3k_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5809,7 +7844,7 @@ func (x *LanQuery) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LanQuery.ProtoReflect.Descriptor instead.
 func (*LanQuery) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{64}
+	return file_ed3k_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *LanQuery) GetRoots() []byte {
@@ -5828,7 +7863,7 @@ type LanAnswer struct {
 
 func (x *LanAnswer) Reset() {
 	*x = LanAnswer{}
-	mi := &file_ed3k_proto_msgTypes[65]
+	mi := &file_ed3k_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5840,7 +7875,7 @@ func (x *LanAnswer) String() string {
 func (*LanAnswer) ProtoMessage() {}
 
 func (x *LanAnswer) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[65]
+	mi := &file_ed3k_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5853,7 +7888,7 @@ func (x *LanAnswer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LanAnswer.ProtoReflect.Descriptor instead.
 func (*LanAnswer) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{65}
+	return file_ed3k_proto_rawDescGZIP(), []int{86}
 }
 
 func (x *LanAnswer) GetHave() []byte {
@@ -5865,15 +7900,15 @@ func (x *LanAnswer) GetHave() []byte {
 
 type HopCreate struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          []byte                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"` // 8 B, random, chosen by the sender; names the path on this connection only, in both directions   hops.md §2.2
-	E             []byte                 `protobuf:"bytes,2,opt,name=e,proto3" json:"e,omitempty"`       // 32 B, X25519 public value made by the owner for this hop alone
+	Path          []byte                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`   // 8 B, random, chosen by the sender; names the path on this connection only, in both directions   hops.md §2.2
+	Build         []byte                 `protobuf:"bytes,3,opt,name=build,proto3" json:"build,omitempty"` // 768 B: 3 slots of 256 B, one record per hop    hops.md §2.2, §2.3
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HopCreate) Reset() {
 	*x = HopCreate{}
-	mi := &file_ed3k_proto_msgTypes[66]
+	mi := &file_ed3k_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5885,7 +7920,7 @@ func (x *HopCreate) String() string {
 func (*HopCreate) ProtoMessage() {}
 
 func (x *HopCreate) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[66]
+	mi := &file_ed3k_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5898,7 +7933,7 @@ func (x *HopCreate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HopCreate.ProtoReflect.Descriptor instead.
 func (*HopCreate) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{66}
+	return file_ed3k_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *HopCreate) GetPath() []byte {
@@ -5908,24 +7943,23 @@ func (x *HopCreate) GetPath() []byte {
 	return nil
 }
 
-func (x *HopCreate) GetE() []byte {
+func (x *HopCreate) GetBuild() []byte {
 	if x != nil {
-		return x.E
+		return x.Build
 	}
 	return nil
 }
 
 type HopCreated struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	F             []byte                 `protobuf:"bytes,1,opt,name=f,proto3" json:"f,omitempty"`         // 32 B, X25519 public value made by the hop for this path   hops.md §2.2
-	Proof         []byte                 `protobuf:"bytes,2,opt,name=proof,proto3" json:"proof,omitempty"` // 32 B                                          hops.md §2.3
+	Build         []byte                 `protobuf:"bytes,3,opt,name=build,proto3" json:"build,omitempty"` // 768 B: the build on its way back, an answer per hop   hops.md §2.2, §2.3
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HopCreated) Reset() {
 	*x = HopCreated{}
-	mi := &file_ed3k_proto_msgTypes[67]
+	mi := &file_ed3k_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5937,7 +7971,7 @@ func (x *HopCreated) String() string {
 func (*HopCreated) ProtoMessage() {}
 
 func (x *HopCreated) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[67]
+	mi := &file_ed3k_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5950,71 +7984,12 @@ func (x *HopCreated) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HopCreated.ProtoReflect.Descriptor instead.
 func (*HopCreated) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{67}
+	return file_ed3k_proto_rawDescGZIP(), []int{88}
 }
 
-func (x *HopCreated) GetF() []byte {
+func (x *HopCreated) GetBuild() []byte {
 	if x != nil {
-		return x.F
-	}
-	return nil
-}
-
-func (x *HopCreated) GetProof() []byte {
-	if x != nil {
-		return x.Proof
-	}
-	return nil
-}
-
-type HopExtend struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Node          []byte                 `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`     // compact node, 22 or 34 B: the hop to add      hops.md §2.2
-	Create        *HopCreate             `protobuf:"bytes,2,opt,name=create,proto3" json:"create,omitempty"` // `path` is left empty; the last hop fills it in
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *HopExtend) Reset() {
-	*x = HopExtend{}
-	mi := &file_ed3k_proto_msgTypes[68]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *HopExtend) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*HopExtend) ProtoMessage() {}
-
-func (x *HopExtend) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[68]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use HopExtend.ProtoReflect.Descriptor instead.
-func (*HopExtend) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{68}
-}
-
-func (x *HopExtend) GetNode() []byte {
-	if x != nil {
-		return x.Node
-	}
-	return nil
-}
-
-func (x *HopExtend) GetCreate() *HopCreate {
-	if x != nil {
-		return x.Create
+		return x.Build
 	}
 	return nil
 }
@@ -6028,7 +8003,7 @@ type HopGate struct {
 
 func (x *HopGate) Reset() {
 	*x = HopGate{}
-	mi := &file_ed3k_proto_msgTypes[69]
+	mi := &file_ed3k_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6040,7 +8015,7 @@ func (x *HopGate) String() string {
 func (*HopGate) ProtoMessage() {}
 
 func (x *HopGate) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[69]
+	mi := &file_ed3k_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6053,7 +8028,7 @@ func (x *HopGate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HopGate.ProtoReflect.Descriptor instead.
 func (*HopGate) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{69}
+	return file_ed3k_proto_rawDescGZIP(), []int{89}
 }
 
 func (x *HopGate) GetGate() []byte {
@@ -6072,7 +8047,7 @@ type HopLookup struct {
 
 func (x *HopLookup) Reset() {
 	*x = HopLookup{}
-	mi := &file_ed3k_proto_msgTypes[70]
+	mi := &file_ed3k_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6084,7 +8059,7 @@ func (x *HopLookup) String() string {
 func (*HopLookup) ProtoMessage() {}
 
 func (x *HopLookup) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[70]
+	mi := &file_ed3k_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6097,7 +8072,7 @@ func (x *HopLookup) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HopLookup.ProtoReflect.Descriptor instead.
 func (*HopLookup) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{70}
+	return file_ed3k_proto_rawDescGZIP(), []int{90}
 }
 
 func (x *HopLookup) GetRequest() *KadRequest {
@@ -6116,7 +8091,7 @@ type HopLookupAnswer struct {
 
 func (x *HopLookupAnswer) Reset() {
 	*x = HopLookupAnswer{}
-	mi := &file_ed3k_proto_msgTypes[71]
+	mi := &file_ed3k_proto_msgTypes[91]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6128,7 +8103,7 @@ func (x *HopLookupAnswer) String() string {
 func (*HopLookupAnswer) ProtoMessage() {}
 
 func (x *HopLookupAnswer) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[71]
+	mi := &file_ed3k_proto_msgTypes[91]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6141,7 +8116,7 @@ func (x *HopLookupAnswer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HopLookupAnswer.ProtoReflect.Descriptor instead.
 func (*HopLookupAnswer) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{71}
+	return file_ed3k_proto_rawDescGZIP(), []int{91}
 }
 
 func (x *HopLookupAnswer) GetAnswers() []*KadAnswer {
@@ -6161,7 +8136,7 @@ type HopStream struct {
 
 func (x *HopStream) Reset() {
 	*x = HopStream{}
-	mi := &file_ed3k_proto_msgTypes[72]
+	mi := &file_ed3k_proto_msgTypes[92]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6173,7 +8148,7 @@ func (x *HopStream) String() string {
 func (*HopStream) ProtoMessage() {}
 
 func (x *HopStream) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[72]
+	mi := &file_ed3k_proto_msgTypes[92]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6186,7 +8161,7 @@ func (x *HopStream) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HopStream.ProtoReflect.Descriptor instead.
 func (*HopStream) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{72}
+	return file_ed3k_proto_rawDescGZIP(), []int{92}
 }
 
 func (x *HopStream) GetPath() []byte {
@@ -6211,7 +8186,7 @@ type HopOk struct {
 
 func (x *HopOk) Reset() {
 	*x = HopOk{}
-	mi := &file_ed3k_proto_msgTypes[73]
+	mi := &file_ed3k_proto_msgTypes[93]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6223,7 +8198,7 @@ func (x *HopOk) String() string {
 func (*HopOk) ProtoMessage() {}
 
 func (x *HopOk) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[73]
+	mi := &file_ed3k_proto_msgTypes[93]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6236,7 +8211,7 @@ func (x *HopOk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HopOk.ProtoReflect.Descriptor instead.
 func (*HopOk) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{73}
+	return file_ed3k_proto_rawDescGZIP(), []int{93}
 }
 
 type HopConnect struct {
@@ -6251,7 +8226,7 @@ type HopConnect struct {
 
 func (x *HopConnect) Reset() {
 	*x = HopConnect{}
-	mi := &file_ed3k_proto_msgTypes[74]
+	mi := &file_ed3k_proto_msgTypes[94]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6263,7 +8238,7 @@ func (x *HopConnect) String() string {
 func (*HopConnect) ProtoMessage() {}
 
 func (x *HopConnect) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[74]
+	mi := &file_ed3k_proto_msgTypes[94]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6276,7 +8251,7 @@ func (x *HopConnect) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HopConnect.ProtoReflect.Descriptor instead.
 func (*HopConnect) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{74}
+	return file_ed3k_proto_rawDescGZIP(), []int{94}
 }
 
 func (x *HopConnect) GetNode() []byte {
@@ -6316,7 +8291,7 @@ type HopJoin struct {
 
 func (x *HopJoin) Reset() {
 	*x = HopJoin{}
-	mi := &file_ed3k_proto_msgTypes[75]
+	mi := &file_ed3k_proto_msgTypes[95]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6328,7 +8303,7 @@ func (x *HopJoin) String() string {
 func (*HopJoin) ProtoMessage() {}
 
 func (x *HopJoin) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[75]
+	mi := &file_ed3k_proto_msgTypes[95]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6341,7 +8316,7 @@ func (x *HopJoin) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HopJoin.ProtoReflect.Descriptor instead.
 func (*HopJoin) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{75}
+	return file_ed3k_proto_rawDescGZIP(), []int{95}
 }
 
 func (x *HopJoin) GetGate() []byte {
@@ -6361,7 +8336,7 @@ type Gates struct {
 
 func (x *Gates) Reset() {
 	*x = Gates{}
-	mi := &file_ed3k_proto_msgTypes[76]
+	mi := &file_ed3k_proto_msgTypes[96]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6373,7 +8348,7 @@ func (x *Gates) String() string {
 func (*Gates) ProtoMessage() {}
 
 func (x *Gates) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[76]
+	mi := &file_ed3k_proto_msgTypes[96]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6386,7 +8361,7 @@ func (x *Gates) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Gates.ProtoReflect.Descriptor instead.
 func (*Gates) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{76}
+	return file_ed3k_proto_rawDescGZIP(), []int{96}
 }
 
 func (x *Gates) GetIssued() uint64 {
@@ -6413,7 +8388,7 @@ type Gate struct {
 
 func (x *Gate) Reset() {
 	*x = Gate{}
-	mi := &file_ed3k_proto_msgTypes[77]
+	mi := &file_ed3k_proto_msgTypes[97]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6425,7 +8400,7 @@ func (x *Gate) String() string {
 func (*Gate) ProtoMessage() {}
 
 func (x *Gate) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[77]
+	mi := &file_ed3k_proto_msgTypes[97]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6438,7 +8413,7 @@ func (x *Gate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Gate.ProtoReflect.Descriptor instead.
 func (*Gate) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{77}
+	return file_ed3k_proto_rawDescGZIP(), []int{97}
 }
 
 func (x *Gate) GetNode() []byte {
@@ -6465,7 +8440,7 @@ type CreditBid struct {
 
 func (x *CreditBid) Reset() {
 	*x = CreditBid{}
-	mi := &file_ed3k_proto_msgTypes[78]
+	mi := &file_ed3k_proto_msgTypes[98]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6477,7 +8452,7 @@ func (x *CreditBid) String() string {
 func (*CreditBid) ProtoMessage() {}
 
 func (x *CreditBid) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[78]
+	mi := &file_ed3k_proto_msgTypes[98]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6490,7 +8465,7 @@ func (x *CreditBid) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreditBid.ProtoReflect.Descriptor instead.
 func (*CreditBid) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{78}
+	return file_ed3k_proto_rawDescGZIP(), []int{98}
 }
 
 func (x *CreditBid) GetPayer() []byte {
@@ -6524,7 +8499,7 @@ type CreditOffer struct {
 
 func (x *CreditOffer) Reset() {
 	*x = CreditOffer{}
-	mi := &file_ed3k_proto_msgTypes[79]
+	mi := &file_ed3k_proto_msgTypes[99]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6536,7 +8511,7 @@ func (x *CreditOffer) String() string {
 func (*CreditOffer) ProtoMessage() {}
 
 func (x *CreditOffer) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[79]
+	mi := &file_ed3k_proto_msgTypes[99]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6549,7 +8524,7 @@ func (x *CreditOffer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreditOffer.ProtoReflect.Descriptor instead.
 func (*CreditOffer) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{79}
+	return file_ed3k_proto_rawDescGZIP(), []int{99}
 }
 
 func (x *CreditOffer) GetPayee() []byte {
@@ -6628,7 +8603,7 @@ type Receipt struct {
 
 func (x *Receipt) Reset() {
 	*x = Receipt{}
-	mi := &file_ed3k_proto_msgTypes[80]
+	mi := &file_ed3k_proto_msgTypes[100]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6640,7 +8615,7 @@ func (x *Receipt) String() string {
 func (*Receipt) ProtoMessage() {}
 
 func (x *Receipt) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[80]
+	mi := &file_ed3k_proto_msgTypes[100]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6653,7 +8628,7 @@ func (x *Receipt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Receipt.ProtoReflect.Descriptor instead.
 func (*Receipt) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{80}
+	return file_ed3k_proto_rawDescGZIP(), []int{100}
 }
 
 func (x *Receipt) GetDay() uint32 {
@@ -6701,7 +8676,7 @@ type CreditRelay struct {
 
 func (x *CreditRelay) Reset() {
 	*x = CreditRelay{}
-	mi := &file_ed3k_proto_msgTypes[81]
+	mi := &file_ed3k_proto_msgTypes[101]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6713,7 +8688,7 @@ func (x *CreditRelay) String() string {
 func (*CreditRelay) ProtoMessage() {}
 
 func (x *CreditRelay) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[81]
+	mi := &file_ed3k_proto_msgTypes[101]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6726,7 +8701,7 @@ func (x *CreditRelay) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreditRelay.ProtoReflect.Descriptor instead.
 func (*CreditRelay) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{81}
+	return file_ed3k_proto_rawDescGZIP(), []int{101}
 }
 
 func (x *CreditRelay) GetReceipts() []*SignedReceipt {
@@ -6757,7 +8732,7 @@ type SignedHold struct {
 
 func (x *SignedHold) Reset() {
 	*x = SignedHold{}
-	mi := &file_ed3k_proto_msgTypes[82]
+	mi := &file_ed3k_proto_msgTypes[102]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6769,7 +8744,7 @@ func (x *SignedHold) String() string {
 func (*SignedHold) ProtoMessage() {}
 
 func (x *SignedHold) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[82]
+	mi := &file_ed3k_proto_msgTypes[102]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6782,7 +8757,7 @@ func (x *SignedHold) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignedHold.ProtoReflect.Descriptor instead.
 func (*SignedHold) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{82}
+	return file_ed3k_proto_rawDescGZIP(), []int{102}
 }
 
 func (x *SignedHold) GetPayer() []byte {
@@ -6841,7 +8816,7 @@ type SignedReceipt struct {
 
 func (x *SignedReceipt) Reset() {
 	*x = SignedReceipt{}
-	mi := &file_ed3k_proto_msgTypes[83]
+	mi := &file_ed3k_proto_msgTypes[103]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6853,7 +8828,7 @@ func (x *SignedReceipt) String() string {
 func (*SignedReceipt) ProtoMessage() {}
 
 func (x *SignedReceipt) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[83]
+	mi := &file_ed3k_proto_msgTypes[103]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6866,7 +8841,7 @@ func (x *SignedReceipt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignedReceipt.ProtoReflect.Descriptor instead.
 func (*SignedReceipt) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{83}
+	return file_ed3k_proto_rawDescGZIP(), []int{103}
 }
 
 func (x *SignedReceipt) GetIssuer() []byte {
@@ -6920,7 +8895,7 @@ type CreditRelayAnswer struct {
 
 func (x *CreditRelayAnswer) Reset() {
 	*x = CreditRelayAnswer{}
-	mi := &file_ed3k_proto_msgTypes[84]
+	mi := &file_ed3k_proto_msgTypes[104]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6932,7 +8907,7 @@ func (x *CreditRelayAnswer) String() string {
 func (*CreditRelayAnswer) ProtoMessage() {}
 
 func (x *CreditRelayAnswer) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[84]
+	mi := &file_ed3k_proto_msgTypes[104]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6945,7 +8920,7 @@ func (x *CreditRelayAnswer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreditRelayAnswer.ProtoReflect.Descriptor instead.
 func (*CreditRelayAnswer) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{84}
+	return file_ed3k_proto_rawDescGZIP(), []int{104}
 }
 
 func (x *CreditRelayAnswer) GetTx() []byte {
@@ -6976,7 +8951,7 @@ type Offer struct {
 
 func (x *Offer) Reset() {
 	*x = Offer{}
-	mi := &file_ed3k_proto_msgTypes[85]
+	mi := &file_ed3k_proto_msgTypes[105]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6988,7 +8963,7 @@ func (x *Offer) String() string {
 func (*Offer) ProtoMessage() {}
 
 func (x *Offer) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[85]
+	mi := &file_ed3k_proto_msgTypes[105]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7001,7 +8976,7 @@ func (x *Offer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Offer.ProtoReflect.Descriptor instead.
 func (*Offer) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{85}
+	return file_ed3k_proto_rawDescGZIP(), []int{105}
 }
 
 func (x *Offer) GetScope() []byte {
@@ -7107,7 +9082,7 @@ type Chain struct {
 
 func (x *Chain) Reset() {
 	*x = Chain{}
-	mi := &file_ed3k_proto_msgTypes[86]
+	mi := &file_ed3k_proto_msgTypes[106]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7119,7 +9094,7 @@ func (x *Chain) String() string {
 func (*Chain) ProtoMessage() {}
 
 func (x *Chain) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[86]
+	mi := &file_ed3k_proto_msgTypes[106]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7132,7 +9107,7 @@ func (x *Chain) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Chain.ProtoReflect.Descriptor instead.
 func (*Chain) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{86}
+	return file_ed3k_proto_rawDescGZIP(), []int{106}
 }
 
 func (x *Chain) GetScope() []byte {
@@ -7173,7 +9148,7 @@ type SignedChain struct {
 
 func (x *SignedChain) Reset() {
 	*x = SignedChain{}
-	mi := &file_ed3k_proto_msgTypes[87]
+	mi := &file_ed3k_proto_msgTypes[107]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7185,7 +9160,7 @@ func (x *SignedChain) String() string {
 func (*SignedChain) ProtoMessage() {}
 
 func (x *SignedChain) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[87]
+	mi := &file_ed3k_proto_msgTypes[107]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7198,7 +9173,7 @@ func (x *SignedChain) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignedChain.ProtoReflect.Descriptor instead.
 func (*SignedChain) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{87}
+	return file_ed3k_proto_rawDescGZIP(), []int{107}
 }
 
 func (x *SignedChain) GetBody() []byte {
@@ -7225,7 +9200,7 @@ type SignedOffer struct {
 
 func (x *SignedOffer) Reset() {
 	*x = SignedOffer{}
-	mi := &file_ed3k_proto_msgTypes[88]
+	mi := &file_ed3k_proto_msgTypes[108]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7237,7 +9212,7 @@ func (x *SignedOffer) String() string {
 func (*SignedOffer) ProtoMessage() {}
 
 func (x *SignedOffer) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[88]
+	mi := &file_ed3k_proto_msgTypes[108]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7250,7 +9225,7 @@ func (x *SignedOffer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignedOffer.ProtoReflect.Descriptor instead.
 func (*SignedOffer) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{88}
+	return file_ed3k_proto_rawDescGZIP(), []int{108}
 }
 
 func (x *SignedOffer) GetBody() []byte {
@@ -7277,7 +9252,7 @@ type EpochKey struct {
 
 func (x *EpochKey) Reset() {
 	*x = EpochKey{}
-	mi := &file_ed3k_proto_msgTypes[89]
+	mi := &file_ed3k_proto_msgTypes[109]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7289,7 +9264,7 @@ func (x *EpochKey) String() string {
 func (*EpochKey) ProtoMessage() {}
 
 func (x *EpochKey) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[89]
+	mi := &file_ed3k_proto_msgTypes[109]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7302,7 +9277,7 @@ func (x *EpochKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EpochKey.ProtoReflect.Descriptor instead.
 func (*EpochKey) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{89}
+	return file_ed3k_proto_rawDescGZIP(), []int{109}
 }
 
 func (x *EpochKey) GetEpoch() uint64 {
@@ -7332,7 +9307,7 @@ type Pass struct {
 
 func (x *Pass) Reset() {
 	*x = Pass{}
-	mi := &file_ed3k_proto_msgTypes[90]
+	mi := &file_ed3k_proto_msgTypes[110]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7344,7 +9319,7 @@ func (x *Pass) String() string {
 func (*Pass) ProtoMessage() {}
 
 func (x *Pass) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[90]
+	mi := &file_ed3k_proto_msgTypes[110]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7357,7 +9332,7 @@ func (x *Pass) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Pass.ProtoReflect.Descriptor instead.
 func (*Pass) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{90}
+	return file_ed3k_proto_rawDescGZIP(), []int{110}
 }
 
 func (x *Pass) GetScopes() [][]byte {
@@ -7406,7 +9381,7 @@ type SignedPass struct {
 
 func (x *SignedPass) Reset() {
 	*x = SignedPass{}
-	mi := &file_ed3k_proto_msgTypes[91]
+	mi := &file_ed3k_proto_msgTypes[111]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7418,7 +9393,7 @@ func (x *SignedPass) String() string {
 func (*SignedPass) ProtoMessage() {}
 
 func (x *SignedPass) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[91]
+	mi := &file_ed3k_proto_msgTypes[111]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7431,7 +9406,7 @@ func (x *SignedPass) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignedPass.ProtoReflect.Descriptor instead.
 func (*SignedPass) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{91}
+	return file_ed3k_proto_rawDescGZIP(), []int{111}
 }
 
 func (x *SignedPass) GetBody() []byte {
@@ -7465,7 +9440,7 @@ type PassProof struct {
 
 func (x *PassProof) Reset() {
 	*x = PassProof{}
-	mi := &file_ed3k_proto_msgTypes[92]
+	mi := &file_ed3k_proto_msgTypes[112]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7477,7 +9452,7 @@ func (x *PassProof) String() string {
 func (*PassProof) ProtoMessage() {}
 
 func (x *PassProof) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[92]
+	mi := &file_ed3k_proto_msgTypes[112]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7490,7 +9465,7 @@ func (x *PassProof) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PassProof.ProtoReflect.Descriptor instead.
 func (*PassProof) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{92}
+	return file_ed3k_proto_rawDescGZIP(), []int{112}
 }
 
 func (x *PassProof) GetMinute() uint64 {
@@ -7520,7 +9495,7 @@ type ShareReport struct {
 
 func (x *ShareReport) Reset() {
 	*x = ShareReport{}
-	mi := &file_ed3k_proto_msgTypes[93]
+	mi := &file_ed3k_proto_msgTypes[113]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7532,7 +9507,7 @@ func (x *ShareReport) String() string {
 func (*ShareReport) ProtoMessage() {}
 
 func (x *ShareReport) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[93]
+	mi := &file_ed3k_proto_msgTypes[113]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7545,7 +9520,7 @@ func (x *ShareReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShareReport.ProtoReflect.Descriptor instead.
 func (*ShareReport) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{93}
+	return file_ed3k_proto_rawDescGZIP(), []int{113}
 }
 
 func (x *ShareReport) GetScope() []byte {
@@ -7586,7 +9561,7 @@ type Sighting struct {
 
 func (x *Sighting) Reset() {
 	*x = Sighting{}
-	mi := &file_ed3k_proto_msgTypes[94]
+	mi := &file_ed3k_proto_msgTypes[114]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7598,7 +9573,7 @@ func (x *Sighting) String() string {
 func (*Sighting) ProtoMessage() {}
 
 func (x *Sighting) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[94]
+	mi := &file_ed3k_proto_msgTypes[114]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7611,7 +9586,7 @@ func (x *Sighting) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Sighting.ProtoReflect.Descriptor instead.
 func (*Sighting) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{94}
+	return file_ed3k_proto_rawDescGZIP(), []int{114}
 }
 
 func (x *Sighting) GetSender() []byte {
@@ -7644,7 +9619,7 @@ type KeyRequest struct {
 
 func (x *KeyRequest) Reset() {
 	*x = KeyRequest{}
-	mi := &file_ed3k_proto_msgTypes[95]
+	mi := &file_ed3k_proto_msgTypes[115]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7656,7 +9631,7 @@ func (x *KeyRequest) String() string {
 func (*KeyRequest) ProtoMessage() {}
 
 func (x *KeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[95]
+	mi := &file_ed3k_proto_msgTypes[115]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7669,7 +9644,7 @@ func (x *KeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeyRequest.ProtoReflect.Descriptor instead.
 func (*KeyRequest) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{95}
+	return file_ed3k_proto_rawDescGZIP(), []int{115}
 }
 
 func (x *KeyRequest) GetScope() []byte {
@@ -7745,7 +9720,7 @@ type KeyAnswer struct {
 
 func (x *KeyAnswer) Reset() {
 	*x = KeyAnswer{}
-	mi := &file_ed3k_proto_msgTypes[96]
+	mi := &file_ed3k_proto_msgTypes[116]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7757,7 +9732,7 @@ func (x *KeyAnswer) String() string {
 func (*KeyAnswer) ProtoMessage() {}
 
 func (x *KeyAnswer) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[96]
+	mi := &file_ed3k_proto_msgTypes[116]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7770,7 +9745,7 @@ func (x *KeyAnswer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeyAnswer.ProtoReflect.Descriptor instead.
 func (*KeyAnswer) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{96}
+	return file_ed3k_proto_rawDescGZIP(), []int{116}
 }
 
 func (x *KeyAnswer) GetKey() *EpochKey {
@@ -7847,7 +9822,7 @@ type FriendRecord struct {
 
 func (x *FriendRecord) Reset() {
 	*x = FriendRecord{}
-	mi := &file_ed3k_proto_msgTypes[97]
+	mi := &file_ed3k_proto_msgTypes[117]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7859,7 +9834,7 @@ func (x *FriendRecord) String() string {
 func (*FriendRecord) ProtoMessage() {}
 
 func (x *FriendRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[97]
+	mi := &file_ed3k_proto_msgTypes[117]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7872,7 +9847,7 @@ func (x *FriendRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FriendRecord.ProtoReflect.Descriptor instead.
 func (*FriendRecord) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{97}
+	return file_ed3k_proto_rawDescGZIP(), []int{117}
 }
 
 func (x *FriendRecord) GetPeer() *Peer {
@@ -7902,7 +9877,7 @@ type FriendRequest struct {
 
 func (x *FriendRequest) Reset() {
 	*x = FriendRequest{}
-	mi := &file_ed3k_proto_msgTypes[98]
+	mi := &file_ed3k_proto_msgTypes[118]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7914,7 +9889,7 @@ func (x *FriendRequest) String() string {
 func (*FriendRequest) ProtoMessage() {}
 
 func (x *FriendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[98]
+	mi := &file_ed3k_proto_msgTypes[118]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7927,7 +9902,7 @@ func (x *FriendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FriendRequest.ProtoReflect.Descriptor instead.
 func (*FriendRequest) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{98}
+	return file_ed3k_proto_rawDescGZIP(), []int{118}
 }
 
 func (x *FriendRequest) GetKey() []byte {
@@ -7970,7 +9945,7 @@ type NodeFile struct {
 
 func (x *NodeFile) Reset() {
 	*x = NodeFile{}
-	mi := &file_ed3k_proto_msgTypes[99]
+	mi := &file_ed3k_proto_msgTypes[119]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7982,7 +9957,7 @@ func (x *NodeFile) String() string {
 func (*NodeFile) ProtoMessage() {}
 
 func (x *NodeFile) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[99]
+	mi := &file_ed3k_proto_msgTypes[119]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7995,7 +9970,7 @@ func (x *NodeFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeFile.ProtoReflect.Descriptor instead.
 func (*NodeFile) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{99}
+	return file_ed3k_proto_rawDescGZIP(), []int{119}
 }
 
 func (x *NodeFile) GetBody() []byte {
@@ -8032,7 +10007,7 @@ type NodeList struct {
 
 func (x *NodeList) Reset() {
 	*x = NodeList{}
-	mi := &file_ed3k_proto_msgTypes[100]
+	mi := &file_ed3k_proto_msgTypes[120]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8044,7 +10019,7 @@ func (x *NodeList) String() string {
 func (*NodeList) ProtoMessage() {}
 
 func (x *NodeList) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[100]
+	mi := &file_ed3k_proto_msgTypes[120]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8057,7 +10032,7 @@ func (x *NodeList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeList.ProtoReflect.Descriptor instead.
 func (*NodeList) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{100}
+	return file_ed3k_proto_rawDescGZIP(), []int{120}
 }
 
 func (x *NodeList) GetCreated() uint64 {
@@ -8108,7 +10083,7 @@ type FilterList struct {
 
 func (x *FilterList) Reset() {
 	*x = FilterList{}
-	mi := &file_ed3k_proto_msgTypes[101]
+	mi := &file_ed3k_proto_msgTypes[121]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8120,7 +10095,7 @@ func (x *FilterList) String() string {
 func (*FilterList) ProtoMessage() {}
 
 func (x *FilterList) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[101]
+	mi := &file_ed3k_proto_msgTypes[121]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8133,7 +10108,7 @@ func (x *FilterList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FilterList.ProtoReflect.Descriptor instead.
 func (*FilterList) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{101}
+	return file_ed3k_proto_rawDescGZIP(), []int{121}
 }
 
 func (x *FilterList) GetTitle() string {
@@ -8176,7 +10151,7 @@ type Group struct {
 
 func (x *Group) Reset() {
 	*x = Group{}
-	mi := &file_ed3k_proto_msgTypes[102]
+	mi := &file_ed3k_proto_msgTypes[122]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8188,7 +10163,7 @@ func (x *Group) String() string {
 func (*Group) ProtoMessage() {}
 
 func (x *Group) ProtoReflect() protoreflect.Message {
-	mi := &file_ed3k_proto_msgTypes[102]
+	mi := &file_ed3k_proto_msgTypes[122]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8201,7 +10176,7 @@ func (x *Group) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Group.ProtoReflect.Descriptor instead.
 func (*Group) Descriptor() ([]byte, []int) {
-	return file_ed3k_proto_rawDescGZIP(), []int{102}
+	return file_ed3k_proto_rawDescGZIP(), []int{122}
 }
 
 func (x *Group) GetSubject() Subject {
@@ -8232,6 +10207,2248 @@ func (x *Group) GetReason() string {
 	return ""
 }
 
+// A MAIL record = e(32) ‖ nonce(12) ‖ ChaCha20-Poly1305(k_mail, nonce, len(2) ‖ MailPart ‖ zeros), 1,024 B (mail.md §2).
+type MailPart struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Msg           []byte                 `protobuf:"bytes,1,opt,name=msg,proto3" json:"msg,omitempty"`      // 16 B random message id, same in every part
+	Index         uint32                 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"` // 0 .. count − 1
+	Count         uint32                 `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"` // 1 to 64, same in every part
+	Data          []byte                 `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`    // this part's slice of the payload, in index order
+	Head          *MailHead              `protobuf:"bytes,5,opt,name=head,proto3" json:"head,omitempty"`    // part 0 only
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MailPart) Reset() {
+	*x = MailPart{}
+	mi := &file_ed3k_proto_msgTypes[123]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MailPart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MailPart) ProtoMessage() {}
+
+func (x *MailPart) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[123]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MailPart.ProtoReflect.Descriptor instead.
+func (*MailPart) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{123}
+}
+
+func (x *MailPart) GetMsg() []byte {
+	if x != nil {
+		return x.Msg
+	}
+	return nil
+}
+
+func (x *MailPart) GetIndex() uint32 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *MailPart) GetCount() uint32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+func (x *MailPart) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *MailPart) GetHead() *MailHead {
+	if x != nil {
+		return x.Head
+	}
+	return nil
+}
+
+type MailHead struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	From          []byte                 `protobuf:"bytes,1,opt,name=from,proto3" json:"from,omitempty"`          // 32 B Ed25519 key of the sender
+	Size          uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`         // payload bytes, all parts together
+	Hash          []byte                 `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"`          // 32 B H("ed3k v1 mail payload", payload)
+	Sent          uint64                 `protobuf:"varint,4,opt,name=sent,proto3" json:"sent,omitempty"`         // Unix time in seconds
+	Type          string                 `protobuf:"bytes,5,opt,name=type,proto3" json:"type,omitempty"`          // payload type, at most 64 B (§3 here)
+	Reply         *uint32                `protobuf:"varint,6,opt,name=reply,proto3,oneof" json:"reply,omitempty"` // `b` of the sender's mailbox under `from`; absent = sender takes no mail
+	Sigs          []*Signature           `protobuf:"bytes,7,rep,name=sigs,proto3" json:"sigs,omitempty"`          // by `from`, over the layout below
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MailHead) Reset() {
+	*x = MailHead{}
+	mi := &file_ed3k_proto_msgTypes[124]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MailHead) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MailHead) ProtoMessage() {}
+
+func (x *MailHead) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[124]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MailHead.ProtoReflect.Descriptor instead.
+func (*MailHead) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{124}
+}
+
+func (x *MailHead) GetFrom() []byte {
+	if x != nil {
+		return x.From
+	}
+	return nil
+}
+
+func (x *MailHead) GetSize() uint64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *MailHead) GetHash() []byte {
+	if x != nil {
+		return x.Hash
+	}
+	return nil
+}
+
+func (x *MailHead) GetSent() uint64 {
+	if x != nil {
+		return x.Sent
+	}
+	return 0
+}
+
+func (x *MailHead) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *MailHead) GetReply() uint32 {
+	if x != nil && x.Reply != nil {
+		return *x.Reply
+	}
+	return 0
+}
+
+func (x *MailHead) GetSigs() []*Signature {
+	if x != nil {
+		return x.Sigs
+	}
+	return nil
+}
+
+type MailAck struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Msgs          [][]byte               `protobuf:"bytes,1,rep,name=msgs,proto3" json:"msgs,omitempty"` // 16 B ids of messages delivered (§2 here step 5); at most 64
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MailAck) Reset() {
+	*x = MailAck{}
+	mi := &file_ed3k_proto_msgTypes[125]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MailAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MailAck) ProtoMessage() {}
+
+func (x *MailAck) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[125]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MailAck.ProtoReflect.Descriptor instead.
+func (*MailAck) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{125}
+}
+
+func (x *MailAck) GetMsgs() [][]byte {
+	if x != nil {
+		return x.Msgs
+	}
+	return nil
+}
+
+type MailFile struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Root          []byte                 `protobuf:"bytes,1,opt,name=root,proto3" json:"root,omitempty"`  // 32 B root of the sealed file
+	Size          uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"` // its size
+	Key           []byte                 `protobuf:"bytes,3,opt,name=key,proto3" json:"key,omitempty"`    // 32 B key it is sealed with
+	Type          string                 `protobuf:"bytes,4,opt,name=type,proto3" json:"type,omitempty"`  // payload type of the opened file, as MailHead.type
+	Name          string                 `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`  // optional, at most 255 B
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MailFile) Reset() {
+	*x = MailFile{}
+	mi := &file_ed3k_proto_msgTypes[126]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MailFile) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MailFile) ProtoMessage() {}
+
+func (x *MailFile) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[126]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MailFile.ProtoReflect.Descriptor instead.
+func (*MailFile) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{126}
+}
+
+func (x *MailFile) GetRoot() []byte {
+	if x != nil {
+		return x.Root
+	}
+	return nil
+}
+
+func (x *MailFile) GetSize() uint64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *MailFile) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *MailFile) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *MailFile) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+// Files: "ed3kprf" ‖ 0x01, "ed3klst" ‖ 0x01, "ed3krat" ‖ 0x01, each followed by MarketDoc (market.md §2.2).
+type MarketDoc struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Body          []byte                 `protobuf:"bytes,1,opt,name=body,proto3" json:"body,omitempty"` // serialised Profile, Listing or Rating
+	Key           []byte                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`   // 32 B signing key: store key (profile, listing), rating key (rating)
+	Sigs          []*Signature           `protobuf:"bytes,3,rep,name=sigs,proto3" json:"sigs,omitempty"` // over "ed3k v1 market doc" ‖ magic(8) ‖ body
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MarketDoc) Reset() {
+	*x = MarketDoc{}
+	mi := &file_ed3k_proto_msgTypes[127]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MarketDoc) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MarketDoc) ProtoMessage() {}
+
+func (x *MarketDoc) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[127]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MarketDoc.ProtoReflect.Descriptor instead.
+func (*MarketDoc) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{127}
+}
+
+func (x *MarketDoc) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *MarketDoc) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *MarketDoc) GetSigs() []*Signature {
+	if x != nil {
+		return x.Sigs
+	}
+	return nil
+}
+
+type Profile struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`            // at most 64 B
+	Handle        string                 `protobuf:"bytes,2,opt,name=handle,proto3" json:"handle,omitempty"`        // optional ed3k:name of the store (name.md §1.3)
+	About         string                 `protobuf:"bytes,3,opt,name=about,proto3" json:"about,omitempty"`          // at most 16 KiB
+	Avatar        []byte                 `protobuf:"bytes,4,opt,name=avatar,proto3" json:"avatar,omitempty"`        // optional 32 B root of an image
+	Header        []byte                 `protobuf:"bytes,5,opt,name=header,proto3" json:"header,omitempty"`        // optional 32 B root of an image
+	Nodes         [][]byte               `protobuf:"bytes,6,rep,name=nodes,proto3" json:"nodes,omitempty"`          // 32 B node keys acting for this key (§1); at most 8
+	Link          string                 `protobuf:"bytes,7,opt,name=link,proto3" json:"link,omitempty"`            // ed3k:friend open link of a node in `nodes` (friend.md §2)
+	Mailbox       *MailBox               `protobuf:"bytes,8,opt,name=mailbox,proto3" json:"mailbox,omitempty"`      // where orders go while offline
+	Coins         []string               `protobuf:"bytes,9,rep,name=coins,proto3" json:"coins,omitempty"`          // accepted coins, ticker strings (§5)
+	Moderator     *Moderator             `protobuf:"bytes,10,opt,name=moderator,proto3" json:"moderator,omitempty"` // present = this store offers moderation
+	Location      string                 `protobuf:"bytes,11,opt,name=location,proto3" json:"location,omitempty"`   // free text, at most 128 B
+	Contact       []string               `protobuf:"bytes,12,rep,name=contact,proto3" json:"contact,omitempty"`     // free-form contact lines, each at most 256 B, at most 8
+	Nsfw          bool                   `protobuf:"varint,13,opt,name=nsfw,proto3" json:"nsfw,omitempty"`
+	Updated       uint64                 `protobuf:"varint,14,opt,name=updated,proto3" json:"updated,omitempty"` // Unix time in seconds
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Profile) Reset() {
+	*x = Profile{}
+	mi := &file_ed3k_proto_msgTypes[128]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Profile) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Profile) ProtoMessage() {}
+
+func (x *Profile) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[128]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Profile.ProtoReflect.Descriptor instead.
+func (*Profile) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{128}
+}
+
+func (x *Profile) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Profile) GetHandle() string {
+	if x != nil {
+		return x.Handle
+	}
+	return ""
+}
+
+func (x *Profile) GetAbout() string {
+	if x != nil {
+		return x.About
+	}
+	return ""
+}
+
+func (x *Profile) GetAvatar() []byte {
+	if x != nil {
+		return x.Avatar
+	}
+	return nil
+}
+
+func (x *Profile) GetHeader() []byte {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+func (x *Profile) GetNodes() [][]byte {
+	if x != nil {
+		return x.Nodes
+	}
+	return nil
+}
+
+func (x *Profile) GetLink() string {
+	if x != nil {
+		return x.Link
+	}
+	return ""
+}
+
+func (x *Profile) GetMailbox() *MailBox {
+	if x != nil {
+		return x.Mailbox
+	}
+	return nil
+}
+
+func (x *Profile) GetCoins() []string {
+	if x != nil {
+		return x.Coins
+	}
+	return nil
+}
+
+func (x *Profile) GetModerator() *Moderator {
+	if x != nil {
+		return x.Moderator
+	}
+	return nil
+}
+
+func (x *Profile) GetLocation() string {
+	if x != nil {
+		return x.Location
+	}
+	return ""
+}
+
+func (x *Profile) GetContact() []string {
+	if x != nil {
+		return x.Contact
+	}
+	return nil
+}
+
+func (x *Profile) GetNsfw() bool {
+	if x != nil {
+		return x.Nsfw
+	}
+	return false
+}
+
+func (x *Profile) GetUpdated() uint64 {
+	if x != nil {
+		return x.Updated
+	}
+	return 0
+}
+
+type MailBox struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           []byte                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"` // 32 B mailbox key (mail.md §1); usually the store key
+	B             uint32                 `protobuf:"varint,2,opt,name=b,proto3" json:"b,omitempty"`    // bucket width 0 to 16
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MailBox) Reset() {
+	*x = MailBox{}
+	mi := &file_ed3k_proto_msgTypes[129]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MailBox) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MailBox) ProtoMessage() {}
+
+func (x *MailBox) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[129]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MailBox.ProtoReflect.Descriptor instead.
+func (*MailBox) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{129}
+}
+
+func (x *MailBox) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *MailBox) GetB() uint32 {
+	if x != nil {
+		return x.B
+	}
+	return 0
+}
+
+type Moderator struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Terms         string                 `protobuf:"bytes,1,opt,name=terms,proto3" json:"terms,omitempty"`                                 // at most 16 KiB
+	Languages     []string               `protobuf:"bytes,2,rep,name=languages,proto3" json:"languages,omitempty"`                         // BCP 47 tags
+	FeeFixed      *Price                 `protobuf:"bytes,3,opt,name=fee_fixed,json=feeFixed,proto3" json:"fee_fixed,omitempty"`           // optional
+	FeePermille   uint32                 `protobuf:"varint,4,opt,name=fee_permille,json=feePermille,proto3" json:"fee_permille,omitempty"` // of the disputed amount
+	Coins         []string               `protobuf:"bytes,5,rep,name=coins,proto3" json:"coins,omitempty"`                                 // coins it moderates
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Moderator) Reset() {
+	*x = Moderator{}
+	mi := &file_ed3k_proto_msgTypes[130]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Moderator) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Moderator) ProtoMessage() {}
+
+func (x *Moderator) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[130]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Moderator.ProtoReflect.Descriptor instead.
+func (*Moderator) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{130}
+}
+
+func (x *Moderator) GetTerms() string {
+	if x != nil {
+		return x.Terms
+	}
+	return ""
+}
+
+func (x *Moderator) GetLanguages() []string {
+	if x != nil {
+		return x.Languages
+	}
+	return nil
+}
+
+func (x *Moderator) GetFeeFixed() *Price {
+	if x != nil {
+		return x.FeeFixed
+	}
+	return nil
+}
+
+func (x *Moderator) GetFeePermille() uint32 {
+	if x != nil {
+		return x.FeePermille
+	}
+	return 0
+}
+
+func (x *Moderator) GetCoins() []string {
+	if x != nil {
+		return x.Coins
+	}
+	return nil
+}
+
+type Listing struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Slug          string                 `protobuf:"bytes,1,opt,name=slug,proto3" json:"slug,omitempty"` // 1 to 64 B of [a-z0-9-]; file name is <slug>.ed3klst
+	Type          ListingType            `protobuf:"varint,2,opt,name=type,proto3,enum=ed3k.v1.ListingType" json:"type,omitempty"`
+	Title         string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`             // at most 140 B
+	Description   string                 `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"` // at most 64 KiB
+	Tags          []string               `protobuf:"bytes,5,rep,name=tags,proto3" json:"tags,omitempty"`               // each at most 40 B, at most 16
+	Categories    []string               `protobuf:"bytes,6,rep,name=categories,proto3" json:"categories,omitempty"`
+	Images        []*Image               `protobuf:"bytes,7,rep,name=images,proto3" json:"images,omitempty"` // at most 32
+	Price         *Price                 `protobuf:"bytes,8,opt,name=price,proto3" json:"price,omitempty"`   // per item; for CRYPTO: per unit of `coin`
+	Coins         []string               `protobuf:"bytes,9,rep,name=coins,proto3" json:"coins,omitempty"`   // accepted; empty = profile's
+	Options       []*Option              `protobuf:"bytes,10,rep,name=options,proto3" json:"options,omitempty"`
+	Skus          []*Sku                 `protobuf:"bytes,11,rep,name=skus,proto3" json:"skus,omitempty"`
+	Shipping      []*Shipping            `protobuf:"bytes,12,rep,name=shipping,proto3" json:"shipping,omitempty"`     // PHYSICAL only
+	Moderators    [][]byte               `protobuf:"bytes,13,rep,name=moderators,proto3" json:"moderators,omitempty"` // 32 B store keys of moderators the vendor accepts
+	Terms         string                 `protobuf:"bytes,14,opt,name=terms,proto3" json:"terms,omitempty"`
+	RefundPolicy  string                 `protobuf:"bytes,15,opt,name=refund_policy,json=refundPolicy,proto3" json:"refund_policy,omitempty"`
+	Condition     string                 `protobuf:"bytes,16,opt,name=condition,proto3" json:"condition,omitempty"`
+	Nsfw          bool                   `protobuf:"varint,17,opt,name=nsfw,proto3" json:"nsfw,omitempty"`
+	Expires       uint64                 `protobuf:"varint,18,opt,name=expires,proto3" json:"expires,omitempty"`                            // Unix time; 0 = none
+	EscrowHours   uint32                 `protobuf:"varint,19,opt,name=escrow_hours,json=escrowHours,proto3" json:"escrow_hours,omitempty"` // moderated order: vendor may claim after; 0 = coin default
+	Coupons       [][]byte               `protobuf:"bytes,20,rep,name=coupons,proto3" json:"coupons,omitempty"`                             // 32 B H("ed3k v1 market coupon", code); discounts in `coupon_off`
+	CouponOff     []*Price               `protobuf:"bytes,21,rep,name=coupon_off,json=couponOff,proto3" json:"coupon_off,omitempty"`        // one per coupon
+	Coin          string                 `protobuf:"bytes,22,opt,name=coin,proto3" json:"coin,omitempty"`                                   // CRYPTO: coin sold
+	Seq           uint64                 `protobuf:"varint,23,opt,name=seq,proto3" json:"seq,omitempty"`                                    // version; higher replaces, also across a slug rename
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Listing) Reset() {
+	*x = Listing{}
+	mi := &file_ed3k_proto_msgTypes[131]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Listing) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Listing) ProtoMessage() {}
+
+func (x *Listing) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[131]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Listing.ProtoReflect.Descriptor instead.
+func (*Listing) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{131}
+}
+
+func (x *Listing) GetSlug() string {
+	if x != nil {
+		return x.Slug
+	}
+	return ""
+}
+
+func (x *Listing) GetType() ListingType {
+	if x != nil {
+		return x.Type
+	}
+	return ListingType_LISTING_NONE
+}
+
+func (x *Listing) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *Listing) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *Listing) GetTags() []string {
+	if x != nil {
+		return x.Tags
+	}
+	return nil
+}
+
+func (x *Listing) GetCategories() []string {
+	if x != nil {
+		return x.Categories
+	}
+	return nil
+}
+
+func (x *Listing) GetImages() []*Image {
+	if x != nil {
+		return x.Images
+	}
+	return nil
+}
+
+func (x *Listing) GetPrice() *Price {
+	if x != nil {
+		return x.Price
+	}
+	return nil
+}
+
+func (x *Listing) GetCoins() []string {
+	if x != nil {
+		return x.Coins
+	}
+	return nil
+}
+
+func (x *Listing) GetOptions() []*Option {
+	if x != nil {
+		return x.Options
+	}
+	return nil
+}
+
+func (x *Listing) GetSkus() []*Sku {
+	if x != nil {
+		return x.Skus
+	}
+	return nil
+}
+
+func (x *Listing) GetShipping() []*Shipping {
+	if x != nil {
+		return x.Shipping
+	}
+	return nil
+}
+
+func (x *Listing) GetModerators() [][]byte {
+	if x != nil {
+		return x.Moderators
+	}
+	return nil
+}
+
+func (x *Listing) GetTerms() string {
+	if x != nil {
+		return x.Terms
+	}
+	return ""
+}
+
+func (x *Listing) GetRefundPolicy() string {
+	if x != nil {
+		return x.RefundPolicy
+	}
+	return ""
+}
+
+func (x *Listing) GetCondition() string {
+	if x != nil {
+		return x.Condition
+	}
+	return ""
+}
+
+func (x *Listing) GetNsfw() bool {
+	if x != nil {
+		return x.Nsfw
+	}
+	return false
+}
+
+func (x *Listing) GetExpires() uint64 {
+	if x != nil {
+		return x.Expires
+	}
+	return 0
+}
+
+func (x *Listing) GetEscrowHours() uint32 {
+	if x != nil {
+		return x.EscrowHours
+	}
+	return 0
+}
+
+func (x *Listing) GetCoupons() [][]byte {
+	if x != nil {
+		return x.Coupons
+	}
+	return nil
+}
+
+func (x *Listing) GetCouponOff() []*Price {
+	if x != nil {
+		return x.CouponOff
+	}
+	return nil
+}
+
+func (x *Listing) GetCoin() string {
+	if x != nil {
+		return x.Coin
+	}
+	return ""
+}
+
+func (x *Listing) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+type Price struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Currency      string                 `protobuf:"bytes,1,opt,name=currency,proto3" json:"currency,omitempty"`          // ISO 4217 or coin ticker
+	Amount        uint64                 `protobuf:"varint,2,opt,name=amount,proto3" json:"amount,omitempty"`             // in smallest unit
+	Divisibility  uint32                 `protobuf:"varint,3,opt,name=divisibility,proto3" json:"divisibility,omitempty"` // decimal places of `amount`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Price) Reset() {
+	*x = Price{}
+	mi := &file_ed3k_proto_msgTypes[132]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Price) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Price) ProtoMessage() {}
+
+func (x *Price) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[132]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Price.ProtoReflect.Descriptor instead.
+func (*Price) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{132}
+}
+
+func (x *Price) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *Price) GetAmount() uint64 {
+	if x != nil {
+		return x.Amount
+	}
+	return 0
+}
+
+func (x *Price) GetDivisibility() uint32 {
+	if x != nil {
+		return x.Divisibility
+	}
+	return 0
+}
+
+type Image struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Root          []byte                 `protobuf:"bytes,1,opt,name=root,proto3" json:"root,omitempty"`
+	Size          uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
+	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Image) Reset() {
+	*x = Image{}
+	mi := &file_ed3k_proto_msgTypes[133]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Image) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Image) ProtoMessage() {}
+
+func (x *Image) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[133]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Image.ProtoReflect.Descriptor instead.
+func (*Image) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{133}
+}
+
+func (x *Image) GetRoot() []byte {
+	if x != nil {
+		return x.Root
+	}
+	return nil
+}
+
+func (x *Image) GetSize() uint64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *Image) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+type Option struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Values        []string               `protobuf:"bytes,2,rep,name=values,proto3" json:"values,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Option) Reset() {
+	*x = Option{}
+	mi := &file_ed3k_proto_msgTypes[134]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Option) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Option) ProtoMessage() {}
+
+func (x *Option) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[134]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Option.ProtoReflect.Descriptor instead.
+func (*Option) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{134}
+}
+
+func (x *Option) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Option) GetValues() []string {
+	if x != nil {
+		return x.Values
+	}
+	return nil
+}
+
+type Sku struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Choice        []uint32               `protobuf:"varint,1,rep,packed,name=choice,proto3" json:"choice,omitempty"` // index into each option's values, in option order
+	Surcharge     int64                  `protobuf:"varint,2,opt,name=surcharge,proto3" json:"surcharge,omitempty"`  // added to price.amount, may be negative
+	Quantity      int64                  `protobuf:"varint,3,opt,name=quantity,proto3" json:"quantity,omitempty"`    // −1 = unlimited
+	ProductId     string                 `protobuf:"bytes,4,opt,name=product_id,json=productId,proto3" json:"product_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Sku) Reset() {
+	*x = Sku{}
+	mi := &file_ed3k_proto_msgTypes[135]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Sku) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Sku) ProtoMessage() {}
+
+func (x *Sku) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[135]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Sku.ProtoReflect.Descriptor instead.
+func (*Sku) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{135}
+}
+
+func (x *Sku) GetChoice() []uint32 {
+	if x != nil {
+		return x.Choice
+	}
+	return nil
+}
+
+func (x *Sku) GetSurcharge() int64 {
+	if x != nil {
+		return x.Surcharge
+	}
+	return 0
+}
+
+func (x *Sku) GetQuantity() int64 {
+	if x != nil {
+		return x.Quantity
+	}
+	return 0
+}
+
+func (x *Sku) GetProductId() string {
+	if x != nil {
+		return x.ProductId
+	}
+	return ""
+}
+
+type Shipping struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Regions       []string               `protobuf:"bytes,2,rep,name=regions,proto3" json:"regions,omitempty"` // ISO 3166-1 alpha-2, or "ALL"
+	Services      []*Service             `protobuf:"bytes,3,rep,name=services,proto3" json:"services,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Shipping) Reset() {
+	*x = Shipping{}
+	mi := &file_ed3k_proto_msgTypes[136]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Shipping) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Shipping) ProtoMessage() {}
+
+func (x *Shipping) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[136]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Shipping.ProtoReflect.Descriptor instead.
+func (*Shipping) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{136}
+}
+
+func (x *Shipping) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Shipping) GetRegions() []string {
+	if x != nil {
+		return x.Regions
+	}
+	return nil
+}
+
+func (x *Shipping) GetServices() []*Service {
+	if x != nil {
+		return x.Services
+	}
+	return nil
+}
+
+type Service struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Price         *Price                 `protobuf:"bytes,2,opt,name=price,proto3" json:"price,omitempty"`
+	ExtraItem     *Price                 `protobuf:"bytes,3,opt,name=extra_item,json=extraItem,proto3" json:"extra_item,omitempty"`
+	Estimate      string                 `protobuf:"bytes,4,opt,name=estimate,proto3" json:"estimate,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Service) Reset() {
+	*x = Service{}
+	mi := &file_ed3k_proto_msgTypes[137]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Service) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Service) ProtoMessage() {}
+
+func (x *Service) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[137]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Service.ProtoReflect.Descriptor instead.
+func (*Service) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{137}
+}
+
+func (x *Service) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Service) GetPrice() *Price {
+	if x != nil {
+		return x.Price
+	}
+	return nil
+}
+
+func (x *Service) GetExtraItem() *Price {
+	if x != nil {
+		return x.ExtraItem
+	}
+	return nil
+}
+
+func (x *Service) GetEstimate() string {
+	if x != nil {
+		return x.Estimate
+	}
+	return ""
+}
+
+type Market struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            uint64                 `protobuf:"fixed64,1,opt,name=id,proto3" json:"id,omitempty"`           // replay id, as Chat.id (chat.md §2); same by mail and online
+	From          []byte                 `protobuf:"bytes,2,opt,name=from,proto3" json:"from,omitempty"`         // 32 B key the sender acts for (§1)
+	To            []byte                 `protobuf:"bytes,3,opt,name=to,proto3" json:"to,omitempty"`             // 32 B key addressed: store, buyer or moderator key
+	Order         []byte                 `protobuf:"bytes,4,opt,name=order,proto3" json:"order,omitempty"`       // 32 B order id (§4.2); empty for `who`
+	Sections      []*Section             `protobuf:"bytes,5,rep,name=sections,proto3" json:"sections,omitempty"` // new sections, in chain order
+	Who           bool                   `protobuf:"varint,6,opt,name=who,proto3" json:"who,omitempty"`          // ask which keys the node acts for; nothing else set
+	Resend        bool                   `protobuf:"varint,7,opt,name=resend,proto3" json:"resend,omitempty"`    // ask the receiver for every section of `order` it has
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Market) Reset() {
+	*x = Market{}
+	mi := &file_ed3k_proto_msgTypes[138]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Market) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Market) ProtoMessage() {}
+
+func (x *Market) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[138]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Market.ProtoReflect.Descriptor instead.
+func (*Market) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{138}
+}
+
+func (x *Market) GetId() uint64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *Market) GetFrom() []byte {
+	if x != nil {
+		return x.From
+	}
+	return nil
+}
+
+func (x *Market) GetTo() []byte {
+	if x != nil {
+		return x.To
+	}
+	return nil
+}
+
+func (x *Market) GetOrder() []byte {
+	if x != nil {
+		return x.Order
+	}
+	return nil
+}
+
+func (x *Market) GetSections() []*Section {
+	if x != nil {
+		return x.Sections
+	}
+	return nil
+}
+
+func (x *Market) GetWho() bool {
+	if x != nil {
+		return x.Who
+	}
+	return false
+}
+
+func (x *Market) GetResend() bool {
+	if x != nil {
+		return x.Resend
+	}
+	return false
+}
+
+type MarketAck struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Stores        [][]byte               `protobuf:"bytes,1,rep,name=stores,proto3" json:"stores,omitempty"` // answer to `who`: 32 B keys this node acts for
+	Have          uint32                 `protobuf:"varint,2,opt,name=have,proto3" json:"have,omitempty"`    // sections of `order` the receiver now holds
+	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`   // section refused: reason, at most 256 B; nothing appended
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MarketAck) Reset() {
+	*x = MarketAck{}
+	mi := &file_ed3k_proto_msgTypes[139]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MarketAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MarketAck) ProtoMessage() {}
+
+func (x *MarketAck) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[139]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MarketAck.ProtoReflect.Descriptor instead.
+func (*MarketAck) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{139}
+}
+
+func (x *MarketAck) GetStores() [][]byte {
+	if x != nil {
+		return x.Stores
+	}
+	return nil
+}
+
+func (x *MarketAck) GetHave() uint32 {
+	if x != nil {
+		return x.Have
+	}
+	return 0
+}
+
+func (x *MarketAck) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+type Section struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Kind          SectionKind            `protobuf:"varint,1,opt,name=kind,proto3,enum=ed3k.v1.SectionKind" json:"kind,omitempty"`
+	Body          []byte                 `protobuf:"bytes,2,opt,name=body,proto3" json:"body,omitempty"` // serialised message of `kind` (§4.3)
+	Key           []byte                 `protobuf:"bytes,3,opt,name=key,proto3" json:"key,omitempty"`   // 32 B signer
+	Sigs          []*Signature           `protobuf:"bytes,4,rep,name=sigs,proto3" json:"sigs,omitempty"` // over "ed3k v1 market section" ‖ prev(32) ‖ kind(1) ‖ body
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Section) Reset() {
+	*x = Section{}
+	mi := &file_ed3k_proto_msgTypes[140]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Section) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Section) ProtoMessage() {}
+
+func (x *Section) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[140]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Section.ProtoReflect.Descriptor instead.
+func (*Section) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{140}
+}
+
+func (x *Section) GetKind() SectionKind {
+	if x != nil {
+		return x.Kind
+	}
+	return SectionKind_SECTION_NONE
+}
+
+func (x *Section) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *Section) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+func (x *Section) GetSigs() []*Signature {
+	if x != nil {
+		return x.Sigs
+	}
+	return nil
+}
+
+type Order struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Vendor        []byte                 `protobuf:"bytes,1,opt,name=vendor,proto3" json:"vendor,omitempty"`     // 32 B store key
+	Listings      [][]byte               `protobuf:"bytes,2,rep,name=listings,proto3" json:"listings,omitempty"` // whole listing files ordered from, as published
+	Items         []*Item                `protobuf:"bytes,3,rep,name=items,proto3" json:"items,omitempty"`
+	Method        PayMethod              `protobuf:"varint,4,opt,name=method,proto3,enum=ed3k.v1.PayMethod" json:"method,omitempty"`
+	Coin          string                 `protobuf:"bytes,5,opt,name=coin,proto3" json:"coin,omitempty"`
+	Moderator     []byte                 `protobuf:"bytes,6,opt,name=moderator,proto3" json:"moderator,omitempty"`         // 32 B, MODERATED only; one of the listing's `moderators`
+	Chain         []byte                 `protobuf:"bytes,7,opt,name=chain,proto3" json:"chain,omitempty"`                 // coin-specific: buyer's escrow key, refund address (§5)
+	ShipTo        string                 `protobuf:"bytes,8,opt,name=ship_to,json=shipTo,proto3" json:"ship_to,omitempty"` // address text; the order travels sealed
+	Contact       string                 `protobuf:"bytes,9,opt,name=contact,proto3" json:"contact,omitempty"`
+	Mailbox       *MailBox               `protobuf:"bytes,10,opt,name=mailbox,proto3" json:"mailbox,omitempty"` // buyer's, for offline answers
+	Link          string                 `protobuf:"bytes,11,opt,name=link,proto3" json:"link,omitempty"`       // optional open friend link of the buyer's node
+	Issued        uint64                 `protobuf:"varint,12,opt,name=issued,proto3" json:"issued,omitempty"`
+	Total         *Price                 `protobuf:"bytes,13,opt,name=total,proto3" json:"total,omitempty"` // as the buyer computed it
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Order) Reset() {
+	*x = Order{}
+	mi := &file_ed3k_proto_msgTypes[141]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Order) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Order) ProtoMessage() {}
+
+func (x *Order) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[141]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Order.ProtoReflect.Descriptor instead.
+func (*Order) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{141}
+}
+
+func (x *Order) GetVendor() []byte {
+	if x != nil {
+		return x.Vendor
+	}
+	return nil
+}
+
+func (x *Order) GetListings() [][]byte {
+	if x != nil {
+		return x.Listings
+	}
+	return nil
+}
+
+func (x *Order) GetItems() []*Item {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+func (x *Order) GetMethod() PayMethod {
+	if x != nil {
+		return x.Method
+	}
+	return PayMethod_PAY_NONE
+}
+
+func (x *Order) GetCoin() string {
+	if x != nil {
+		return x.Coin
+	}
+	return ""
+}
+
+func (x *Order) GetModerator() []byte {
+	if x != nil {
+		return x.Moderator
+	}
+	return nil
+}
+
+func (x *Order) GetChain() []byte {
+	if x != nil {
+		return x.Chain
+	}
+	return nil
+}
+
+func (x *Order) GetShipTo() string {
+	if x != nil {
+		return x.ShipTo
+	}
+	return ""
+}
+
+func (x *Order) GetContact() string {
+	if x != nil {
+		return x.Contact
+	}
+	return ""
+}
+
+func (x *Order) GetMailbox() *MailBox {
+	if x != nil {
+		return x.Mailbox
+	}
+	return nil
+}
+
+func (x *Order) GetLink() string {
+	if x != nil {
+		return x.Link
+	}
+	return ""
+}
+
+func (x *Order) GetIssued() uint64 {
+	if x != nil {
+		return x.Issued
+	}
+	return 0
+}
+
+func (x *Order) GetTotal() *Price {
+	if x != nil {
+		return x.Total
+	}
+	return nil
+}
+
+type Item struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Listing       []byte                 `protobuf:"bytes,1,opt,name=listing,proto3" json:"listing,omitempty"` // 32 B listing hash (§2.3)
+	Quantity      uint64                 `protobuf:"varint,2,opt,name=quantity,proto3" json:"quantity,omitempty"`
+	Choice        []uint32               `protobuf:"varint,3,rep,packed,name=choice,proto3" json:"choice,omitempty"`                // as Sku.choice
+	Shipping      string                 `protobuf:"bytes,4,opt,name=shipping,proto3" json:"shipping,omitempty"`                    // Shipping.name ‖ "/" ‖ Service.name
+	Coupons       []string               `protobuf:"bytes,5,rep,name=coupons,proto3" json:"coupons,omitempty"`                      // codes, checked against Listing.coupons
+	RatingKey     []byte                 `protobuf:"bytes,6,opt,name=rating_key,json=ratingKey,proto3" json:"rating_key,omitempty"` // 32 B one-off Ed25519 key (§6)
+	Memo          string                 `protobuf:"bytes,7,opt,name=memo,proto3" json:"memo,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Item) Reset() {
+	*x = Item{}
+	mi := &file_ed3k_proto_msgTypes[142]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Item) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Item) ProtoMessage() {}
+
+func (x *Item) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[142]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Item.ProtoReflect.Descriptor instead.
+func (*Item) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{142}
+}
+
+func (x *Item) GetListing() []byte {
+	if x != nil {
+		return x.Listing
+	}
+	return nil
+}
+
+func (x *Item) GetQuantity() uint64 {
+	if x != nil {
+		return x.Quantity
+	}
+	return 0
+}
+
+func (x *Item) GetChoice() []uint32 {
+	if x != nil {
+		return x.Choice
+	}
+	return nil
+}
+
+func (x *Item) GetShipping() string {
+	if x != nil {
+		return x.Shipping
+	}
+	return ""
+}
+
+func (x *Item) GetCoupons() []string {
+	if x != nil {
+		return x.Coupons
+	}
+	return nil
+}
+
+func (x *Item) GetRatingKey() []byte {
+	if x != nil {
+		return x.RatingKey
+	}
+	return nil
+}
+
+func (x *Item) GetMemo() string {
+	if x != nil {
+		return x.Memo
+	}
+	return ""
+}
+
+type Confirm struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Chain         []byte                 `protobuf:"bytes,1,opt,name=chain,proto3" json:"chain,omitempty"`                             // coin-specific: vendor's escrow key, payment address/script, amount due
+	RatingSigs    [][]byte               `protobuf:"bytes,2,rep,name=rating_sigs,json=ratingSigs,proto3" json:"rating_sigs,omitempty"` // per Item, 64 B Ed25519 by vendor over "ed3k v1 market rating key" ‖ order id ‖ index(4) ‖ rating_key
+	Total         *Price                 `protobuf:"bytes,3,opt,name=total,proto3" json:"total,omitempty"`                             // vendor's figure; client shows any difference to the buyer
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Confirm) Reset() {
+	*x = Confirm{}
+	mi := &file_ed3k_proto_msgTypes[143]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Confirm) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Confirm) ProtoMessage() {}
+
+func (x *Confirm) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[143]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Confirm.ProtoReflect.Descriptor instead.
+func (*Confirm) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{143}
+}
+
+func (x *Confirm) GetChain() []byte {
+	if x != nil {
+		return x.Chain
+	}
+	return nil
+}
+
+func (x *Confirm) GetRatingSigs() [][]byte {
+	if x != nil {
+		return x.RatingSigs
+	}
+	return nil
+}
+
+func (x *Confirm) GetTotal() *Price {
+	if x != nil {
+		return x.Total
+	}
+	return nil
+}
+
+type Payment struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Coin          string                 `protobuf:"bytes,1,opt,name=coin,proto3" json:"coin,omitempty"`
+	Txids         []string               `protobuf:"bytes,2,rep,name=txids,proto3" json:"txids,omitempty"`
+	Amount        uint64                 `protobuf:"varint,3,opt,name=amount,proto3" json:"amount,omitempty"`
+	Chain         []byte                 `protobuf:"bytes,4,opt,name=chain,proto3" json:"chain,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Payment) Reset() {
+	*x = Payment{}
+	mi := &file_ed3k_proto_msgTypes[144]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Payment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Payment) ProtoMessage() {}
+
+func (x *Payment) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[144]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Payment.ProtoReflect.Descriptor instead.
+func (*Payment) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{144}
+}
+
+func (x *Payment) GetCoin() string {
+	if x != nil {
+		return x.Coin
+	}
+	return ""
+}
+
+func (x *Payment) GetTxids() []string {
+	if x != nil {
+		return x.Txids
+	}
+	return nil
+}
+
+func (x *Payment) GetAmount() uint64 {
+	if x != nil {
+		return x.Amount
+	}
+	return 0
+}
+
+func (x *Payment) GetChain() []byte {
+	if x != nil {
+		return x.Chain
+	}
+	return nil
+}
+
+type Fulfill struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Delivery      []*Delivery            `protobuf:"bytes,1,rep,name=delivery,proto3" json:"delivery,omitempty"` // one per Item
+	Chain         []byte                 `protobuf:"bytes,2,opt,name=chain,proto3" json:"chain,omitempty"`       // vendor's release signatures (OFFLINE, MODERATED), payout address
+	Note          string                 `protobuf:"bytes,3,opt,name=note,proto3" json:"note,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Fulfill) Reset() {
+	*x = Fulfill{}
+	mi := &file_ed3k_proto_msgTypes[145]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Fulfill) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Fulfill) ProtoMessage() {}
+
+func (x *Fulfill) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[145]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Fulfill.ProtoReflect.Descriptor instead.
+func (*Fulfill) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{145}
+}
+
+func (x *Fulfill) GetDelivery() []*Delivery {
+	if x != nil {
+		return x.Delivery
+	}
+	return nil
+}
+
+func (x *Fulfill) GetChain() []byte {
+	if x != nil {
+		return x.Chain
+	}
+	return nil
+}
+
+func (x *Fulfill) GetNote() string {
+	if x != nil {
+		return x.Note
+	}
+	return ""
+}
+
+type Delivery struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Carrier       string                 `protobuf:"bytes,1,opt,name=carrier,proto3" json:"carrier,omitempty"`
+	Tracking      string                 `protobuf:"bytes,2,opt,name=tracking,proto3" json:"tracking,omitempty"`
+	File          *MailFile              `protobuf:"bytes,3,opt,name=file,proto3" json:"file,omitempty"` // DIGITAL: sealed file, mail.md §3.3
+	Text          string                 `protobuf:"bytes,4,opt,name=text,proto3" json:"text,omitempty"` // SERVICE / CRYPTO: what was done or sent
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Delivery) Reset() {
+	*x = Delivery{}
+	mi := &file_ed3k_proto_msgTypes[146]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Delivery) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Delivery) ProtoMessage() {}
+
+func (x *Delivery) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[146]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Delivery.ProtoReflect.Descriptor instead.
+func (*Delivery) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{146}
+}
+
+func (x *Delivery) GetCarrier() string {
+	if x != nil {
+		return x.Carrier
+	}
+	return ""
+}
+
+func (x *Delivery) GetTracking() string {
+	if x != nil {
+		return x.Tracking
+	}
+	return ""
+}
+
+func (x *Delivery) GetFile() *MailFile {
+	if x != nil {
+		return x.File
+	}
+	return nil
+}
+
+func (x *Delivery) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+type Complete struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ratings       [][]byte               `protobuf:"bytes,1,rep,name=ratings,proto3" json:"ratings,omitempty"` // whole rating files (§6), one per Item the buyer rates
+	Chain         []byte                 `protobuf:"bytes,2,opt,name=chain,proto3" json:"chain,omitempty"`     // buyer's release signatures
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Complete) Reset() {
+	*x = Complete{}
+	mi := &file_ed3k_proto_msgTypes[147]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Complete) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Complete) ProtoMessage() {}
+
+func (x *Complete) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[147]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Complete.ProtoReflect.Descriptor instead.
+func (*Complete) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{147}
+}
+
+func (x *Complete) GetRatings() [][]byte {
+	if x != nil {
+		return x.Ratings
+	}
+	return nil
+}
+
+func (x *Complete) GetChain() []byte {
+	if x != nil {
+		return x.Chain
+	}
+	return nil
+}
+
+type Resolution struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ToBuyer       uint64                 `protobuf:"varint,1,opt,name=to_buyer,json=toBuyer,proto3" json:"to_buyer,omitempty"` // smallest units of `coin`
+	ToVendor      uint64                 `protobuf:"varint,2,opt,name=to_vendor,json=toVendor,proto3" json:"to_vendor,omitempty"`
+	ToModerator   uint64                 `protobuf:"varint,3,opt,name=to_moderator,json=toModerator,proto3" json:"to_moderator,omitempty"`
+	Chain         []byte                 `protobuf:"bytes,4,opt,name=chain,proto3" json:"chain,omitempty"` // moderator's signatures
+	Text          string                 `protobuf:"bytes,5,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Resolution) Reset() {
+	*x = Resolution{}
+	mi := &file_ed3k_proto_msgTypes[148]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Resolution) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Resolution) ProtoMessage() {}
+
+func (x *Resolution) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[148]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Resolution.ProtoReflect.Descriptor instead.
+func (*Resolution) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{148}
+}
+
+func (x *Resolution) GetToBuyer() uint64 {
+	if x != nil {
+		return x.ToBuyer
+	}
+	return 0
+}
+
+func (x *Resolution) GetToVendor() uint64 {
+	if x != nil {
+		return x.ToVendor
+	}
+	return 0
+}
+
+func (x *Resolution) GetToModerator() uint64 {
+	if x != nil {
+		return x.ToModerator
+	}
+	return 0
+}
+
+func (x *Resolution) GetChain() []byte {
+	if x != nil {
+		return x.Chain
+	}
+	return nil
+}
+
+func (x *Resolution) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+type MarketNote struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MarketNote) Reset() {
+	*x = MarketNote{}
+	mi := &file_ed3k_proto_msgTypes[149]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MarketNote) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MarketNote) ProtoMessage() {}
+
+func (x *MarketNote) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[149]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MarketNote.ProtoReflect.Descriptor instead.
+func (*MarketNote) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{149}
+}
+
+func (x *MarketNote) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+type Rating struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Vendor        []byte                 `protobuf:"bytes,1,opt,name=vendor,proto3" json:"vendor,omitempty"`                        // 32 B store key
+	Order         []byte                 `protobuf:"bytes,2,opt,name=order,proto3" json:"order,omitempty"`                          // 32 B order id
+	Index         uint32                 `protobuf:"varint,3,opt,name=index,proto3" json:"index,omitempty"`                         // Item index
+	VendorSig     []byte                 `protobuf:"bytes,4,opt,name=vendor_sig,json=vendorSig,proto3" json:"vendor_sig,omitempty"` // the rating_sigs entry
+	Slug          string                 `protobuf:"bytes,5,opt,name=slug,proto3" json:"slug,omitempty"`
+	Overall       uint32                 `protobuf:"varint,6,opt,name=overall,proto3" json:"overall,omitempty"` // 1..5
+	Quality       uint32                 `protobuf:"varint,7,opt,name=quality,proto3" json:"quality,omitempty"`
+	Description   uint32                 `protobuf:"varint,8,opt,name=description,proto3" json:"description,omitempty"`
+	Delivery      uint32                 `protobuf:"varint,9,opt,name=delivery,proto3" json:"delivery,omitempty"`
+	Service       uint32                 `protobuf:"varint,10,opt,name=service,proto3" json:"service,omitempty"` // 0 = none, else 1..5
+	Review        string                 `protobuf:"bytes,11,opt,name=review,proto3" json:"review,omitempty"`    // at most 4 KiB
+	Issued        uint64                 `protobuf:"varint,12,opt,name=issued,proto3" json:"issued,omitempty"`
+	Buyer         []byte                 `protobuf:"bytes,13,opt,name=buyer,proto3" json:"buyer,omitempty"`                       // optional 32 B buyer key, not anonymous
+	BuyerSig      []byte                 `protobuf:"bytes,14,opt,name=buyer_sig,json=buyerSig,proto3" json:"buyer_sig,omitempty"` // by `buyer` over "ed3k v1 market rating buyer" ‖ rating key(32)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Rating) Reset() {
+	*x = Rating{}
+	mi := &file_ed3k_proto_msgTypes[150]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Rating) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Rating) ProtoMessage() {}
+
+func (x *Rating) ProtoReflect() protoreflect.Message {
+	mi := &file_ed3k_proto_msgTypes[150]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Rating.ProtoReflect.Descriptor instead.
+func (*Rating) Descriptor() ([]byte, []int) {
+	return file_ed3k_proto_rawDescGZIP(), []int{150}
+}
+
+func (x *Rating) GetVendor() []byte {
+	if x != nil {
+		return x.Vendor
+	}
+	return nil
+}
+
+func (x *Rating) GetOrder() []byte {
+	if x != nil {
+		return x.Order
+	}
+	return nil
+}
+
+func (x *Rating) GetIndex() uint32 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *Rating) GetVendorSig() []byte {
+	if x != nil {
+		return x.VendorSig
+	}
+	return nil
+}
+
+func (x *Rating) GetSlug() string {
+	if x != nil {
+		return x.Slug
+	}
+	return ""
+}
+
+func (x *Rating) GetOverall() uint32 {
+	if x != nil {
+		return x.Overall
+	}
+	return 0
+}
+
+func (x *Rating) GetQuality() uint32 {
+	if x != nil {
+		return x.Quality
+	}
+	return 0
+}
+
+func (x *Rating) GetDescription() uint32 {
+	if x != nil {
+		return x.Description
+	}
+	return 0
+}
+
+func (x *Rating) GetDelivery() uint32 {
+	if x != nil {
+		return x.Delivery
+	}
+	return 0
+}
+
+func (x *Rating) GetService() uint32 {
+	if x != nil {
+		return x.Service
+	}
+	return 0
+}
+
+func (x *Rating) GetReview() string {
+	if x != nil {
+		return x.Review
+	}
+	return ""
+}
+
+func (x *Rating) GetIssued() uint64 {
+	if x != nil {
+		return x.Issued
+	}
+	return 0
+}
+
+func (x *Rating) GetBuyer() []byte {
+	if x != nil {
+		return x.Buyer
+	}
+	return nil
+}
+
+func (x *Rating) GetBuyerSig() []byte {
+	if x != nil {
+		return x.BuyerSig
+	}
+	return nil
+}
+
 var File_ed3k_proto protoreflect.FileDescriptor
 
 const file_ed3k_proto_rawDesc = "" +
@@ -8243,7 +12460,7 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x03ep4\x18\x02 \x01(\fR\x03ep4\x12\x10\n" +
 	"\x03ep6\x18\x03 \x01(\fR\x03ep6\x12\x18\n" +
 	"\arelays4\x18\x04 \x01(\fR\arelays4\x12\x18\n" +
-	"\arelays6\x18\x05 \x01(\fR\arelays6J\x04\b\x06\x10\a\"\xfc\x01\n" +
+	"\arelays6\x18\x05 \x01(\fR\arelays6J\x04\b\x06\x10\a\"\xd6\x02\n" +
 	"\bFileInfo\x12\x12\n" +
 	"\x04root\x18\x01 \x01(\fR\x04root\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x12\n" +
@@ -8255,7 +12472,11 @@ const file_ed3k_proto_rawDesc = "" +
 	"\tset_files\x18\b \x01(\rR\bsetFiles\x12\x19\n" +
 	"\bset_size\x18\t \x01(\x04R\asetSize\x12\x18\n" +
 	"\apartial\x18\n" +
-	" \x01(\rR\apartial\"\xec\x01\n" +
+	" \x01(\rR\apartial\x12\x16\n" +
+	"\x06artist\x18\v \x01(\tR\x06artist\x12\x14\n" +
+	"\x05album\x18\f \x01(\tR\x05album\x12\x14\n" +
+	"\x05title\x18\r \x01(\tR\x05title\x12\x14\n" +
+	"\x05codec\x18\x0e \x01(\tR\x05codec\"\xec\x01\n" +
 	"\x05Hello\x12\x12\n" +
 	"\x04caps\x18\x01 \x01(\x04R\x04caps\x12\x14\n" +
 	"\x05agent\x18\x02 \x01(\tR\x05agent\x12\x1a\n" +
@@ -8284,17 +12505,18 @@ const file_ed3k_proto_rawDesc = "" +
 	"\ttarget_id\x18\x01 \x01(\fR\btargetId\x12\x1b\n" +
 	"\ttarget_ep\x18\x02 \x01(\fR\btargetEp\x12\x14\n" +
 	"\x05nonce\x18\x03 \x01(\x06R\x05nonce\x12\x0e\n" +
-	"\x02ok\x18\x04 \x01(\bR\x02ok\"3\n" +
+	"\x02ok\x18\x04 \x01(\bR\x02ok\"E\n" +
 	"\x05Relay\x12\x18\n" +
 	"\areserve\x18\x01 \x01(\bR\areserve\x12\x10\n" +
-	"\x03ttl\x18\x02 \x01(\rR\x03ttl\"\x80\x01\n" +
+	"\x03ttl\x18\x02 \x01(\rR\x03ttl\x12\x10\n" +
+	"\x03hop\x18\x03 \x01(\bR\x03hop\"\x80\x01\n" +
 	"\x05Punch\x12\x17\n" +
 	"\apeer_id\x18\x01 \x01(\fR\x06peerId\x12\x10\n" +
 	"\x03ep4\x18\x02 \x01(\fR\x03ep4\x12\x10\n" +
 	"\x03ep6\x18\x03 \x01(\fR\x03ep6\x12\x10\n" +
 	"\x03nat\x18\x04 \x01(\rR\x03nat\x12\x14\n" +
 	"\x05nonce\x18\x05 \x01(\x06R\x05nonce\x12\x12\n" +
-	"\x04seen\x18\x06 \x01(\rR\x04seen\"\xbf\x01\n" +
+	"\x04seen\x18\x06 \x01(\rR\x04seen\"\xd3\x01\n" +
 	"\n" +
 	"KadRequest\x12\x16\n" +
 	"\x06target\x18\x01 \x01(\fR\x06target\x12\x12\n" +
@@ -8302,7 +12524,8 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x04kind\x18\x03 \x01(\x0e2\r.ed3k.v1.KindR\x04kind\x12&\n" +
 	"\x06search\x18\x04 \x01(\v2\x0e.ed3k.v1.QueryR\x06search\x12$\n" +
 	"\x05store\x18\x05 \x01(\v2\x0e.ed3k.v1.StoreR\x05store\x12\x14\n" +
-	"\x05level\x18\x06 \x01(\rR\x05level\"\xae\x01\n" +
+	"\x05level\x18\x06 \x01(\rR\x05level\x12\x12\n" +
+	"\x04hops\x18\a \x01(\bR\x04hops\"\x9c\x02\n" +
 	"\x05Query\x12\x10\n" +
 	"\x03all\x18\x01 \x03(\tR\x03all\x12\x12\n" +
 	"\x04none\x18\x02 \x03(\tR\x04none\x12\x19\n" +
@@ -8311,7 +12534,13 @@ const file_ed3k_proto_rawDesc = "" +
 	"\vmin_sources\x18\x05 \x01(\rR\n" +
 	"minSources\x12\x10\n" +
 	"\x03ext\x18\x06 \x01(\tR\x03ext\x12\x16\n" +
-	"\x06offset\x18\a \x01(\rR\x06offset\"\xb2\x03\n" +
+	"\x06offset\x18\a \x01(\rR\x06offset\x12\x12\n" +
+	"\x04exts\x18\b \x03(\tR\x04exts\x12!\n" +
+	"\fmin_duration\x18\t \x01(\rR\vminDuration\x12\x1f\n" +
+	"\vmin_bitrate\x18\n" +
+	" \x01(\rR\n" +
+	"minBitrate\x12\x14\n" +
+	"\x05codec\x18\v \x01(\tR\x05codec\"\x8c\x04\n" +
 	"\x05Store\x12%\n" +
 	"\x06source\x18\x01 \x01(\v2\r.ed3k.v1.PeerR\x06source\x12%\n" +
 	"\x05files\x18\x02 \x03(\v2\x0f.ed3k.v1.SignedR\x05files\x12#\n" +
@@ -8325,10 +12554,15 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x04anon\x18\n" +
 	" \x01(\v2\x0f.ed3k.v1.SignedR\x04anon\x12)\n" +
 	"\aaliases\x18\v \x03(\v2\x0f.ed3k.v1.SignedR\aaliases\x12)\n" +
-	"\x05links\x18\f \x03(\v2\x13.ed3k.v1.HttpSourceR\x05links\"2\n" +
+	"\x05links\x18\f \x03(\v2\x13.ed3k.v1.HttpSourceR\x05links\x12%\n" +
+	"\x05names\x18\r \x03(\v2\x0f.ed3k.v1.SignedR\x05names\x12\x1d\n" +
+	"\n" +
+	"file_names\x18\x0e \x03(\tR\tfileNames\x12\x12\n" +
+	"\x04mail\x18\x0f \x03(\fR\x04mail\"F\n" +
 	"\x04Note\x12\x16\n" +
 	"\x06rating\x18\x01 \x01(\rR\x06rating\x12\x12\n" +
-	"\x04text\x18\x02 \x01(\tR\x04text\"\xe3\x04\n" +
+	"\x04text\x18\x02 \x01(\tR\x04text\x12\x12\n" +
+	"\x04nick\x18\x03 \x01(\tR\x04nick\"\x90\x06\n" +
 	"\tKadAnswer\x12\x16\n" +
 	"\x06nodes4\x18\x01 \x01(\fR\x06nodes4\x12\x16\n" +
 	"\x06nodes6\x18\x02 \x01(\fR\x06nodes6\x12 \n" +
@@ -8349,7 +12583,15 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x04anon\x18\x10 \x01(\fR\x04anon\x12#\n" +
 	"\x04gate\x18\x11 \x01(\v2\x0f.ed3k.v1.SignedR\x04gate\x12)\n" +
 	"\aaliases\x18\x12 \x03(\v2\x0f.ed3k.v1.SignedR\aaliases\x12)\n" +
-	"\x05links\x18\x13 \x03(\v2\x13.ed3k.v1.HttpSourceR\x05links\"\x9d\x03\n" +
+	"\x05links\x18\x13 \x03(\v2\x13.ed3k.v1.HttpSourceR\x05links\x12%\n" +
+	"\x05names\x18\x14 \x03(\v2\x0f.ed3k.v1.SignedR\x05names\x12\x18\n" +
+	"\aleaves4\x18\x15 \x01(\fR\aleaves4\x12\x18\n" +
+	"\aleaves6\x18\x16 \x01(\fR\aleaves6\x12\x1d\n" +
+	"\n" +
+	"file_names\x18\x17 \x03(\tR\tfileNames\x12\x12\n" +
+	"\x04mail\x18\x18 \x03(\fR\x04mail\x12\x1d\n" +
+	"\n" +
+	"mail_epoch\x18\x19 \x01(\x06R\tmailEpoch\"\xe6\x03\n" +
 	"\x06Record\x12\x18\n" +
 	"\aexpires\x18\x01 \x01(\x04R\aexpires\x12%\n" +
 	"\x04file\x18\x02 \x01(\v2\x11.ed3k.v1.FileInfoR\x04file\x12!\n" +
@@ -8362,14 +12604,16 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x04part\x18\t \x01(\v2\r.ed3k.v1.PartR\x04part\x12$\n" +
 	"\x05gates\x18\n" +
 	" \x01(\v2\x0e.ed3k.v1.GatesR\x05gates\x12$\n" +
-	"\x05alias\x18\v \x01(\v2\x0e.ed3k.v1.AliasR\x05alias\"5\n" +
+	"\x05alias\x18\v \x01(\v2\x0e.ed3k.v1.AliasR\x05alias\x12!\n" +
+	"\x04name\x18\f \x01(\v2\r.ed3k.v1.NameR\x04name\x12$\n" +
+	"\x05claim\x18\r \x01(\v2\x0e.ed3k.v1.ClaimR\x05claim\"5\n" +
 	"\tSignature\x12\x10\n" +
 	"\x03alg\x18\x01 \x01(\rR\x03alg\x12\x10\n" +
 	"\x03sig\x18\x02 \x01(\fR\x03sigJ\x04\b\x03\x10\x04\"V\n" +
 	"\x06Signed\x12\x12\n" +
 	"\x04body\x18\x01 \x01(\fR\x04body\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\rR\x03key\x12&\n" +
-	"\x04sigs\x18\x03 \x03(\v2\x12.ed3k.v1.SignatureR\x04sigs\"\xd9\x02\n" +
+	"\x04sigs\x18\x03 \x03(\v2\x12.ed3k.v1.SignatureR\x04sigs\"\xed\x02\n" +
 	"\vFileRequest\x12\x12\n" +
 	"\x04root\x18\x01 \x01(\fR\x04root\x12\x17\n" +
 	"\x04have\x18\x02 \x01(\fH\x00R\x04have\x88\x01\x01\x12!\n" +
@@ -8379,7 +12623,9 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x05brief\x18\x06 \x01(\bR\x05brief\x126\n" +
 	"\fhttp_results\x18\a \x03(\v2\x13.ed3k.v1.HttpResultR\vhttpResults\x12!\n" +
 	"\fwant_members\x18\b \x01(\bR\vwantMembers\x12*\n" +
-	"\x06credit\x18\t \x01(\v2\x12.ed3k.v1.CreditBidR\x06creditB\a\n" +
+	"\x06credit\x18\t \x01(\v2\x12.ed3k.v1.CreditBidR\x06credit\x12\x12\n" +
+	"\x04room\x18\n" +
+	" \x01(\fR\x04roomB\a\n" +
 	"\x05_haveB\n" +
 	"\n" +
 	"\b_relays4B\n" +
@@ -8432,10 +12678,11 @@ const file_ed3k_proto_rawDesc = "" +
 	"\fBrowseAnswer\x12\x12\n" +
 	"\x04dirs\x18\x01 \x03(\tR\x04dirs\x12'\n" +
 	"\x05files\x18\x02 \x03(\v2\x11.ed3k.v1.FileInfoR\x05files\x12\x12\n" +
-	"\x04more\x18\x03 \x01(\bR\x04more\"*\n" +
+	"\x04more\x18\x03 \x01(\bR\x04more\"D\n" +
 	"\x04Chat\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12\x0e\n" +
-	"\x02id\x18\x02 \x01(\x06R\x02id\"\t\n" +
+	"\x02id\x18\x02 \x01(\x06R\x02id\x12\x18\n" +
+	"\asubject\x18\x03 \x01(\tR\asubject\"\t\n" +
 	"\aChatAck\"\xae\x01\n" +
 	"\n" +
 	"HttpSource\x12\x10\n" +
@@ -8477,7 +12724,7 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x04sigs\x18\x03 \x03(\v2\x12.ed3k.v1.SignatureR\x04sigs\x12*\n" +
 	"\x05grant\x18\x04 \x01(\v2\x14.ed3k.v1.SignedGrantR\x05grant\x12&\n" +
 	"\x06cosigs\x18\x05 \x03(\v2\x0e.ed3k.v1.CoSigR\x06cosigs\x12!\n" +
-	"\x04cert\x18\x06 \x01(\v2\r.ed3k.v1.CertR\x04cert\"\xe3\x03\n" +
+	"\x04cert\x18\x06 \x01(\v2\r.ed3k.v1.CertR\x04cert\"\xf7\x03\n" +
 	"\aFileSet\x12\x14\n" +
 	"\x05title\x18\x01 \x01(\tR\x05title\x12\x12\n" +
 	"\x04dirs\x18\x02 \x03(\tR\x04dirs\x12%\n" +
@@ -8493,7 +12740,8 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x04tube\x18\v \x01(\v2\r.ed3k.v1.TubeR\x04tube\x12*\n" +
 	"\x05offer\x18\f \x01(\v2\x14.ed3k.v1.SignedOfferR\x05offer\x12-\n" +
 	"\breleased\x18\r \x01(\v2\x11.ed3k.v1.EpochKeyR\breleased\x12;\n" +
-	"\x0ereleased_chain\x18\x0e \x01(\v2\x14.ed3k.v1.SignedChainR\rreleasedChain\"\xad\x02\n" +
+	"\x0ereleased_chain\x18\x0e \x01(\v2\x14.ed3k.v1.SignedChainR\rreleasedChain\x12\x12\n" +
+	"\x04exts\x18\x0f \x03(\tR\x04exts\"\xad\x02\n" +
 	"\x06Member\x12\x12\n" +
 	"\x04root\x18\x01 \x01(\fR\x04root\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x12\n" +
@@ -8613,7 +12861,46 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x04SAME\x10\x00\x12\a\n" +
 	"\x03SET\x10\x01\x12\n" +
 	"\n" +
-	"\x06PACKED\x10\x02\"X\n" +
+	"\x06PACKED\x10\x02\"\x8e\x01\n" +
+	"\n" +
+	"Delegation\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\fR\x03key\x12\x16\n" +
+	"\x06issued\x18\x02 \x01(\x04R\x06issued\x12\x18\n" +
+	"\aexpires\x18\x03 \x01(\x04R\aexpires\x12\x14\n" +
+	"\x05scope\x18\x04 \x01(\x04R\x05scope\x12&\n" +
+	"\x04sigs\x18\x05 \x03(\v2\x12.ed3k.v1.SignatureR\x04sigs\"\x9f\x01\n" +
+	"\x04Name\x12\x12\n" +
+	"\x04zone\x18\x01 \x01(\fR\x04zone\x12\x14\n" +
+	"\x05label\x18\x02 \x01(\tR\x05label\x12\x10\n" +
+	"\x03seq\x18\x03 \x01(\x04R\x03seq\x12\x14\n" +
+	"\x05links\x18\x04 \x03(\tR\x05links\x12\x10\n" +
+	"\x03sub\x18\x05 \x01(\fR\x03sub\x123\n" +
+	"\n" +
+	"delegation\x18\x06 \x01(\v2\x13.ed3k.v1.DelegationR\n" +
+	"delegation\"/\n" +
+	"\x05Claim\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
+	"\x04zone\x18\x02 \x01(\fR\x04zone\"!\n" +
+	"\tNameQuery\x12\x14\n" +
+	"\x05names\x18\x01 \x03(\tR\x05names\"F\n" +
+	"\n" +
+	"NameAnswer\x12$\n" +
+	"\x04hits\x18\x01 \x03(\v2\x10.ed3k.v1.NameHitR\x04hits\x12\x12\n" +
+	"\x04list\x18\x02 \x01(\tR\x04list\"t\n" +
+	"\aNameHit\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
+	"\x04zone\x18\x02 \x01(\fR\x04zone\x12+\n" +
+	"\x06source\x18\x03 \x01(\x0e2\x13.ed3k.v1.NameSourceR\x06source\x12\x14\n" +
+	"\x05since\x18\x04 \x01(\x04R\x05since\"\x82\x01\n" +
+	"\bNameList\x12\x14\n" +
+	"\x05title\x18\x01 \x01(\tR\x05title\x12\x18\n" +
+	"\acomment\x18\x02 \x01(\tR\acomment\x12\x18\n" +
+	"\acreated\x18\x03 \x01(\x04R\acreated\x12,\n" +
+	"\aentries\x18\x04 \x03(\v2\x12.ed3k.v1.NameEntryR\aentries\"G\n" +
+	"\tNameEntry\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
+	"\x04zone\x18\x02 \x01(\fR\x04zone\x12\x12\n" +
+	"\x04note\x18\x03 \x01(\tR\x04note\"X\n" +
 	"\bLiveFile\x12\x12\n" +
 	"\x04body\x18\x01 \x01(\fR\x04body\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\fR\x03key\x12&\n" +
@@ -8716,7 +13003,92 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\fR\x02id\x12\x14\n" +
 	"\x05start\x18\x02 \x01(\x04R\x05start\x12\x16\n" +
 	"\x06issued\x18\x03 \x01(\x04R\x06issued\x12\x10\n" +
-	"\x03end\x18\x04 \x01(\bR\x03end\"G\n" +
+	"\x03end\x18\x04 \x01(\bR\x03end\"X\n" +
+	"\bRoomItem\x12\x12\n" +
+	"\x04body\x18\x01 \x01(\fR\x04body\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\fR\x03key\x12&\n" +
+	"\x04sigs\x18\x03 \x03(\v2\x12.ed3k.v1.SignatureR\x04sigs\"\xfa\x01\n" +
+	"\bRoomBody\x12%\n" +
+	"\x04info\x18\x01 \x01(\v2\x11.ed3k.v1.RoomInfoR\x04info\x12$\n" +
+	"\x05admit\x18\x02 \x01(\v2\x0e.ed3k.v1.AdmitR\x05admit\x12\x1e\n" +
+	"\x03ban\x18\x03 \x01(\v2\f.ed3k.v1.BanR\x03ban\x12-\n" +
+	"\bpresence\x18\x04 \x01(\v2\x11.ed3k.v1.PresenceR\bpresence\x12%\n" +
+	"\x04post\x18\x05 \x01(\v2\x11.ed3k.v1.RoomPostR\x04post\x12+\n" +
+	"\bkey_drop\x18\x06 \x01(\v2\x10.ed3k.v1.KeyDropR\akeyDrop\"\xb3\x02\n" +
+	"\bRoomInfo\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x16\n" +
+	"\x06issued\x18\x02 \x01(\x04R\x06issued\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title\x12\x14\n" +
+	"\x05about\x18\x04 \x01(\tR\x05about\x12\x12\n" +
+	"\x04mods\x18\x05 \x03(\fR\x04mods\x12\x16\n" +
+	"\x06closed\x18\x06 \x01(\bR\x06closed\x12\x1c\n" +
+	"\tmoderated\x18\a \x01(\bR\tmoderated\x12\x16\n" +
+	"\x06banned\x18\b \x01(\fR\x06banned\x12\x1b\n" +
+	"\tmedia_max\x18\t \x01(\x04R\bmediaMax\x12\x1d\n" +
+	"\n" +
+	"keep_hours\x18\n" +
+	" \x01(\rR\tkeepHours\x12\x1d\n" +
+	"\n" +
+	"keep_posts\x18\v \x01(\rR\tkeepPosts\x12\x14\n" +
+	"\x05files\x18\f \x01(\bR\x05files\"M\n" +
+	"\x05Admit\x12\x16\n" +
+	"\x06member\x18\x01 \x01(\fR\x06member\x12\x16\n" +
+	"\x06issued\x18\x02 \x01(\x04R\x06issued\x12\x14\n" +
+	"\x05until\x18\x03 \x01(\x04R\x05until\"K\n" +
+	"\x03Ban\x12\x16\n" +
+	"\x06member\x18\x01 \x01(\fR\x06member\x12\x16\n" +
+	"\x06issued\x18\x02 \x01(\x04R\x06issued\x12\x14\n" +
+	"\x05until\x18\x03 \x01(\x04R\x05until\"v\n" +
+	"\bPresence\x12\x16\n" +
+	"\x06issued\x18\x01 \x01(\x04R\x06issued\x12\x18\n" +
+	"\aexpires\x18\x02 \x01(\x04R\aexpires\x12\x12\n" +
+	"\x04nick\x18\x03 \x01(\tR\x04nick\x12\x12\n" +
+	"\x04left\x18\x04 \x01(\bR\x04left\x12\x10\n" +
+	"\x03gen\x18\x05 \x01(\x04R\x03gen\"\x86\x01\n" +
+	"\bRoomPost\x12\x12\n" +
+	"\x04sent\x18\x01 \x01(\x04R\x04sent\x12%\n" +
+	"\x04text\x18\x02 \x01(\v2\x11.ed3k.v1.RoomTextR\x04text\x12\x16\n" +
+	"\x06sealed\x18\x03 \x01(\fR\x06sealed\x12\x10\n" +
+	"\x03gen\x18\x04 \x01(\x04R\x03gen\x12\x15\n" +
+	"\x06key_id\x18\x05 \x01(\fR\x05keyId\"c\n" +
+	"\bRoomText\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\x12\x19\n" +
+	"\breply_to\x18\x02 \x01(\fR\areplyTo\x12(\n" +
+	"\x05media\x18\x03 \x01(\v2\x12.ed3k.v1.RoomMediaR\x05media\"\x9b\x01\n" +
+	"\tRoomMedia\x12\x12\n" +
+	"\x04root\x18\x01 \x01(\fR\x04root\x12\x12\n" +
+	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x12\n" +
+	"\x04type\x18\x03 \x01(\tR\x04type\x12\x12\n" +
+	"\x04name\x18\x04 \x01(\tR\x04name\x12\x10\n" +
+	"\x03key\x18\x05 \x01(\fR\x03key\x12\x14\n" +
+	"\x05width\x18\x06 \x01(\rR\x05width\x12\x16\n" +
+	"\x06height\x18\a \x01(\rR\x06height\"n\n" +
+	"\aKeyDrop\x12\x10\n" +
+	"\x03gen\x18\x01 \x01(\x04R\x03gen\x12\x15\n" +
+	"\x06key_id\x18\x02 \x01(\fR\x05keyId\x12\x16\n" +
+	"\x06issued\x18\x03 \x01(\x04R\x06issued\x12\f\n" +
+	"\x01e\x18\x04 \x01(\fR\x01e\x12\x14\n" +
+	"\x05wraps\x18\x05 \x01(\fR\x05wraps\"\xb8\x01\n" +
+	"\bRoomJoin\x12\x12\n" +
+	"\x04room\x18\x01 \x01(\fR\x04room\x12\x1d\n" +
+	"\n" +
+	"want_peers\x18\x02 \x01(\rR\twantPeers\x12\x18\n" +
+	"\arelays4\x18\x03 \x01(\fR\arelays4\x12\x18\n" +
+	"\arelays6\x18\x04 \x01(\fR\arelays6\x12\x14\n" +
+	"\x05proof\x18\x05 \x01(\fR\x05proof\x12\x14\n" +
+	"\x05since\x18\x06 \x01(\x04R\x05since\x12\x19\n" +
+	"\binfo_seq\x18\a \x01(\x04R\ainfoSeq\"\x86\x02\n" +
+	"\tRoomState\x12'\n" +
+	"\x05items\x18\x01 \x03(\v2\x11.ed3k.v1.RoomItemR\x05items\x12#\n" +
+	"\x05peers\x18\x02 \x03(\v2\r.ed3k.v1.PeerR\x05peers\x12.\n" +
+	"\arefusal\x18\x03 \x01(\x0e2\x14.ed3k.v1.RoomRefusalR\arefusal\x12\x14\n" +
+	"\x05proof\x18\x04 \x01(\fR\x05proof\x12\x16\n" +
+	"\x06member\x18\x05 \x01(\fR\x06member\x125\n" +
+	"\fmember_proof\x18\x06 \x01(\v2\x12.ed3k.v1.RoomProofR\vmemberProof\x12\x16\n" +
+	"\x06synced\x18\a \x01(\bR\x06synced\"5\n" +
+	"\tRoomProof\x12\x16\n" +
+	"\x06minute\x18\x01 \x01(\x04R\x06minute\x12\x10\n" +
+	"\x03sig\x18\x02 \x01(\fR\x03sig\"G\n" +
 	"\vLanAnnounce\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\fR\x02id\x12\x12\n" +
 	"\x04port\x18\x02 \x01(\rR\x04port\x12\x14\n" +
@@ -8724,17 +13096,13 @@ const file_ed3k_proto_rawDesc = "" +
 	"\bLanQuery\x12\x14\n" +
 	"\x05roots\x18\x01 \x01(\fR\x05roots\"\x1f\n" +
 	"\tLanAnswer\x12\x12\n" +
-	"\x04have\x18\x01 \x01(\fR\x04have\"-\n" +
+	"\x04have\x18\x01 \x01(\fR\x04have\";\n" +
 	"\tHopCreate\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\fR\x04path\x12\f\n" +
-	"\x01e\x18\x02 \x01(\fR\x01e\"0\n" +
+	"\x04path\x18\x01 \x01(\fR\x04path\x12\x14\n" +
+	"\x05build\x18\x03 \x01(\fR\x05buildJ\x04\b\x02\x10\x03\".\n" +
 	"\n" +
-	"HopCreated\x12\f\n" +
-	"\x01f\x18\x01 \x01(\fR\x01f\x12\x14\n" +
-	"\x05proof\x18\x02 \x01(\fR\x05proof\"K\n" +
-	"\tHopExtend\x12\x12\n" +
-	"\x04node\x18\x01 \x01(\fR\x04node\x12*\n" +
-	"\x06create\x18\x02 \x01(\v2\x12.ed3k.v1.HopCreateR\x06create\"\x1d\n" +
+	"HopCreated\x12\x14\n" +
+	"\x05build\x18\x03 \x01(\fR\x05buildJ\x04\b\x01\x10\x02J\x04\b\x02\x10\x03\"\x1d\n" +
 	"\aHopGate\x12\x12\n" +
 	"\x04gate\x18\x01 \x01(\fR\x04gate\":\n" +
 	"\tHopLookup\x12-\n" +
@@ -8905,7 +13273,206 @@ const file_ed3k_proto_rawDesc = "" +
 	"\asubject\x18\x01 \x01(\x0e2\x10.ed3k.v1.SubjectR\asubject\x12*\n" +
 	"\averdict\x18\x02 \x01(\x0e2\x10.ed3k.v1.VerdictR\averdict\x12\x10\n" +
 	"\x03ids\x18\x03 \x01(\fR\x03ids\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason*\x9d\x01\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\x83\x01\n" +
+	"\bMailPart\x12\x10\n" +
+	"\x03msg\x18\x01 \x01(\fR\x03msg\x12\x14\n" +
+	"\x05index\x18\x02 \x01(\rR\x05index\x12\x14\n" +
+	"\x05count\x18\x03 \x01(\rR\x05count\x12\x12\n" +
+	"\x04data\x18\x04 \x01(\fR\x04data\x12%\n" +
+	"\x04head\x18\x05 \x01(\v2\x11.ed3k.v1.MailHeadR\x04head\"\xbb\x01\n" +
+	"\bMailHead\x12\x12\n" +
+	"\x04from\x18\x01 \x01(\fR\x04from\x12\x12\n" +
+	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x12\n" +
+	"\x04hash\x18\x03 \x01(\fR\x04hash\x12\x12\n" +
+	"\x04sent\x18\x04 \x01(\x04R\x04sent\x12\x12\n" +
+	"\x04type\x18\x05 \x01(\tR\x04type\x12\x19\n" +
+	"\x05reply\x18\x06 \x01(\rH\x00R\x05reply\x88\x01\x01\x12&\n" +
+	"\x04sigs\x18\a \x03(\v2\x12.ed3k.v1.SignatureR\x04sigsB\b\n" +
+	"\x06_reply\"\x1d\n" +
+	"\aMailAck\x12\x12\n" +
+	"\x04msgs\x18\x01 \x03(\fR\x04msgs\"l\n" +
+	"\bMailFile\x12\x12\n" +
+	"\x04root\x18\x01 \x01(\fR\x04root\x12\x12\n" +
+	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x10\n" +
+	"\x03key\x18\x03 \x01(\fR\x03key\x12\x12\n" +
+	"\x04type\x18\x04 \x01(\tR\x04type\x12\x12\n" +
+	"\x04name\x18\x05 \x01(\tR\x04name\"Y\n" +
+	"\tMarketDoc\x12\x12\n" +
+	"\x04body\x18\x01 \x01(\fR\x04body\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\fR\x03key\x12&\n" +
+	"\x04sigs\x18\x03 \x03(\v2\x12.ed3k.v1.SignatureR\x04sigs\"\xfd\x02\n" +
+	"\aProfile\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
+	"\x06handle\x18\x02 \x01(\tR\x06handle\x12\x14\n" +
+	"\x05about\x18\x03 \x01(\tR\x05about\x12\x16\n" +
+	"\x06avatar\x18\x04 \x01(\fR\x06avatar\x12\x16\n" +
+	"\x06header\x18\x05 \x01(\fR\x06header\x12\x14\n" +
+	"\x05nodes\x18\x06 \x03(\fR\x05nodes\x12\x12\n" +
+	"\x04link\x18\a \x01(\tR\x04link\x12*\n" +
+	"\amailbox\x18\b \x01(\v2\x10.ed3k.v1.MailBoxR\amailbox\x12\x14\n" +
+	"\x05coins\x18\t \x03(\tR\x05coins\x120\n" +
+	"\tmoderator\x18\n" +
+	" \x01(\v2\x12.ed3k.v1.ModeratorR\tmoderator\x12\x1a\n" +
+	"\blocation\x18\v \x01(\tR\blocation\x12\x18\n" +
+	"\acontact\x18\f \x03(\tR\acontact\x12\x12\n" +
+	"\x04nsfw\x18\r \x01(\bR\x04nsfw\x12\x18\n" +
+	"\aupdated\x18\x0e \x01(\x04R\aupdated\")\n" +
+	"\aMailBox\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\fR\x03key\x12\f\n" +
+	"\x01b\x18\x02 \x01(\rR\x01b\"\xa5\x01\n" +
+	"\tModerator\x12\x14\n" +
+	"\x05terms\x18\x01 \x01(\tR\x05terms\x12\x1c\n" +
+	"\tlanguages\x18\x02 \x03(\tR\tlanguages\x12+\n" +
+	"\tfee_fixed\x18\x03 \x01(\v2\x0e.ed3k.v1.PriceR\bfeeFixed\x12!\n" +
+	"\ffee_permille\x18\x04 \x01(\rR\vfeePermille\x12\x14\n" +
+	"\x05coins\x18\x05 \x03(\tR\x05coins\"\xcc\x05\n" +
+	"\aListing\x12\x12\n" +
+	"\x04slug\x18\x01 \x01(\tR\x04slug\x12(\n" +
+	"\x04type\x18\x02 \x01(\x0e2\x14.ed3k.v1.ListingTypeR\x04type\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title\x12 \n" +
+	"\vdescription\x18\x04 \x01(\tR\vdescription\x12\x12\n" +
+	"\x04tags\x18\x05 \x03(\tR\x04tags\x12\x1e\n" +
+	"\n" +
+	"categories\x18\x06 \x03(\tR\n" +
+	"categories\x12&\n" +
+	"\x06images\x18\a \x03(\v2\x0e.ed3k.v1.ImageR\x06images\x12$\n" +
+	"\x05price\x18\b \x01(\v2\x0e.ed3k.v1.PriceR\x05price\x12\x14\n" +
+	"\x05coins\x18\t \x03(\tR\x05coins\x12)\n" +
+	"\aoptions\x18\n" +
+	" \x03(\v2\x0f.ed3k.v1.OptionR\aoptions\x12 \n" +
+	"\x04skus\x18\v \x03(\v2\f.ed3k.v1.SkuR\x04skus\x12-\n" +
+	"\bshipping\x18\f \x03(\v2\x11.ed3k.v1.ShippingR\bshipping\x12\x1e\n" +
+	"\n" +
+	"moderators\x18\r \x03(\fR\n" +
+	"moderators\x12\x14\n" +
+	"\x05terms\x18\x0e \x01(\tR\x05terms\x12#\n" +
+	"\rrefund_policy\x18\x0f \x01(\tR\frefundPolicy\x12\x1c\n" +
+	"\tcondition\x18\x10 \x01(\tR\tcondition\x12\x12\n" +
+	"\x04nsfw\x18\x11 \x01(\bR\x04nsfw\x12\x18\n" +
+	"\aexpires\x18\x12 \x01(\x04R\aexpires\x12!\n" +
+	"\fescrow_hours\x18\x13 \x01(\rR\vescrowHours\x12\x18\n" +
+	"\acoupons\x18\x14 \x03(\fR\acoupons\x12-\n" +
+	"\n" +
+	"coupon_off\x18\x15 \x03(\v2\x0e.ed3k.v1.PriceR\tcouponOff\x12\x12\n" +
+	"\x04coin\x18\x16 \x01(\tR\x04coin\x12\x10\n" +
+	"\x03seq\x18\x17 \x01(\x04R\x03seq\"_\n" +
+	"\x05Price\x12\x1a\n" +
+	"\bcurrency\x18\x01 \x01(\tR\bcurrency\x12\x16\n" +
+	"\x06amount\x18\x02 \x01(\x04R\x06amount\x12\"\n" +
+	"\fdivisibility\x18\x03 \x01(\rR\fdivisibility\"C\n" +
+	"\x05Image\x12\x12\n" +
+	"\x04root\x18\x01 \x01(\fR\x04root\x12\x12\n" +
+	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\"4\n" +
+	"\x06Option\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
+	"\x06values\x18\x02 \x03(\tR\x06values\"v\n" +
+	"\x03Sku\x12\x16\n" +
+	"\x06choice\x18\x01 \x03(\rR\x06choice\x12\x1c\n" +
+	"\tsurcharge\x18\x02 \x01(\x03R\tsurcharge\x12\x1a\n" +
+	"\bquantity\x18\x03 \x01(\x03R\bquantity\x12\x1d\n" +
+	"\n" +
+	"product_id\x18\x04 \x01(\tR\tproductId\"f\n" +
+	"\bShipping\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\aregions\x18\x02 \x03(\tR\aregions\x12,\n" +
+	"\bservices\x18\x03 \x03(\v2\x10.ed3k.v1.ServiceR\bservices\"\x8e\x01\n" +
+	"\aService\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12$\n" +
+	"\x05price\x18\x02 \x01(\v2\x0e.ed3k.v1.PriceR\x05price\x12-\n" +
+	"\n" +
+	"extra_item\x18\x03 \x01(\v2\x0e.ed3k.v1.PriceR\textraItem\x12\x1a\n" +
+	"\bestimate\x18\x04 \x01(\tR\bestimate\"\xaa\x01\n" +
+	"\x06Market\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x06R\x02id\x12\x12\n" +
+	"\x04from\x18\x02 \x01(\fR\x04from\x12\x0e\n" +
+	"\x02to\x18\x03 \x01(\fR\x02to\x12\x14\n" +
+	"\x05order\x18\x04 \x01(\fR\x05order\x12,\n" +
+	"\bsections\x18\x05 \x03(\v2\x10.ed3k.v1.SectionR\bsections\x12\x10\n" +
+	"\x03who\x18\x06 \x01(\bR\x03who\x12\x16\n" +
+	"\x06resend\x18\a \x01(\bR\x06resend\"M\n" +
+	"\tMarketAck\x12\x16\n" +
+	"\x06stores\x18\x01 \x03(\fR\x06stores\x12\x12\n" +
+	"\x04have\x18\x02 \x01(\rR\x04have\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\"\x81\x01\n" +
+	"\aSection\x12(\n" +
+	"\x04kind\x18\x01 \x01(\x0e2\x14.ed3k.v1.SectionKindR\x04kind\x12\x12\n" +
+	"\x04body\x18\x02 \x01(\fR\x04body\x12\x10\n" +
+	"\x03key\x18\x03 \x01(\fR\x03key\x12&\n" +
+	"\x04sigs\x18\x04 \x03(\v2\x12.ed3k.v1.SignatureR\x04sigs\"\x85\x03\n" +
+	"\x05Order\x12\x16\n" +
+	"\x06vendor\x18\x01 \x01(\fR\x06vendor\x12\x1a\n" +
+	"\blistings\x18\x02 \x03(\fR\blistings\x12#\n" +
+	"\x05items\x18\x03 \x03(\v2\r.ed3k.v1.ItemR\x05items\x12*\n" +
+	"\x06method\x18\x04 \x01(\x0e2\x12.ed3k.v1.PayMethodR\x06method\x12\x12\n" +
+	"\x04coin\x18\x05 \x01(\tR\x04coin\x12\x1c\n" +
+	"\tmoderator\x18\x06 \x01(\fR\tmoderator\x12\x14\n" +
+	"\x05chain\x18\a \x01(\fR\x05chain\x12\x17\n" +
+	"\aship_to\x18\b \x01(\tR\x06shipTo\x12\x18\n" +
+	"\acontact\x18\t \x01(\tR\acontact\x12*\n" +
+	"\amailbox\x18\n" +
+	" \x01(\v2\x10.ed3k.v1.MailBoxR\amailbox\x12\x12\n" +
+	"\x04link\x18\v \x01(\tR\x04link\x12\x16\n" +
+	"\x06issued\x18\f \x01(\x04R\x06issued\x12$\n" +
+	"\x05total\x18\r \x01(\v2\x0e.ed3k.v1.PriceR\x05total\"\xbd\x01\n" +
+	"\x04Item\x12\x18\n" +
+	"\alisting\x18\x01 \x01(\fR\alisting\x12\x1a\n" +
+	"\bquantity\x18\x02 \x01(\x04R\bquantity\x12\x16\n" +
+	"\x06choice\x18\x03 \x03(\rR\x06choice\x12\x1a\n" +
+	"\bshipping\x18\x04 \x01(\tR\bshipping\x12\x18\n" +
+	"\acoupons\x18\x05 \x03(\tR\acoupons\x12\x1d\n" +
+	"\n" +
+	"rating_key\x18\x06 \x01(\fR\tratingKey\x12\x12\n" +
+	"\x04memo\x18\a \x01(\tR\x04memo\"f\n" +
+	"\aConfirm\x12\x14\n" +
+	"\x05chain\x18\x01 \x01(\fR\x05chain\x12\x1f\n" +
+	"\vrating_sigs\x18\x02 \x03(\fR\n" +
+	"ratingSigs\x12$\n" +
+	"\x05total\x18\x03 \x01(\v2\x0e.ed3k.v1.PriceR\x05total\"a\n" +
+	"\aPayment\x12\x12\n" +
+	"\x04coin\x18\x01 \x01(\tR\x04coin\x12\x14\n" +
+	"\x05txids\x18\x02 \x03(\tR\x05txids\x12\x16\n" +
+	"\x06amount\x18\x03 \x01(\x04R\x06amount\x12\x14\n" +
+	"\x05chain\x18\x04 \x01(\fR\x05chain\"b\n" +
+	"\aFulfill\x12-\n" +
+	"\bdelivery\x18\x01 \x03(\v2\x11.ed3k.v1.DeliveryR\bdelivery\x12\x14\n" +
+	"\x05chain\x18\x02 \x01(\fR\x05chain\x12\x12\n" +
+	"\x04note\x18\x03 \x01(\tR\x04note\"{\n" +
+	"\bDelivery\x12\x18\n" +
+	"\acarrier\x18\x01 \x01(\tR\acarrier\x12\x1a\n" +
+	"\btracking\x18\x02 \x01(\tR\btracking\x12%\n" +
+	"\x04file\x18\x03 \x01(\v2\x11.ed3k.v1.MailFileR\x04file\x12\x12\n" +
+	"\x04text\x18\x04 \x01(\tR\x04text\":\n" +
+	"\bComplete\x12\x18\n" +
+	"\aratings\x18\x01 \x03(\fR\aratings\x12\x14\n" +
+	"\x05chain\x18\x02 \x01(\fR\x05chain\"\x91\x01\n" +
+	"\n" +
+	"Resolution\x12\x19\n" +
+	"\bto_buyer\x18\x01 \x01(\x04R\atoBuyer\x12\x1b\n" +
+	"\tto_vendor\x18\x02 \x01(\x04R\btoVendor\x12!\n" +
+	"\fto_moderator\x18\x03 \x01(\x04R\vtoModerator\x12\x14\n" +
+	"\x05chain\x18\x04 \x01(\fR\x05chain\x12\x12\n" +
+	"\x04text\x18\x05 \x01(\tR\x04text\" \n" +
+	"\n" +
+	"MarketNote\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\"\xee\x02\n" +
+	"\x06Rating\x12\x16\n" +
+	"\x06vendor\x18\x01 \x01(\fR\x06vendor\x12\x14\n" +
+	"\x05order\x18\x02 \x01(\fR\x05order\x12\x14\n" +
+	"\x05index\x18\x03 \x01(\rR\x05index\x12\x1d\n" +
+	"\n" +
+	"vendor_sig\x18\x04 \x01(\fR\tvendorSig\x12\x12\n" +
+	"\x04slug\x18\x05 \x01(\tR\x04slug\x12\x18\n" +
+	"\aoverall\x18\x06 \x01(\rR\aoverall\x12\x18\n" +
+	"\aquality\x18\a \x01(\rR\aquality\x12 \n" +
+	"\vdescription\x18\b \x01(\rR\vdescription\x12\x1a\n" +
+	"\bdelivery\x18\t \x01(\rR\bdelivery\x12\x18\n" +
+	"\aservice\x18\n" +
+	" \x01(\rR\aservice\x12\x16\n" +
+	"\x06review\x18\v \x01(\tR\x06review\x12\x16\n" +
+	"\x06issued\x18\f \x01(\x04R\x06issued\x12\x14\n" +
+	"\x05buyer\x18\r \x01(\fR\x05buyer\x12\x1b\n" +
+	"\tbuyer_sig\x18\x0e \x01(\fR\bbuyerSig*\xbc\x01\n" +
 	"\x04Kind\x12\b\n" +
 	"\x04NONE\x10\x00\x12\n" +
 	"\n" +
@@ -8925,7 +13492,10 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x12\b\n" +
 	"\x04ANON\x10\v\x12\b\n" +
 	"\x04GATE\x10\f\x12\t\n" +
-	"\x05ALIAS\x10\r*O\n" +
+	"\x05ALIAS\x10\r\x12\b\n" +
+	"\x04NAME\x10\x0e\x12\t\n" +
+	"\x05CLAIM\x10\x0f\x12\b\n" +
+	"\x04MAIL\x10\x10*]\n" +
 	"\vStoreResult\x12\n" +
 	"\n" +
 	"\x06STORED\x10\x00\x12\b\n" +
@@ -8933,20 +13503,29 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x04BUSY\x10\x02\x12\f\n" +
 	"\bREJECTED\x10\x03\x12\a\n" +
 	"\x03FAR\x10\x04\x12\t\n" +
-	"\x05OLDER\x10\x05*W\n" +
+	"\x05OLDER\x10\x05\x12\f\n" +
+	"\bDECLINED\x10\x06*]\n" +
+	"\n" +
+	"NameSource\x12\r\n" +
+	"\tNAME_NONE\x10\x00\x12\f\n" +
+	"\bNAME_OWN\x10\x01\x12\x10\n" +
+	"\fNAME_PETNAME\x10\x02\x12\x0f\n" +
+	"\vNAME_PINNED\x10\x03\x12\x0f\n" +
+	"\vNAME_LISTED\x10\x04*W\n" +
 	"\aRefusal\x12\r\n" +
 	"\tLIVE_NONE\x10\x00\x12\r\n" +
 	"\tLIVE_FULL\x10\x01\x12\r\n" +
 	"\tLIVE_LEFT\x10\x02\x12\x10\n" +
 	"\fLIVE_BLOCKED\x10\x03\x12\r\n" +
-	"\tLIVE_PASS\x10\x04*?\n" +
+	"\tLIVE_PASS\x10\x04*N\n" +
 	"\tTopicType\x12\x0e\n" +
 	"\n" +
 	"TOPIC_NONE\x10\x00\x12\f\n" +
 	"\bSET_HEAD\x10\x01\x12\n" +
 	"\n" +
 	"\x06ON_AIR\x10\x02\x12\b\n" +
-	"\x04PAID\x10\x03*L\n" +
+	"\x04PAID\x10\x03\x12\r\n" +
+	"\tDIRECTORY\x10\x04*L\n" +
 	"\fTopicRefusal\x12\f\n" +
 	"\bTOPIC_OK\x10\x00\x12\x0e\n" +
 	"\n" +
@@ -8954,7 +13533,13 @@ const file_ed3k_proto_rawDesc = "" +
 	"\n" +
 	"TOPIC_LEFT\x10\x02\x12\x0e\n" +
 	"\n" +
-	"TOPIC_PASS\x10\x03*+\n" +
+	"TOPIC_PASS\x10\x03*[\n" +
+	"\vRoomRefusal\x12\v\n" +
+	"\aROOM_OK\x10\x00\x12\r\n" +
+	"\tROOM_FULL\x10\x01\x12\r\n" +
+	"\tROOM_LEFT\x10\x02\x12\x10\n" +
+	"\fROOM_BLOCKED\x10\x03\x12\x0f\n" +
+	"\vROOM_MEMBER\x10\x04*+\n" +
 	"\bPassRole\x12\x0f\n" +
 	"\vPASS_VIEWER\x10\x00\x12\x0e\n" +
 	"\n" +
@@ -8978,7 +13563,42 @@ const file_ed3k_proto_rawDesc = "" +
 	"\x04FAKE\x10\x01\x12\v\n" +
 	"\aHARMFUL\x10\x02\x12\b\n" +
 	"\x04SPAM\x10\x03\x12\b\n" +
-	"\x04GOOD\x10\x04B\x13Z\x11enode/ed3k/ed3kpbb\x06proto3"
+	"\x04GOOD\x10\x04*S\n" +
+	"\vListingType\x12\x10\n" +
+	"\fLISTING_NONE\x10\x00\x12\f\n" +
+	"\bPHYSICAL\x10\x01\x12\v\n" +
+	"\aDIGITAL\x10\x02\x12\v\n" +
+	"\aSERVICE\x10\x03\x12\n" +
+	"\n" +
+	"\x06CRYPTO\x10\x04*\xdc\x01\n" +
+	"\vSectionKind\x12\x10\n" +
+	"\fSECTION_NONE\x10\x00\x12\t\n" +
+	"\x05ORDER\x10\x01\x12\v\n" +
+	"\aCONFIRM\x10\x02\x12\n" +
+	"\n" +
+	"\x06REJECT\x10\x03\x12\n" +
+	"\n" +
+	"\x06CANCEL\x10\x04\x12\v\n" +
+	"\aPAYMENT\x10\x05\x12\v\n" +
+	"\aFULFILL\x10\x06\x12\f\n" +
+	"\bCOMPLETE\x10\a\x12\v\n" +
+	"\aDISPUTE\x10\b\x12\x12\n" +
+	"\x0eDISPUTE_UPDATE\x10\t\x12\x0e\n" +
+	"\n" +
+	"RESOLUTION\x10\n" +
+	"\x12\n" +
+	"\n" +
+	"\x06ACCEPT\x10\v\x12\n" +
+	"\n" +
+	"\x06REFUND\x10\f\x12\r\n" +
+	"\tFINALIZED\x10\r\x12\v\n" +
+	"\aFAILURE\x10\x0e*A\n" +
+	"\tPayMethod\x12\f\n" +
+	"\bPAY_NONE\x10\x00\x12\n" +
+	"\n" +
+	"\x06DIRECT\x10\x01\x12\v\n" +
+	"\aOFFLINE\x10\x02\x12\r\n" +
+	"\tMODERATED\x10\x03B\x13Z\x11enode/ed3k/ed3kpbb\x06proto3"
 
 var (
 	file_ed3k_proto_rawDescOnce sync.Once
@@ -8992,251 +13612,351 @@ func file_ed3k_proto_rawDescGZIP() []byte {
 	return file_ed3k_proto_rawDescData
 }
 
-var file_ed3k_proto_enumTypes = make([]protoimpl.EnumInfo, 12)
-var file_ed3k_proto_msgTypes = make([]protoimpl.MessageInfo, 103)
+var file_ed3k_proto_enumTypes = make([]protoimpl.EnumInfo, 17)
+var file_ed3k_proto_msgTypes = make([]protoimpl.MessageInfo, 151)
 var file_ed3k_proto_goTypes = []any{
 	(Kind)(0),                 // 0: ed3k.v1.Kind
 	(StoreResult)(0),          // 1: ed3k.v1.StoreResult
-	(Refusal)(0),              // 2: ed3k.v1.Refusal
-	(TopicType)(0),            // 3: ed3k.v1.TopicType
-	(TopicRefusal)(0),         // 4: ed3k.v1.TopicRefusal
-	(PassRole)(0),             // 5: ed3k.v1.PassRole
-	(KeyRefusal)(0),           // 6: ed3k.v1.KeyRefusal
-	(Subject)(0),              // 7: ed3k.v1.Subject
-	(Verdict)(0),              // 8: ed3k.v1.Verdict
-	(Error_Code)(0),           // 9: ed3k.v1.Error.Code
-	(HttpResult_Code)(0),      // 10: ed3k.v1.HttpResult.Code
-	(Alias_Relation)(0),       // 11: ed3k.v1.Alias.Relation
-	(*Peer)(nil),              // 12: ed3k.v1.Peer
-	(*FileInfo)(nil),          // 13: ed3k.v1.FileInfo
-	(*Hello)(nil),             // 14: ed3k.v1.Hello
-	(*Error)(nil),             // 15: ed3k.v1.Error
-	(*ReachTest)(nil),         // 16: ed3k.v1.ReachTest
-	(*Relay)(nil),             // 17: ed3k.v1.Relay
-	(*Punch)(nil),             // 18: ed3k.v1.Punch
-	(*KadRequest)(nil),        // 19: ed3k.v1.KadRequest
-	(*Query)(nil),             // 20: ed3k.v1.Query
-	(*Store)(nil),             // 21: ed3k.v1.Store
-	(*Note)(nil),              // 22: ed3k.v1.Note
-	(*KadAnswer)(nil),         // 23: ed3k.v1.KadAnswer
-	(*Record)(nil),            // 24: ed3k.v1.Record
-	(*Signature)(nil),         // 25: ed3k.v1.Signature
-	(*Signed)(nil),            // 26: ed3k.v1.Signed
-	(*FileRequest)(nil),       // 27: ed3k.v1.FileRequest
-	(*FileStatus)(nil),        // 28: ed3k.v1.FileStatus
-	(*SlotOffer)(nil),         // 29: ed3k.v1.SlotOffer
-	(*BlockRequest)(nil),      // 30: ed3k.v1.BlockRequest
-	(*Block)(nil),             // 31: ed3k.v1.Block
-	(*HashRequest)(nil),       // 32: ed3k.v1.HashRequest
-	(*HashAnswer)(nil),        // 33: ed3k.v1.HashAnswer
-	(*BadBlock)(nil),          // 34: ed3k.v1.BadBlock
-	(*Browse)(nil),            // 35: ed3k.v1.Browse
-	(*BrowseAnswer)(nil),      // 36: ed3k.v1.BrowseAnswer
-	(*Chat)(nil),              // 37: ed3k.v1.Chat
-	(*ChatAck)(nil),           // 38: ed3k.v1.ChatAck
-	(*HttpSource)(nil),        // 39: ed3k.v1.HttpSource
-	(*SealedChunk)(nil),       // 40: ed3k.v1.SealedChunk
-	(*HttpResult)(nil),        // 41: ed3k.v1.HttpResult
-	(*SetFile)(nil),           // 42: ed3k.v1.SetFile
-	(*FileSet)(nil),           // 43: ed3k.v1.FileSet
-	(*Member)(nil),            // 44: ed3k.v1.Member
-	(*Head)(nil),              // 45: ed3k.v1.Head
-	(*SetRef)(nil),            // 46: ed3k.v1.SetRef
-	(*Sealed)(nil),            // 47: ed3k.v1.Sealed
-	(*Grant)(nil),             // 48: ed3k.v1.Grant
-	(*SignedGrant)(nil),       // 49: ed3k.v1.SignedGrant
-	(*CoSig)(nil),             // 50: ed3k.v1.CoSig
-	(*Joint)(nil),             // 51: ed3k.v1.Joint
-	(*Mount)(nil),             // 52: ed3k.v1.Mount
-	(*Open)(nil),              // 53: ed3k.v1.Open
-	(*Issuer)(nil),            // 54: ed3k.v1.Issuer
-	(*Change)(nil),            // 55: ed3k.v1.Change
-	(*Cert)(nil),              // 56: ed3k.v1.Cert
-	(*Part)(nil),              // 57: ed3k.v1.Part
-	(*Torrent)(nil),           // 58: ed3k.v1.Torrent
-	(*Usenet)(nil),            // 59: ed3k.v1.Usenet
-	(*ArticleList)(nil),       // 60: ed3k.v1.ArticleList
-	(*Post)(nil),              // 61: ed3k.v1.Post
-	(*Tube)(nil),              // 62: ed3k.v1.Tube
-	(*Alias)(nil),             // 63: ed3k.v1.Alias
-	(*LiveFile)(nil),          // 64: ed3k.v1.LiveFile
-	(*Channel)(nil),           // 65: ed3k.v1.Channel
-	(*LiveRecord)(nil),        // 66: ed3k.v1.LiveRecord
-	(*LiveSegment)(nil),       // 67: ed3k.v1.LiveSegment
-	(*LiveJoin)(nil),          // 68: ed3k.v1.LiveJoin
-	(*LiveState)(nil),         // 69: ed3k.v1.LiveState
-	(*LiveGet)(nil),           // 70: ed3k.v1.LiveGet
-	(*TopicJoin)(nil),         // 71: ed3k.v1.TopicJoin
-	(*TopicState)(nil),        // 72: ed3k.v1.TopicState
-	(*TopicItem)(nil),         // 73: ed3k.v1.TopicItem
-	(*OnAir)(nil),             // 74: ed3k.v1.OnAir
-	(*LanAnnounce)(nil),       // 75: ed3k.v1.LanAnnounce
-	(*LanQuery)(nil),          // 76: ed3k.v1.LanQuery
-	(*LanAnswer)(nil),         // 77: ed3k.v1.LanAnswer
-	(*HopCreate)(nil),         // 78: ed3k.v1.HopCreate
-	(*HopCreated)(nil),        // 79: ed3k.v1.HopCreated
-	(*HopExtend)(nil),         // 80: ed3k.v1.HopExtend
-	(*HopGate)(nil),           // 81: ed3k.v1.HopGate
-	(*HopLookup)(nil),         // 82: ed3k.v1.HopLookup
-	(*HopLookupAnswer)(nil),   // 83: ed3k.v1.HopLookupAnswer
-	(*HopStream)(nil),         // 84: ed3k.v1.HopStream
-	(*HopOk)(nil),             // 85: ed3k.v1.HopOk
-	(*HopConnect)(nil),        // 86: ed3k.v1.HopConnect
-	(*HopJoin)(nil),           // 87: ed3k.v1.HopJoin
-	(*Gates)(nil),             // 88: ed3k.v1.Gates
-	(*Gate)(nil),              // 89: ed3k.v1.Gate
-	(*CreditBid)(nil),         // 90: ed3k.v1.CreditBid
-	(*CreditOffer)(nil),       // 91: ed3k.v1.CreditOffer
-	(*Receipt)(nil),           // 92: ed3k.v1.Receipt
-	(*CreditRelay)(nil),       // 93: ed3k.v1.CreditRelay
-	(*SignedHold)(nil),        // 94: ed3k.v1.SignedHold
-	(*SignedReceipt)(nil),     // 95: ed3k.v1.SignedReceipt
-	(*CreditRelayAnswer)(nil), // 96: ed3k.v1.CreditRelayAnswer
-	(*Offer)(nil),             // 97: ed3k.v1.Offer
-	(*Chain)(nil),             // 98: ed3k.v1.Chain
-	(*SignedChain)(nil),       // 99: ed3k.v1.SignedChain
-	(*SignedOffer)(nil),       // 100: ed3k.v1.SignedOffer
-	(*EpochKey)(nil),          // 101: ed3k.v1.EpochKey
-	(*Pass)(nil),              // 102: ed3k.v1.Pass
-	(*SignedPass)(nil),        // 103: ed3k.v1.SignedPass
-	(*PassProof)(nil),         // 104: ed3k.v1.PassProof
-	(*ShareReport)(nil),       // 105: ed3k.v1.ShareReport
-	(*Sighting)(nil),          // 106: ed3k.v1.Sighting
-	(*KeyRequest)(nil),        // 107: ed3k.v1.KeyRequest
-	(*KeyAnswer)(nil),         // 108: ed3k.v1.KeyAnswer
-	(*FriendRecord)(nil),      // 109: ed3k.v1.FriendRecord
-	(*FriendRequest)(nil),     // 110: ed3k.v1.FriendRequest
-	(*NodeFile)(nil),          // 111: ed3k.v1.NodeFile
-	(*NodeList)(nil),          // 112: ed3k.v1.NodeList
-	(*FilterList)(nil),        // 113: ed3k.v1.FilterList
-	(*Group)(nil),             // 114: ed3k.v1.Group
+	(NameSource)(0),           // 2: ed3k.v1.NameSource
+	(Refusal)(0),              // 3: ed3k.v1.Refusal
+	(TopicType)(0),            // 4: ed3k.v1.TopicType
+	(TopicRefusal)(0),         // 5: ed3k.v1.TopicRefusal
+	(RoomRefusal)(0),          // 6: ed3k.v1.RoomRefusal
+	(PassRole)(0),             // 7: ed3k.v1.PassRole
+	(KeyRefusal)(0),           // 8: ed3k.v1.KeyRefusal
+	(Subject)(0),              // 9: ed3k.v1.Subject
+	(Verdict)(0),              // 10: ed3k.v1.Verdict
+	(ListingType)(0),          // 11: ed3k.v1.ListingType
+	(SectionKind)(0),          // 12: ed3k.v1.SectionKind
+	(PayMethod)(0),            // 13: ed3k.v1.PayMethod
+	(Error_Code)(0),           // 14: ed3k.v1.Error.Code
+	(HttpResult_Code)(0),      // 15: ed3k.v1.HttpResult.Code
+	(Alias_Relation)(0),       // 16: ed3k.v1.Alias.Relation
+	(*Peer)(nil),              // 17: ed3k.v1.Peer
+	(*FileInfo)(nil),          // 18: ed3k.v1.FileInfo
+	(*Hello)(nil),             // 19: ed3k.v1.Hello
+	(*Error)(nil),             // 20: ed3k.v1.Error
+	(*ReachTest)(nil),         // 21: ed3k.v1.ReachTest
+	(*Relay)(nil),             // 22: ed3k.v1.Relay
+	(*Punch)(nil),             // 23: ed3k.v1.Punch
+	(*KadRequest)(nil),        // 24: ed3k.v1.KadRequest
+	(*Query)(nil),             // 25: ed3k.v1.Query
+	(*Store)(nil),             // 26: ed3k.v1.Store
+	(*Note)(nil),              // 27: ed3k.v1.Note
+	(*KadAnswer)(nil),         // 28: ed3k.v1.KadAnswer
+	(*Record)(nil),            // 29: ed3k.v1.Record
+	(*Signature)(nil),         // 30: ed3k.v1.Signature
+	(*Signed)(nil),            // 31: ed3k.v1.Signed
+	(*FileRequest)(nil),       // 32: ed3k.v1.FileRequest
+	(*FileStatus)(nil),        // 33: ed3k.v1.FileStatus
+	(*SlotOffer)(nil),         // 34: ed3k.v1.SlotOffer
+	(*BlockRequest)(nil),      // 35: ed3k.v1.BlockRequest
+	(*Block)(nil),             // 36: ed3k.v1.Block
+	(*HashRequest)(nil),       // 37: ed3k.v1.HashRequest
+	(*HashAnswer)(nil),        // 38: ed3k.v1.HashAnswer
+	(*BadBlock)(nil),          // 39: ed3k.v1.BadBlock
+	(*Browse)(nil),            // 40: ed3k.v1.Browse
+	(*BrowseAnswer)(nil),      // 41: ed3k.v1.BrowseAnswer
+	(*Chat)(nil),              // 42: ed3k.v1.Chat
+	(*ChatAck)(nil),           // 43: ed3k.v1.ChatAck
+	(*HttpSource)(nil),        // 44: ed3k.v1.HttpSource
+	(*SealedChunk)(nil),       // 45: ed3k.v1.SealedChunk
+	(*HttpResult)(nil),        // 46: ed3k.v1.HttpResult
+	(*SetFile)(nil),           // 47: ed3k.v1.SetFile
+	(*FileSet)(nil),           // 48: ed3k.v1.FileSet
+	(*Member)(nil),            // 49: ed3k.v1.Member
+	(*Head)(nil),              // 50: ed3k.v1.Head
+	(*SetRef)(nil),            // 51: ed3k.v1.SetRef
+	(*Sealed)(nil),            // 52: ed3k.v1.Sealed
+	(*Grant)(nil),             // 53: ed3k.v1.Grant
+	(*SignedGrant)(nil),       // 54: ed3k.v1.SignedGrant
+	(*CoSig)(nil),             // 55: ed3k.v1.CoSig
+	(*Joint)(nil),             // 56: ed3k.v1.Joint
+	(*Mount)(nil),             // 57: ed3k.v1.Mount
+	(*Open)(nil),              // 58: ed3k.v1.Open
+	(*Issuer)(nil),            // 59: ed3k.v1.Issuer
+	(*Change)(nil),            // 60: ed3k.v1.Change
+	(*Cert)(nil),              // 61: ed3k.v1.Cert
+	(*Part)(nil),              // 62: ed3k.v1.Part
+	(*Torrent)(nil),           // 63: ed3k.v1.Torrent
+	(*Usenet)(nil),            // 64: ed3k.v1.Usenet
+	(*ArticleList)(nil),       // 65: ed3k.v1.ArticleList
+	(*Post)(nil),              // 66: ed3k.v1.Post
+	(*Tube)(nil),              // 67: ed3k.v1.Tube
+	(*Alias)(nil),             // 68: ed3k.v1.Alias
+	(*Delegation)(nil),        // 69: ed3k.v1.Delegation
+	(*Name)(nil),              // 70: ed3k.v1.Name
+	(*Claim)(nil),             // 71: ed3k.v1.Claim
+	(*NameQuery)(nil),         // 72: ed3k.v1.NameQuery
+	(*NameAnswer)(nil),        // 73: ed3k.v1.NameAnswer
+	(*NameHit)(nil),           // 74: ed3k.v1.NameHit
+	(*NameList)(nil),          // 75: ed3k.v1.NameList
+	(*NameEntry)(nil),         // 76: ed3k.v1.NameEntry
+	(*LiveFile)(nil),          // 77: ed3k.v1.LiveFile
+	(*Channel)(nil),           // 78: ed3k.v1.Channel
+	(*LiveRecord)(nil),        // 79: ed3k.v1.LiveRecord
+	(*LiveSegment)(nil),       // 80: ed3k.v1.LiveSegment
+	(*LiveJoin)(nil),          // 81: ed3k.v1.LiveJoin
+	(*LiveState)(nil),         // 82: ed3k.v1.LiveState
+	(*LiveGet)(nil),           // 83: ed3k.v1.LiveGet
+	(*TopicJoin)(nil),         // 84: ed3k.v1.TopicJoin
+	(*TopicState)(nil),        // 85: ed3k.v1.TopicState
+	(*TopicItem)(nil),         // 86: ed3k.v1.TopicItem
+	(*OnAir)(nil),             // 87: ed3k.v1.OnAir
+	(*RoomItem)(nil),          // 88: ed3k.v1.RoomItem
+	(*RoomBody)(nil),          // 89: ed3k.v1.RoomBody
+	(*RoomInfo)(nil),          // 90: ed3k.v1.RoomInfo
+	(*Admit)(nil),             // 91: ed3k.v1.Admit
+	(*Ban)(nil),               // 92: ed3k.v1.Ban
+	(*Presence)(nil),          // 93: ed3k.v1.Presence
+	(*RoomPost)(nil),          // 94: ed3k.v1.RoomPost
+	(*RoomText)(nil),          // 95: ed3k.v1.RoomText
+	(*RoomMedia)(nil),         // 96: ed3k.v1.RoomMedia
+	(*KeyDrop)(nil),           // 97: ed3k.v1.KeyDrop
+	(*RoomJoin)(nil),          // 98: ed3k.v1.RoomJoin
+	(*RoomState)(nil),         // 99: ed3k.v1.RoomState
+	(*RoomProof)(nil),         // 100: ed3k.v1.RoomProof
+	(*LanAnnounce)(nil),       // 101: ed3k.v1.LanAnnounce
+	(*LanQuery)(nil),          // 102: ed3k.v1.LanQuery
+	(*LanAnswer)(nil),         // 103: ed3k.v1.LanAnswer
+	(*HopCreate)(nil),         // 104: ed3k.v1.HopCreate
+	(*HopCreated)(nil),        // 105: ed3k.v1.HopCreated
+	(*HopGate)(nil),           // 106: ed3k.v1.HopGate
+	(*HopLookup)(nil),         // 107: ed3k.v1.HopLookup
+	(*HopLookupAnswer)(nil),   // 108: ed3k.v1.HopLookupAnswer
+	(*HopStream)(nil),         // 109: ed3k.v1.HopStream
+	(*HopOk)(nil),             // 110: ed3k.v1.HopOk
+	(*HopConnect)(nil),        // 111: ed3k.v1.HopConnect
+	(*HopJoin)(nil),           // 112: ed3k.v1.HopJoin
+	(*Gates)(nil),             // 113: ed3k.v1.Gates
+	(*Gate)(nil),              // 114: ed3k.v1.Gate
+	(*CreditBid)(nil),         // 115: ed3k.v1.CreditBid
+	(*CreditOffer)(nil),       // 116: ed3k.v1.CreditOffer
+	(*Receipt)(nil),           // 117: ed3k.v1.Receipt
+	(*CreditRelay)(nil),       // 118: ed3k.v1.CreditRelay
+	(*SignedHold)(nil),        // 119: ed3k.v1.SignedHold
+	(*SignedReceipt)(nil),     // 120: ed3k.v1.SignedReceipt
+	(*CreditRelayAnswer)(nil), // 121: ed3k.v1.CreditRelayAnswer
+	(*Offer)(nil),             // 122: ed3k.v1.Offer
+	(*Chain)(nil),             // 123: ed3k.v1.Chain
+	(*SignedChain)(nil),       // 124: ed3k.v1.SignedChain
+	(*SignedOffer)(nil),       // 125: ed3k.v1.SignedOffer
+	(*EpochKey)(nil),          // 126: ed3k.v1.EpochKey
+	(*Pass)(nil),              // 127: ed3k.v1.Pass
+	(*SignedPass)(nil),        // 128: ed3k.v1.SignedPass
+	(*PassProof)(nil),         // 129: ed3k.v1.PassProof
+	(*ShareReport)(nil),       // 130: ed3k.v1.ShareReport
+	(*Sighting)(nil),          // 131: ed3k.v1.Sighting
+	(*KeyRequest)(nil),        // 132: ed3k.v1.KeyRequest
+	(*KeyAnswer)(nil),         // 133: ed3k.v1.KeyAnswer
+	(*FriendRecord)(nil),      // 134: ed3k.v1.FriendRecord
+	(*FriendRequest)(nil),     // 135: ed3k.v1.FriendRequest
+	(*NodeFile)(nil),          // 136: ed3k.v1.NodeFile
+	(*NodeList)(nil),          // 137: ed3k.v1.NodeList
+	(*FilterList)(nil),        // 138: ed3k.v1.FilterList
+	(*Group)(nil),             // 139: ed3k.v1.Group
+	(*MailPart)(nil),          // 140: ed3k.v1.MailPart
+	(*MailHead)(nil),          // 141: ed3k.v1.MailHead
+	(*MailAck)(nil),           // 142: ed3k.v1.MailAck
+	(*MailFile)(nil),          // 143: ed3k.v1.MailFile
+	(*MarketDoc)(nil),         // 144: ed3k.v1.MarketDoc
+	(*Profile)(nil),           // 145: ed3k.v1.Profile
+	(*MailBox)(nil),           // 146: ed3k.v1.MailBox
+	(*Moderator)(nil),         // 147: ed3k.v1.Moderator
+	(*Listing)(nil),           // 148: ed3k.v1.Listing
+	(*Price)(nil),             // 149: ed3k.v1.Price
+	(*Image)(nil),             // 150: ed3k.v1.Image
+	(*Option)(nil),            // 151: ed3k.v1.Option
+	(*Sku)(nil),               // 152: ed3k.v1.Sku
+	(*Shipping)(nil),          // 153: ed3k.v1.Shipping
+	(*Service)(nil),           // 154: ed3k.v1.Service
+	(*Market)(nil),            // 155: ed3k.v1.Market
+	(*MarketAck)(nil),         // 156: ed3k.v1.MarketAck
+	(*Section)(nil),           // 157: ed3k.v1.Section
+	(*Order)(nil),             // 158: ed3k.v1.Order
+	(*Item)(nil),              // 159: ed3k.v1.Item
+	(*Confirm)(nil),           // 160: ed3k.v1.Confirm
+	(*Payment)(nil),           // 161: ed3k.v1.Payment
+	(*Fulfill)(nil),           // 162: ed3k.v1.Fulfill
+	(*Delivery)(nil),          // 163: ed3k.v1.Delivery
+	(*Complete)(nil),          // 164: ed3k.v1.Complete
+	(*Resolution)(nil),        // 165: ed3k.v1.Resolution
+	(*MarketNote)(nil),        // 166: ed3k.v1.MarketNote
+	(*Rating)(nil),            // 167: ed3k.v1.Rating
 }
 var file_ed3k_proto_depIdxs = []int32{
-	9,   // 0: ed3k.v1.Error.code:type_name -> ed3k.v1.Error.Code
+	14,  // 0: ed3k.v1.Error.code:type_name -> ed3k.v1.Error.Code
 	0,   // 1: ed3k.v1.KadRequest.kind:type_name -> ed3k.v1.Kind
-	20,  // 2: ed3k.v1.KadRequest.search:type_name -> ed3k.v1.Query
-	21,  // 3: ed3k.v1.KadRequest.store:type_name -> ed3k.v1.Store
-	12,  // 4: ed3k.v1.Store.source:type_name -> ed3k.v1.Peer
-	26,  // 5: ed3k.v1.Store.files:type_name -> ed3k.v1.Signed
-	26,  // 6: ed3k.v1.Store.note:type_name -> ed3k.v1.Signed
-	39,  // 7: ed3k.v1.Store.http:type_name -> ed3k.v1.HttpSource
-	26,  // 8: ed3k.v1.Store.head:type_name -> ed3k.v1.Signed
-	26,  // 9: ed3k.v1.Store.members:type_name -> ed3k.v1.Signed
-	26,  // 10: ed3k.v1.Store.anon:type_name -> ed3k.v1.Signed
-	26,  // 11: ed3k.v1.Store.aliases:type_name -> ed3k.v1.Signed
-	39,  // 12: ed3k.v1.Store.links:type_name -> ed3k.v1.HttpSource
-	12,  // 13: ed3k.v1.KadAnswer.sources:type_name -> ed3k.v1.Peer
-	26,  // 14: ed3k.v1.KadAnswer.files:type_name -> ed3k.v1.Signed
-	26,  // 15: ed3k.v1.KadAnswer.notes:type_name -> ed3k.v1.Signed
-	1,   // 16: ed3k.v1.KadAnswer.results:type_name -> ed3k.v1.StoreResult
-	39,  // 17: ed3k.v1.KadAnswer.http:type_name -> ed3k.v1.HttpSource
-	26,  // 18: ed3k.v1.KadAnswer.sets:type_name -> ed3k.v1.Signed
-	26,  // 19: ed3k.v1.KadAnswer.gate:type_name -> ed3k.v1.Signed
-	26,  // 20: ed3k.v1.KadAnswer.aliases:type_name -> ed3k.v1.Signed
-	39,  // 21: ed3k.v1.KadAnswer.links:type_name -> ed3k.v1.HttpSource
-	13,  // 22: ed3k.v1.Record.file:type_name -> ed3k.v1.FileInfo
-	22,  // 23: ed3k.v1.Record.note:type_name -> ed3k.v1.Note
-	45,  // 24: ed3k.v1.Record.head:type_name -> ed3k.v1.Head
-	46,  // 25: ed3k.v1.Record.member:type_name -> ed3k.v1.SetRef
-	74,  // 26: ed3k.v1.Record.on_air:type_name -> ed3k.v1.OnAir
-	47,  // 27: ed3k.v1.Record.sealed:type_name -> ed3k.v1.Sealed
-	51,  // 28: ed3k.v1.Record.joint:type_name -> ed3k.v1.Joint
-	57,  // 29: ed3k.v1.Record.part:type_name -> ed3k.v1.Part
-	88,  // 30: ed3k.v1.Record.gates:type_name -> ed3k.v1.Gates
-	63,  // 31: ed3k.v1.Record.alias:type_name -> ed3k.v1.Alias
-	25,  // 32: ed3k.v1.Signed.sigs:type_name -> ed3k.v1.Signature
-	41,  // 33: ed3k.v1.FileRequest.http_results:type_name -> ed3k.v1.HttpResult
-	90,  // 34: ed3k.v1.FileRequest.credit:type_name -> ed3k.v1.CreditBid
-	12,  // 35: ed3k.v1.FileStatus.sources:type_name -> ed3k.v1.Peer
-	22,  // 36: ed3k.v1.FileStatus.note:type_name -> ed3k.v1.Note
-	39,  // 37: ed3k.v1.FileStatus.http:type_name -> ed3k.v1.HttpSource
-	91,  // 38: ed3k.v1.FileStatus.credit:type_name -> ed3k.v1.CreditOffer
-	39,  // 39: ed3k.v1.FileStatus.links:type_name -> ed3k.v1.HttpSource
-	13,  // 40: ed3k.v1.BrowseAnswer.files:type_name -> ed3k.v1.FileInfo
-	40,  // 41: ed3k.v1.HttpSource.sealed:type_name -> ed3k.v1.SealedChunk
-	10,  // 42: ed3k.v1.HttpResult.code:type_name -> ed3k.v1.HttpResult.Code
-	25,  // 43: ed3k.v1.SetFile.sigs:type_name -> ed3k.v1.Signature
-	49,  // 44: ed3k.v1.SetFile.grant:type_name -> ed3k.v1.SignedGrant
-	50,  // 45: ed3k.v1.SetFile.cosigs:type_name -> ed3k.v1.CoSig
-	56,  // 46: ed3k.v1.SetFile.cert:type_name -> ed3k.v1.Cert
-	44,  // 47: ed3k.v1.FileSet.files:type_name -> ed3k.v1.Member
-	53,  // 48: ed3k.v1.FileSet.open:type_name -> ed3k.v1.Open
-	58,  // 49: ed3k.v1.FileSet.torrent:type_name -> ed3k.v1.Torrent
-	59,  // 50: ed3k.v1.FileSet.usenet:type_name -> ed3k.v1.Usenet
-	62,  // 51: ed3k.v1.FileSet.tube:type_name -> ed3k.v1.Tube
-	100, // 52: ed3k.v1.FileSet.offer:type_name -> ed3k.v1.SignedOffer
-	101, // 53: ed3k.v1.FileSet.released:type_name -> ed3k.v1.EpochKey
-	99,  // 54: ed3k.v1.FileSet.released_chain:type_name -> ed3k.v1.SignedChain
-	52,  // 55: ed3k.v1.Member.mount:type_name -> ed3k.v1.Mount
-	25,  // 56: ed3k.v1.SignedGrant.sigs:type_name -> ed3k.v1.Signature
-	25,  // 57: ed3k.v1.CoSig.sigs:type_name -> ed3k.v1.Signature
-	49,  // 58: ed3k.v1.Joint.grant:type_name -> ed3k.v1.SignedGrant
-	50,  // 59: ed3k.v1.Joint.cosigs:type_name -> ed3k.v1.CoSig
-	54,  // 60: ed3k.v1.Open.issuers:type_name -> ed3k.v1.Issuer
-	55,  // 61: ed3k.v1.Open.changes:type_name -> ed3k.v1.Change
-	25,  // 62: ed3k.v1.Cert.sigs:type_name -> ed3k.v1.Signature
-	56,  // 63: ed3k.v1.Part.cert:type_name -> ed3k.v1.Cert
-	61,  // 64: ed3k.v1.ArticleList.files:type_name -> ed3k.v1.Post
-	11,  // 65: ed3k.v1.Alias.rel:type_name -> ed3k.v1.Alias.Relation
-	25,  // 66: ed3k.v1.LiveFile.sigs:type_name -> ed3k.v1.Signature
-	100, // 67: ed3k.v1.Channel.offer:type_name -> ed3k.v1.SignedOffer
-	25,  // 68: ed3k.v1.LiveRecord.sigs:type_name -> ed3k.v1.Signature
-	66,  // 69: ed3k.v1.LiveState.records:type_name -> ed3k.v1.LiveRecord
-	12,  // 70: ed3k.v1.LiveState.peers:type_name -> ed3k.v1.Peer
-	2,   // 71: ed3k.v1.LiveState.refusal:type_name -> ed3k.v1.Refusal
-	103, // 72: ed3k.v1.LiveState.pass:type_name -> ed3k.v1.SignedPass
-	104, // 73: ed3k.v1.LiveState.pass_proof:type_name -> ed3k.v1.PassProof
-	101, // 74: ed3k.v1.LiveState.key:type_name -> ed3k.v1.EpochKey
-	100, // 75: ed3k.v1.LiveState.offer:type_name -> ed3k.v1.SignedOffer
-	99,  // 76: ed3k.v1.LiveState.chain:type_name -> ed3k.v1.SignedChain
-	3,   // 77: ed3k.v1.TopicJoin.type:type_name -> ed3k.v1.TopicType
-	73,  // 78: ed3k.v1.TopicState.item:type_name -> ed3k.v1.TopicItem
-	12,  // 79: ed3k.v1.TopicState.peers:type_name -> ed3k.v1.Peer
-	4,   // 80: ed3k.v1.TopicState.refusal:type_name -> ed3k.v1.TopicRefusal
-	101, // 81: ed3k.v1.TopicState.key:type_name -> ed3k.v1.EpochKey
-	103, // 82: ed3k.v1.TopicState.pass:type_name -> ed3k.v1.SignedPass
-	104, // 83: ed3k.v1.TopicState.pass_proof:type_name -> ed3k.v1.PassProof
-	100, // 84: ed3k.v1.TopicState.offer:type_name -> ed3k.v1.SignedOffer
-	99,  // 85: ed3k.v1.TopicState.chain:type_name -> ed3k.v1.SignedChain
-	26,  // 86: ed3k.v1.TopicItem.head:type_name -> ed3k.v1.Signed
-	26,  // 87: ed3k.v1.TopicItem.on_air:type_name -> ed3k.v1.Signed
-	26,  // 88: ed3k.v1.TopicItem.hidden:type_name -> ed3k.v1.Signed
-	78,  // 89: ed3k.v1.HopExtend.create:type_name -> ed3k.v1.HopCreate
-	19,  // 90: ed3k.v1.HopLookup.request:type_name -> ed3k.v1.KadRequest
-	23,  // 91: ed3k.v1.HopLookupAnswer.answers:type_name -> ed3k.v1.KadAnswer
-	89,  // 92: ed3k.v1.Gates.gates:type_name -> ed3k.v1.Gate
-	92,  // 93: ed3k.v1.CreditOffer.last:type_name -> ed3k.v1.Receipt
-	95,  // 94: ed3k.v1.CreditRelay.receipts:type_name -> ed3k.v1.SignedReceipt
-	94,  // 95: ed3k.v1.CreditRelay.holds:type_name -> ed3k.v1.SignedHold
-	99,  // 96: ed3k.v1.Offer.chain:type_name -> ed3k.v1.SignedChain
-	25,  // 97: ed3k.v1.SignedChain.sigs:type_name -> ed3k.v1.Signature
-	25,  // 98: ed3k.v1.SignedOffer.sigs:type_name -> ed3k.v1.Signature
-	5,   // 99: ed3k.v1.Pass.role:type_name -> ed3k.v1.PassRole
-	25,  // 100: ed3k.v1.SignedPass.sigs:type_name -> ed3k.v1.Signature
-	103, // 101: ed3k.v1.ShareReport.pass:type_name -> ed3k.v1.SignedPass
-	106, // 102: ed3k.v1.ShareReport.seen:type_name -> ed3k.v1.Sighting
-	104, // 103: ed3k.v1.Sighting.proof:type_name -> ed3k.v1.PassProof
-	103, // 104: ed3k.v1.KeyRequest.pass:type_name -> ed3k.v1.SignedPass
-	104, // 105: ed3k.v1.KeyRequest.proof:type_name -> ed3k.v1.PassProof
-	101, // 106: ed3k.v1.KeyAnswer.key:type_name -> ed3k.v1.EpochKey
-	101, // 107: ed3k.v1.KeyAnswer.released:type_name -> ed3k.v1.EpochKey
-	100, // 108: ed3k.v1.KeyAnswer.offer:type_name -> ed3k.v1.SignedOffer
-	6,   // 109: ed3k.v1.KeyAnswer.refusal:type_name -> ed3k.v1.KeyRefusal
-	101, // 110: ed3k.v1.KeyAnswer.tips:type_name -> ed3k.v1.EpochKey
-	99,  // 111: ed3k.v1.KeyAnswer.chains:type_name -> ed3k.v1.SignedChain
-	103, // 112: ed3k.v1.KeyAnswer.pass:type_name -> ed3k.v1.SignedPass
-	104, // 113: ed3k.v1.KeyAnswer.pass_proof:type_name -> ed3k.v1.PassProof
-	12,  // 114: ed3k.v1.FriendRecord.peer:type_name -> ed3k.v1.Peer
-	25,  // 115: ed3k.v1.FriendRequest.sigs:type_name -> ed3k.v1.Signature
-	25,  // 116: ed3k.v1.NodeFile.sigs:type_name -> ed3k.v1.Signature
-	114, // 117: ed3k.v1.FilterList.groups:type_name -> ed3k.v1.Group
-	7,   // 118: ed3k.v1.Group.subject:type_name -> ed3k.v1.Subject
-	8,   // 119: ed3k.v1.Group.verdict:type_name -> ed3k.v1.Verdict
-	120, // [120:120] is the sub-list for method output_type
-	120, // [120:120] is the sub-list for method input_type
-	120, // [120:120] is the sub-list for extension type_name
-	120, // [120:120] is the sub-list for extension extendee
-	0,   // [0:120] is the sub-list for field type_name
+	25,  // 2: ed3k.v1.KadRequest.search:type_name -> ed3k.v1.Query
+	26,  // 3: ed3k.v1.KadRequest.store:type_name -> ed3k.v1.Store
+	17,  // 4: ed3k.v1.Store.source:type_name -> ed3k.v1.Peer
+	31,  // 5: ed3k.v1.Store.files:type_name -> ed3k.v1.Signed
+	31,  // 6: ed3k.v1.Store.note:type_name -> ed3k.v1.Signed
+	44,  // 7: ed3k.v1.Store.http:type_name -> ed3k.v1.HttpSource
+	31,  // 8: ed3k.v1.Store.head:type_name -> ed3k.v1.Signed
+	31,  // 9: ed3k.v1.Store.members:type_name -> ed3k.v1.Signed
+	31,  // 10: ed3k.v1.Store.anon:type_name -> ed3k.v1.Signed
+	31,  // 11: ed3k.v1.Store.aliases:type_name -> ed3k.v1.Signed
+	44,  // 12: ed3k.v1.Store.links:type_name -> ed3k.v1.HttpSource
+	31,  // 13: ed3k.v1.Store.names:type_name -> ed3k.v1.Signed
+	17,  // 14: ed3k.v1.KadAnswer.sources:type_name -> ed3k.v1.Peer
+	31,  // 15: ed3k.v1.KadAnswer.files:type_name -> ed3k.v1.Signed
+	31,  // 16: ed3k.v1.KadAnswer.notes:type_name -> ed3k.v1.Signed
+	1,   // 17: ed3k.v1.KadAnswer.results:type_name -> ed3k.v1.StoreResult
+	44,  // 18: ed3k.v1.KadAnswer.http:type_name -> ed3k.v1.HttpSource
+	31,  // 19: ed3k.v1.KadAnswer.sets:type_name -> ed3k.v1.Signed
+	31,  // 20: ed3k.v1.KadAnswer.gate:type_name -> ed3k.v1.Signed
+	31,  // 21: ed3k.v1.KadAnswer.aliases:type_name -> ed3k.v1.Signed
+	44,  // 22: ed3k.v1.KadAnswer.links:type_name -> ed3k.v1.HttpSource
+	31,  // 23: ed3k.v1.KadAnswer.names:type_name -> ed3k.v1.Signed
+	18,  // 24: ed3k.v1.Record.file:type_name -> ed3k.v1.FileInfo
+	27,  // 25: ed3k.v1.Record.note:type_name -> ed3k.v1.Note
+	50,  // 26: ed3k.v1.Record.head:type_name -> ed3k.v1.Head
+	51,  // 27: ed3k.v1.Record.member:type_name -> ed3k.v1.SetRef
+	87,  // 28: ed3k.v1.Record.on_air:type_name -> ed3k.v1.OnAir
+	52,  // 29: ed3k.v1.Record.sealed:type_name -> ed3k.v1.Sealed
+	56,  // 30: ed3k.v1.Record.joint:type_name -> ed3k.v1.Joint
+	62,  // 31: ed3k.v1.Record.part:type_name -> ed3k.v1.Part
+	113, // 32: ed3k.v1.Record.gates:type_name -> ed3k.v1.Gates
+	68,  // 33: ed3k.v1.Record.alias:type_name -> ed3k.v1.Alias
+	70,  // 34: ed3k.v1.Record.name:type_name -> ed3k.v1.Name
+	71,  // 35: ed3k.v1.Record.claim:type_name -> ed3k.v1.Claim
+	30,  // 36: ed3k.v1.Signed.sigs:type_name -> ed3k.v1.Signature
+	46,  // 37: ed3k.v1.FileRequest.http_results:type_name -> ed3k.v1.HttpResult
+	115, // 38: ed3k.v1.FileRequest.credit:type_name -> ed3k.v1.CreditBid
+	17,  // 39: ed3k.v1.FileStatus.sources:type_name -> ed3k.v1.Peer
+	27,  // 40: ed3k.v1.FileStatus.note:type_name -> ed3k.v1.Note
+	44,  // 41: ed3k.v1.FileStatus.http:type_name -> ed3k.v1.HttpSource
+	116, // 42: ed3k.v1.FileStatus.credit:type_name -> ed3k.v1.CreditOffer
+	44,  // 43: ed3k.v1.FileStatus.links:type_name -> ed3k.v1.HttpSource
+	18,  // 44: ed3k.v1.BrowseAnswer.files:type_name -> ed3k.v1.FileInfo
+	45,  // 45: ed3k.v1.HttpSource.sealed:type_name -> ed3k.v1.SealedChunk
+	15,  // 46: ed3k.v1.HttpResult.code:type_name -> ed3k.v1.HttpResult.Code
+	30,  // 47: ed3k.v1.SetFile.sigs:type_name -> ed3k.v1.Signature
+	54,  // 48: ed3k.v1.SetFile.grant:type_name -> ed3k.v1.SignedGrant
+	55,  // 49: ed3k.v1.SetFile.cosigs:type_name -> ed3k.v1.CoSig
+	61,  // 50: ed3k.v1.SetFile.cert:type_name -> ed3k.v1.Cert
+	49,  // 51: ed3k.v1.FileSet.files:type_name -> ed3k.v1.Member
+	58,  // 52: ed3k.v1.FileSet.open:type_name -> ed3k.v1.Open
+	63,  // 53: ed3k.v1.FileSet.torrent:type_name -> ed3k.v1.Torrent
+	64,  // 54: ed3k.v1.FileSet.usenet:type_name -> ed3k.v1.Usenet
+	67,  // 55: ed3k.v1.FileSet.tube:type_name -> ed3k.v1.Tube
+	125, // 56: ed3k.v1.FileSet.offer:type_name -> ed3k.v1.SignedOffer
+	126, // 57: ed3k.v1.FileSet.released:type_name -> ed3k.v1.EpochKey
+	124, // 58: ed3k.v1.FileSet.released_chain:type_name -> ed3k.v1.SignedChain
+	57,  // 59: ed3k.v1.Member.mount:type_name -> ed3k.v1.Mount
+	30,  // 60: ed3k.v1.SignedGrant.sigs:type_name -> ed3k.v1.Signature
+	30,  // 61: ed3k.v1.CoSig.sigs:type_name -> ed3k.v1.Signature
+	54,  // 62: ed3k.v1.Joint.grant:type_name -> ed3k.v1.SignedGrant
+	55,  // 63: ed3k.v1.Joint.cosigs:type_name -> ed3k.v1.CoSig
+	59,  // 64: ed3k.v1.Open.issuers:type_name -> ed3k.v1.Issuer
+	60,  // 65: ed3k.v1.Open.changes:type_name -> ed3k.v1.Change
+	30,  // 66: ed3k.v1.Cert.sigs:type_name -> ed3k.v1.Signature
+	61,  // 67: ed3k.v1.Part.cert:type_name -> ed3k.v1.Cert
+	66,  // 68: ed3k.v1.ArticleList.files:type_name -> ed3k.v1.Post
+	16,  // 69: ed3k.v1.Alias.rel:type_name -> ed3k.v1.Alias.Relation
+	30,  // 70: ed3k.v1.Delegation.sigs:type_name -> ed3k.v1.Signature
+	69,  // 71: ed3k.v1.Name.delegation:type_name -> ed3k.v1.Delegation
+	74,  // 72: ed3k.v1.NameAnswer.hits:type_name -> ed3k.v1.NameHit
+	2,   // 73: ed3k.v1.NameHit.source:type_name -> ed3k.v1.NameSource
+	76,  // 74: ed3k.v1.NameList.entries:type_name -> ed3k.v1.NameEntry
+	30,  // 75: ed3k.v1.LiveFile.sigs:type_name -> ed3k.v1.Signature
+	125, // 76: ed3k.v1.Channel.offer:type_name -> ed3k.v1.SignedOffer
+	30,  // 77: ed3k.v1.LiveRecord.sigs:type_name -> ed3k.v1.Signature
+	79,  // 78: ed3k.v1.LiveState.records:type_name -> ed3k.v1.LiveRecord
+	17,  // 79: ed3k.v1.LiveState.peers:type_name -> ed3k.v1.Peer
+	3,   // 80: ed3k.v1.LiveState.refusal:type_name -> ed3k.v1.Refusal
+	128, // 81: ed3k.v1.LiveState.pass:type_name -> ed3k.v1.SignedPass
+	129, // 82: ed3k.v1.LiveState.pass_proof:type_name -> ed3k.v1.PassProof
+	126, // 83: ed3k.v1.LiveState.key:type_name -> ed3k.v1.EpochKey
+	125, // 84: ed3k.v1.LiveState.offer:type_name -> ed3k.v1.SignedOffer
+	124, // 85: ed3k.v1.LiveState.chain:type_name -> ed3k.v1.SignedChain
+	4,   // 86: ed3k.v1.TopicJoin.type:type_name -> ed3k.v1.TopicType
+	86,  // 87: ed3k.v1.TopicState.item:type_name -> ed3k.v1.TopicItem
+	17,  // 88: ed3k.v1.TopicState.peers:type_name -> ed3k.v1.Peer
+	5,   // 89: ed3k.v1.TopicState.refusal:type_name -> ed3k.v1.TopicRefusal
+	126, // 90: ed3k.v1.TopicState.key:type_name -> ed3k.v1.EpochKey
+	128, // 91: ed3k.v1.TopicState.pass:type_name -> ed3k.v1.SignedPass
+	129, // 92: ed3k.v1.TopicState.pass_proof:type_name -> ed3k.v1.PassProof
+	125, // 93: ed3k.v1.TopicState.offer:type_name -> ed3k.v1.SignedOffer
+	124, // 94: ed3k.v1.TopicState.chain:type_name -> ed3k.v1.SignedChain
+	31,  // 95: ed3k.v1.TopicItem.head:type_name -> ed3k.v1.Signed
+	31,  // 96: ed3k.v1.TopicItem.on_air:type_name -> ed3k.v1.Signed
+	31,  // 97: ed3k.v1.TopicItem.hidden:type_name -> ed3k.v1.Signed
+	30,  // 98: ed3k.v1.RoomItem.sigs:type_name -> ed3k.v1.Signature
+	90,  // 99: ed3k.v1.RoomBody.info:type_name -> ed3k.v1.RoomInfo
+	91,  // 100: ed3k.v1.RoomBody.admit:type_name -> ed3k.v1.Admit
+	92,  // 101: ed3k.v1.RoomBody.ban:type_name -> ed3k.v1.Ban
+	93,  // 102: ed3k.v1.RoomBody.presence:type_name -> ed3k.v1.Presence
+	94,  // 103: ed3k.v1.RoomBody.post:type_name -> ed3k.v1.RoomPost
+	97,  // 104: ed3k.v1.RoomBody.key_drop:type_name -> ed3k.v1.KeyDrop
+	95,  // 105: ed3k.v1.RoomPost.text:type_name -> ed3k.v1.RoomText
+	96,  // 106: ed3k.v1.RoomText.media:type_name -> ed3k.v1.RoomMedia
+	88,  // 107: ed3k.v1.RoomState.items:type_name -> ed3k.v1.RoomItem
+	17,  // 108: ed3k.v1.RoomState.peers:type_name -> ed3k.v1.Peer
+	6,   // 109: ed3k.v1.RoomState.refusal:type_name -> ed3k.v1.RoomRefusal
+	100, // 110: ed3k.v1.RoomState.member_proof:type_name -> ed3k.v1.RoomProof
+	24,  // 111: ed3k.v1.HopLookup.request:type_name -> ed3k.v1.KadRequest
+	28,  // 112: ed3k.v1.HopLookupAnswer.answers:type_name -> ed3k.v1.KadAnswer
+	114, // 113: ed3k.v1.Gates.gates:type_name -> ed3k.v1.Gate
+	117, // 114: ed3k.v1.CreditOffer.last:type_name -> ed3k.v1.Receipt
+	120, // 115: ed3k.v1.CreditRelay.receipts:type_name -> ed3k.v1.SignedReceipt
+	119, // 116: ed3k.v1.CreditRelay.holds:type_name -> ed3k.v1.SignedHold
+	124, // 117: ed3k.v1.Offer.chain:type_name -> ed3k.v1.SignedChain
+	30,  // 118: ed3k.v1.SignedChain.sigs:type_name -> ed3k.v1.Signature
+	30,  // 119: ed3k.v1.SignedOffer.sigs:type_name -> ed3k.v1.Signature
+	7,   // 120: ed3k.v1.Pass.role:type_name -> ed3k.v1.PassRole
+	30,  // 121: ed3k.v1.SignedPass.sigs:type_name -> ed3k.v1.Signature
+	128, // 122: ed3k.v1.ShareReport.pass:type_name -> ed3k.v1.SignedPass
+	131, // 123: ed3k.v1.ShareReport.seen:type_name -> ed3k.v1.Sighting
+	129, // 124: ed3k.v1.Sighting.proof:type_name -> ed3k.v1.PassProof
+	128, // 125: ed3k.v1.KeyRequest.pass:type_name -> ed3k.v1.SignedPass
+	129, // 126: ed3k.v1.KeyRequest.proof:type_name -> ed3k.v1.PassProof
+	126, // 127: ed3k.v1.KeyAnswer.key:type_name -> ed3k.v1.EpochKey
+	126, // 128: ed3k.v1.KeyAnswer.released:type_name -> ed3k.v1.EpochKey
+	125, // 129: ed3k.v1.KeyAnswer.offer:type_name -> ed3k.v1.SignedOffer
+	8,   // 130: ed3k.v1.KeyAnswer.refusal:type_name -> ed3k.v1.KeyRefusal
+	126, // 131: ed3k.v1.KeyAnswer.tips:type_name -> ed3k.v1.EpochKey
+	124, // 132: ed3k.v1.KeyAnswer.chains:type_name -> ed3k.v1.SignedChain
+	128, // 133: ed3k.v1.KeyAnswer.pass:type_name -> ed3k.v1.SignedPass
+	129, // 134: ed3k.v1.KeyAnswer.pass_proof:type_name -> ed3k.v1.PassProof
+	17,  // 135: ed3k.v1.FriendRecord.peer:type_name -> ed3k.v1.Peer
+	30,  // 136: ed3k.v1.FriendRequest.sigs:type_name -> ed3k.v1.Signature
+	30,  // 137: ed3k.v1.NodeFile.sigs:type_name -> ed3k.v1.Signature
+	139, // 138: ed3k.v1.FilterList.groups:type_name -> ed3k.v1.Group
+	9,   // 139: ed3k.v1.Group.subject:type_name -> ed3k.v1.Subject
+	10,  // 140: ed3k.v1.Group.verdict:type_name -> ed3k.v1.Verdict
+	141, // 141: ed3k.v1.MailPart.head:type_name -> ed3k.v1.MailHead
+	30,  // 142: ed3k.v1.MailHead.sigs:type_name -> ed3k.v1.Signature
+	30,  // 143: ed3k.v1.MarketDoc.sigs:type_name -> ed3k.v1.Signature
+	146, // 144: ed3k.v1.Profile.mailbox:type_name -> ed3k.v1.MailBox
+	147, // 145: ed3k.v1.Profile.moderator:type_name -> ed3k.v1.Moderator
+	149, // 146: ed3k.v1.Moderator.fee_fixed:type_name -> ed3k.v1.Price
+	11,  // 147: ed3k.v1.Listing.type:type_name -> ed3k.v1.ListingType
+	150, // 148: ed3k.v1.Listing.images:type_name -> ed3k.v1.Image
+	149, // 149: ed3k.v1.Listing.price:type_name -> ed3k.v1.Price
+	151, // 150: ed3k.v1.Listing.options:type_name -> ed3k.v1.Option
+	152, // 151: ed3k.v1.Listing.skus:type_name -> ed3k.v1.Sku
+	153, // 152: ed3k.v1.Listing.shipping:type_name -> ed3k.v1.Shipping
+	149, // 153: ed3k.v1.Listing.coupon_off:type_name -> ed3k.v1.Price
+	154, // 154: ed3k.v1.Shipping.services:type_name -> ed3k.v1.Service
+	149, // 155: ed3k.v1.Service.price:type_name -> ed3k.v1.Price
+	149, // 156: ed3k.v1.Service.extra_item:type_name -> ed3k.v1.Price
+	157, // 157: ed3k.v1.Market.sections:type_name -> ed3k.v1.Section
+	12,  // 158: ed3k.v1.Section.kind:type_name -> ed3k.v1.SectionKind
+	30,  // 159: ed3k.v1.Section.sigs:type_name -> ed3k.v1.Signature
+	159, // 160: ed3k.v1.Order.items:type_name -> ed3k.v1.Item
+	13,  // 161: ed3k.v1.Order.method:type_name -> ed3k.v1.PayMethod
+	146, // 162: ed3k.v1.Order.mailbox:type_name -> ed3k.v1.MailBox
+	149, // 163: ed3k.v1.Order.total:type_name -> ed3k.v1.Price
+	149, // 164: ed3k.v1.Confirm.total:type_name -> ed3k.v1.Price
+	163, // 165: ed3k.v1.Fulfill.delivery:type_name -> ed3k.v1.Delivery
+	143, // 166: ed3k.v1.Delivery.file:type_name -> ed3k.v1.MailFile
+	167, // [167:167] is the sub-list for method output_type
+	167, // [167:167] is the sub-list for method input_type
+	167, // [167:167] is the sub-list for extension type_name
+	167, // [167:167] is the sub-list for extension extendee
+	0,   // [0:167] is the sub-list for field type_name
 }
 
 func init() { file_ed3k_proto_init() }
@@ -9248,17 +13968,18 @@ func file_ed3k_proto_init() {
 	file_ed3k_proto_msgTypes[16].OneofWrappers = []any{}
 	file_ed3k_proto_msgTypes[32].OneofWrappers = []any{}
 	file_ed3k_proto_msgTypes[35].OneofWrappers = []any{}
-	file_ed3k_proto_msgTypes[55].OneofWrappers = []any{}
-	file_ed3k_proto_msgTypes[57].OneofWrappers = []any{}
-	file_ed3k_proto_msgTypes[78].OneofWrappers = []any{}
-	file_ed3k_proto_msgTypes[79].OneofWrappers = []any{}
+	file_ed3k_proto_msgTypes[63].OneofWrappers = []any{}
+	file_ed3k_proto_msgTypes[65].OneofWrappers = []any{}
+	file_ed3k_proto_msgTypes[98].OneofWrappers = []any{}
+	file_ed3k_proto_msgTypes[99].OneofWrappers = []any{}
+	file_ed3k_proto_msgTypes[124].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ed3k_proto_rawDesc), len(file_ed3k_proto_rawDesc)),
-			NumEnums:      12,
-			NumMessages:   103,
+			NumEnums:      17,
+			NumMessages:   151,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
