@@ -265,6 +265,8 @@ func TestServerIdentIPv6Status(t *testing.T) {
 				c.info.IPv6 = clientV6
 			}
 			c.info.IPv6Reachable = tc.reachable
+			// As the login path records it: a dial-back ran when probing is on.
+			c.v6Probed = c.v6ProbeRequired(len(c.info.IPv6))
 			c.logged = tc.logged
 			c.infoMu.Unlock()
 

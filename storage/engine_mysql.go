@@ -409,6 +409,29 @@ func (m *MySQLEngine) UpdateClient(oldID uint32, oldPort uint16, info ClientInfo
 	})
 }
 
+// UpdateClientIPv6 rewrites the client row's ipv6 and ipv6_reachable; sources join
+// on it.
+func (m *MySQLEngine) UpdateClientIPv6(info ClientInfo) error {
+	if err := m.ensureDB(); err != nil {
+		return err
+	}
+	if info.StoreID == 0 && len(info.Hash) == 0 {
+		return nil
+	}
+	defer m.sessions.lock(info.Hash)()
+	return m.execRetry("update client ipv6", func() error {
+		var err error
+		if info.StoreID != 0 {
+			_, err = m.db.Exec(`UPDATE clients SET ipv6 = ?, ipv6_reachable = ? WHERE id = ?`,
+				nullableIPv6(info.IPv6), boolToTinyInt(info.IPv6Reachable), info.StoreID)
+		} else {
+			_, err = m.db.Exec(`UPDATE clients SET ipv6 = ?, ipv6_reachable = ? WHERE hash = ?`,
+				nullableIPv6(info.IPv6), boolToTinyInt(info.IPv6Reachable), info.Hash)
+		}
+		return err
+	})
+}
+
 // ReleaseOrphans reads the online rows through the online index, then disconnects
 // each one held does not claim, as its own session's close would.
 func (m *MySQLEngine) ReleaseOrphans(held func(hash []byte) bool) ([][]byte, error) {

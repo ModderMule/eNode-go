@@ -439,6 +439,46 @@ func (m *MemoryEngine) UpdateClient(_ uint32, _ uint16, info ClientInfo) error {
 	return nil
 }
 
+// UpdateClientIPv6 rewrites the session's IPv6 and its reachability, and what its
+// sources carry of both. The session's peer is replaced rather than written to: its
+// slices are shared with source lists already handed out.
+func (m *MemoryEngine) UpdateClientIPv6(info ClientInfo) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	storeID := info.StoreID
+	if storeID == 0 {
+		storeID = m.resolveStoreIDLocked(info)
+	}
+	client, ok := m.clients[storeID]
+	if !ok {
+		return nil
+	}
+	ipv6 := append([]byte(nil), info.IPv6...)
+	client.info.IPv6, client.info.IPv6Reachable = ipv6, info.IPv6Reachable
+	old := client.peer
+	peer := &memPeer{storeID: storeID, ipv6: ipv6}
+	if old != nil {
+		peer.hash = old.hash
+	} else {
+		peer.hash = append([]byte(nil), client.info.Hash...)
+	}
+	client.peer = peer
+	for _, head := range client.offered {
+		m.eachSourceLocked(head, func(s *memSource) {
+			if s.peer == nil || s.peer.storeID != storeID {
+				return
+			}
+			s.peer = peer
+			if info.IPv6Reachable {
+				s.flags |= srcIPv6Reachable
+			} else {
+				s.flags &^= srcIPv6Reachable
+			}
+		})
+	}
+	return nil
+}
+
 // ReleaseOrphans disconnects every client whose hash held does not claim. held is
 // called with the lock free, so it may take locks of its own.
 func (m *MemoryEngine) ReleaseOrphans(held func(hash []byte) bool) ([][]byte, error) {

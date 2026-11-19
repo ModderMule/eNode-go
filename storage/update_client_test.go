@@ -63,3 +63,47 @@ func TestMemoryUpdateClientUnknownSession(t *testing.T) {
 		t.Fatal("UpdateClient created a client")
 	}
 }
+
+// UpdateClientIPv6 moves a session's sources to a new IPv6 and reachability, and a
+// withdraw takes the address off them.
+func TestMemoryUpdateClientIPv6(t *testing.T) {
+	engine := NewMemoryEngine()
+	info := ClientInfo{ID: 0x00123457, IPv4: 0x0100000a, Port: 4662, LowID: true, Hash: []byte("update-client-v6")}
+	var err error
+	if info.StoreID, err = engine.Connect(info); err != nil {
+		t.Fatal(err)
+	}
+	file := File{Hash: []byte("update-client-f6"), Name: "updatev6.iso", Size: 10, Type: "Pro"}
+	engine.AddFile(file, info)
+	before := engine.GetSources(file.Hash, file.Size)
+
+	addr := []byte{0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0a}
+	info.IPv6, info.IPv6Reachable = addr, true
+	if err := engine.UpdateClientIPv6(info); err != nil {
+		t.Fatal(err)
+	}
+	published := engine.GetSources(file.Hash, file.Size)
+
+	info.IPv6, info.IPv6Reachable = nil, false
+	if err := engine.UpdateClientIPv6(info); err != nil {
+		t.Fatal(err)
+	}
+	withdrawn := engine.GetSources(file.Hash, file.Size)
+	t.Logf("input: no ipv6 -> %x reachable -> withdrawn; output: %+v / %+v / %+v", addr, before, published, withdrawn)
+	if len(before) != 1 || len(before[0].IPv6) != 0 {
+		t.Fatalf("before = %+v", before)
+	}
+	if len(published) != 1 || string(published[0].IPv6) != string(addr) || !published[0].IPv6Reachable {
+		t.Fatalf("published = %+v", published)
+	}
+	if len(withdrawn) != 1 || len(withdrawn[0].IPv6) != 0 || withdrawn[0].IPv6Reachable {
+		t.Fatalf("withdrawn = %+v", withdrawn)
+	}
+	// A slice handed out before the update is not written to.
+	if string(published[0].IPv6) != string(addr) {
+		t.Fatal("an earlier source list changed under its reader")
+	}
+	if err := engine.UpdateClientIPv6(ClientInfo{StoreID: 99}); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -43,6 +43,10 @@ type Engine interface {
 	// sources follow, and a search result naming it as oldID:oldPort names the new
 	// address.
 	UpdateClient(oldID uint32, oldPort uint16, info ClientInfo) error
+	// UpdateClientIPv6 rewrites a live session's (info.StoreID, else info.Hash) IPv6
+	// and IPv6Reachable: OP_IPV6_UPDATE brought a new address, a withdraw, or the
+	// dial-back verdict on one. Its sources follow.
+	UpdateClientIPv6(info ClientInfo) error
 	// ReleaseOrphans disconnects every client still online whose hash held does not
 	// claim, and returns those hashes. For a successor of a handover, whose storage
 	// kept the predecessor's online flags (Config.KeepOnline): a row whose session

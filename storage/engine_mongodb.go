@@ -346,6 +346,23 @@ func (m *MongoDBEngine) UpdateClient(oldID uint32, oldPort uint16, info ClientIn
 	return m.setResultSource(ctx, info.Hash, oldID, oldPort, info.ID, info.Port)
 }
 
+// UpdateClientIPv6 rewrites the client document's ipv6 and ipv6_reachable; sources
+// look them up by hash.
+func (m *MongoDBEngine) UpdateClientIPv6(info ClientInfo) error {
+	if err := m.ensureDB(); err != nil {
+		return err
+	}
+	if len(info.Hash) == 0 {
+		return nil
+	}
+	defer m.sessions.lock(info.Hash)()
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.Timeout)
+	defer cancel()
+	_, err := m.db.Collection("clients").UpdateOne(ctx, bson.M{"hash": info.Hash},
+		bson.M{"$set": bson.M{"ipv6": nullableIPv6(info.IPv6), "ipv6_reachable": info.IPv6Reachable}})
+	return err
+}
+
 // OfferedCount answers from the count Connect, addFilesChunk and Disconnect keep.
 func (m *MongoDBEngine) OfferedCount(info ClientInfo) int {
 	m.offeredMu.Lock()

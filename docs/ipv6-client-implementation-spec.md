@@ -22,6 +22,9 @@ to the pre-IPv6 server. IPv6 is entirely additive and opt-in.
 | `IPV6ST_REACHABLE` | `0x02` | `ST_IPV6_STATUS` bit: that address is treated as reachable — you are published as a v6 source |
 | `IPV6ST_PROBED` | `0x04` | `ST_IPV6_STATUS` bit: the verdict came from a real dial-back, not a trust default |
 | `SRV_TCPFLG_IPV6` | `0x00004000` | `OP_IDCHANGE` / `OP_SERVERIDENT` flags word |
+| `SRV_TCPFLG_IPV6_UPDATE` | `0x00008000` | `OP_IDCHANGE` / `OP_SERVERIDENT` flags word — `OP_IPV6_UPDATE` accepted (§2a) |
+| `SRV_TCPFLG_IPV6_PROBE` | `0x00400000` | `OP_IDCHANGE` / `OP_SERVERIDENT` flags word — your IPv6 is dialled back before it is published (§2a) |
+| `OP_IPV6_UPDATE` | `0x63`, 16 bytes | client→server, TCP, after login (§2a) |
 | `SRV_UDPFLG_IPV6` | `0x00004000` | `OP_GLOBSERVSTATRES` UDP flags word |
 | IPv6 source sentinel | ClientID `0xFFFFFFFF` | `OP_FOUNDSOURCES(_OBFU)`, `OP_GLOBFOUNDSOURCES` |
 | `OP_GETSOURCES_IPV6` | `0x24` | client→server, TCP |
@@ -121,6 +124,64 @@ A dual-stack client with a routable IPv4 still gets a HighID as usual.
 
 ---
 
+## 2a. Updating your IPv6 after login — `OP_IPV6_UPDATE (0x63)`
+
+ed2k-server's extension (its issues #34, #43 and #60), taken as is so that aMule,
+eMuleQt and both servers speak one protocol. Two `OP_IDCHANGE` flag bits announce it:
+
+| Bit | Set when | Meaning |
+|---|---|---|
+| `SRV_TCPFLG_IPV6_UPDATE (0x8000)` | `ipv6.publishSources` | the server accepts `OP_IPV6_UPDATE` |
+| `SRV_TCPFLG_IPV6_PROBE (0x400000)` | `ipv6.publishSources` and `ipv6.probeReachability` | the server dials your IPv6 back before it publishes it |
+
+Both need a dual-stack server (`SRV_TCPFLG_IPV6 0x4000`).
+
+**Why a client needs it.** The login comes before `OP_IDCHANGE`, so at login a client
+cannot know whether this server probes. A server that does not probe publishes the
+login's `CT_MOD_IP_V6` on trust (`ST_IPV6_STATUS 0x03`), and if the address does not
+take inbound connections, peers get an IPv6 source they cannot dial. So aMule puts
+in the login tag only an address already proven (a dial-back or an inbound peer in
+the last 24 h, or the user's "always advertise" choice), and sends an unproven one
+in `OP_IPV6_UPDATE` right after `OP_IDCHANGE`, and only to a server that set
+`0x400000`. On a probing server both ways cost one dial and give the same verdict.
+The update also carries later changes without a new login: a late interface, a new
+prefix from the ISP, or a withdraw.
+
+eMuleQt deliberately diverges: it sends its address in the login tag always (servers
+without `0x8000`, older eNode-go among them, can still probe it), and uses
+`OP_IPV6_UPDATE` only for later changes and the pinhole repeat. This server probes the
+login tag like an update, so both ways work.
+
+**Packet.** `PR_ED2K`, opcode `0x63`, payload exactly 16 bytes: your new public IPv6
+in network byte order, or 16 zero bytes to withdraw it. No reply. Send it only to a
+server that set `0x8000`; this server drops it otherwise (with
+`ipv6.publishSources` off) and drops any other payload length.
+
+**What the server does.**
+
+- A session that arrived over IPv6 keeps the address it arrived from and ignores
+  the update.
+- **Zeros** withdraw the address and your v6 capability: you are no longer published
+  as an IPv6 source and get no IPv6 records.
+- **Any other address** makes you able to receive IPv6 records. Only a public one
+  (§2) is stored and published.
+- **A new public address** replaces the old one in every source you publish, at
+  once, unpublished. With probing on it is dialled back (`[address]:login port`, the
+  same hello exchange as the login's dial-back); the verdict arrives in a **fresh
+  `OP_SERVERIDENT`** with `ST_IPV6_STATUS` `0x07` (published) or `0x05` (not
+  published). With probing off it is published on trust and the fresh ident says
+  `0x03` at once.
+- **The same address again** starts nothing while its dial-back runs or after one
+  passed. After one **failed**, it is dialled again: send the repeat once when you
+  believe a pinhole has opened (a UPnP/PCP mapping, a firewall rule).
+- **At most 4 dial-backs a session**, the login's own included, since each goes
+  where the client points it. Past the cap a new address is stored but neither
+  dialled nor published (status `0x01`), and no ident is sent.
+- While a dial-back runs, `ST_IPV6_STATUS` in any ident is `0x01` (held).
+- A verdict for an address you have since replaced or withdrawn is dropped.
+
+---
+
 ## 3. Reading the server's IPv6 capability
 
 - **Flags word.** `SRV_TCPFLG_IPV6 (0x4000)` in `OP_IDCHANGE` / `OP_SERVERIDENT`
@@ -193,7 +254,7 @@ v4-connected client: *is the IPv6 I advertised actually working?*
 
 | Bit | Meaning |
 |---|---|
-| `IPV6ST_HAVE (0x01)` | the server holds a public IPv6 for this session (from your `CT_MOD_IP_V6`, or from a v6 connection) |
+| `IPV6ST_HAVE (0x01)` | the server holds a public IPv6 for this session (from your `CT_MOD_IP_V6` or `OP_IPV6_UPDATE`, or from a v6 connection) |
 | `IPV6ST_REACHABLE (0x02)` | that address is treated as reachable on the port you advertised — you are published as an IPv6 source |
 | `IPV6ST_PROBED (0x04)` | the reachability verdict came from an actual dial-back, not a trust default |
 
@@ -210,6 +271,7 @@ What the combinations mean:
 | dial-back succeeded | `HAVE\|REACHABLE\|PROBED` | verified — you are reachable as an IPv6 source |
 | dial-back failed | `HAVE\|PROBED` | verified unreachable — your v6 port is firewalled or the address is wrong, you are **not** published as a v6 source, and nobody is asked to call you back over IPv6 |
 | `tcp.probeIPv6` off on the server | `HAVE\|REACHABLE` | assumed, not tested |
+| dial-back running (`OP_IPV6_UPDATE`, §2a), or past the 4-dial cap | `HAVE` | held — not published, no verdict yet |
 | (tag absent) | — | the server has no verdict; assume nothing |
 
 The dial-back runs whichever family your session arrived on. Being connected over

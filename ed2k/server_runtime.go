@@ -826,6 +826,9 @@ type tcpClient struct {
 	// lastRecheck is when the last one was taken on, in seconds since connectedAt
 	// plus one (0: never); own goroutine only. Both sit in the padding here.
 	recheckBusy bool
+	// v6Probing is set while an IPv6 dial-back runs for the session's current
+	// address; under infoMu, in the padding here. See v6Dials.
+	v6Probing   bool
 	lastRecheck uint32
 	// nick and software are what the client called itself at login, kept for the
 	// admin client list only. Written once under infoMu.
@@ -877,6 +880,12 @@ type tcpClient struct {
 	// session dropped, as hardLimitHit does. Kept beside the two bools above so the
 	// three share one word (see TestNatCallbackAddsNoSessionMemory).
 	banlistDropped bool
+	// v6Dials counts this session's IPv6 dial-backs, the login's included (capped at
+	// maxIPv6Dials); v6Probed is set once one finished for the current address, so
+	// info.IPv6Reachable is a dial-back verdict. Under infoMu, in the padding before
+	// offerV1 (docs/ipv6-client-implementation-spec.md §2a).
+	v6Dials  uint8
+	v6Probed bool
 	// offerV1 is the OFFERFILES v1 policy this session asked for at login and was
 	// advertised in its post-login OP_SERVERIDENT, with its pacing bucket; nil for a
 	// legacy session. Every file limit applied to a v1 session comes from it, not
@@ -1277,6 +1286,8 @@ func (c *tcpClient) handleED2K(opcode uint8, data *Buffer) {
 		c.handleCallbackRequest(data)
 	case OpRecheckFirewall:
 		c.handleRecheckFirewall(data)
+	case OpIPv6Update:
+		c.handleIPv6Update(data)
 	case OpDisconnect:
 		// eMule sends this before closing. Acting on it releases the session, its LowID
 		// and its storage row immediately instead of after the read loop notices the FIN —
@@ -1511,6 +1522,9 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		}
 		c.infoMu.Lock()
 		c.info.IPv6Reachable = reachable
+		if needV6Probe {
+			c.v6Dials, c.v6Probed = 1, true
+		}
 		c.infoMu.Unlock()
 		logging.Debugf("ipv6 reachability remote=%s ipv6=%s reachable=%t connectedV6=%t",
 			c.remoteHost, net.IP(v6Bytes).String(), reachable, c.connectedV6)
@@ -2266,6 +2280,12 @@ func (c *tcpClient) sendCallbackFailed() {
 // sendServerIdent sends OP_SERVERIDENT. offerV1, when not nil, adds the OFFERFILES v1
 // advertisement, which only the post-login packet of a session that asked carries.
 func (c *tcpClient) sendServerIdent(offerV1 *offerV1Policy) {
+	_ = c.writePacket(c.buildServerIdent(offerV1))
+}
+
+// buildServerIdent is the OP_SERVERIDENT sendServerIdent sends, nil when it cannot be
+// built.
+func (c *tcpClient) buildServerIdent(offerV1 *offerV1Policy) *Buffer {
 	clientV6, v6Status := c.ipv6Reflection()
 	cfg := c.server.tcp()
 	packet, err := BuildServerIdentPacket(ServerConfig{
@@ -2287,9 +2307,9 @@ func (c *tcpClient) sendServerIdent(offerV1 *offerV1Policy) {
 	})
 	if err != nil {
 		logging.Warnf("tcp server ident not sent remote=%s err=%v", c.remoteHost, err)
-		return
+		return nil
 	}
-	_ = c.writePacket(packet)
+	return packet
 }
 
 func (c *tcpClient) sendServerMessage(message string) {
@@ -2320,6 +2340,13 @@ func (c *tcpClient) sendCallbackRequestedIPv6(ipv6 []byte, port uint16) error {
 }
 
 func (c *tcpClient) writePacket(packet *Buffer) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.writePacketLocked(packet)
+}
+
+// writePacketLocked is writePacket for a caller that holds writeMu.
+func (c *tcpClient) writePacketLocked(packet *Buffer) error {
 	if packet == nil {
 		return nil
 	}
@@ -2330,7 +2357,7 @@ func (c *tcpClient) writePacket(packet *Buffer) error {
 		}
 		packet = unpacked
 	}
-	return c.writeRaw(packet.Bytes())
+	return c.writeRawLocked(packet.Bytes())
 }
 
 func (c *tcpClient) writeRaw(data []byte) error {
@@ -2698,11 +2725,28 @@ func (s *ServerRuntime) probeIPv6Reachable(client *tcpClient) bool {
 	if client == nil {
 		return false
 	}
-	info := client.snapshotInfo()
-	if len(info.IPv6) != 16 || info.Port == 0 {
+	return s.probeIPv6ReachableAt(client, client.snapshotInfo().IPv6)
+}
+
+// isIPv6ReachableAt is isIPv6Reachable for addr rather than the session's current
+// address: OP_IPV6_UPDATE dials the address it was given, whatever comes after.
+func (s *ServerRuntime) isIPv6ReachableAt(client *tcpClient, addr []byte) bool {
+	if s.ipv6Probe != nil {
+		return s.ipv6Probe(client)
+	}
+	return s.probeIPv6ReachableAt(client, addr)
+}
+
+// probeIPv6ReachableAt is probeIPv6Reachable against addr.
+func (s *ServerRuntime) probeIPv6ReachableAt(client *tcpClient, addr []byte) bool {
+	if client == nil {
 		return false
 	}
-	host := net.IP(info.IPv6).String()
+	info := client.snapshotInfo()
+	if len(addr) != 16 || info.Port == 0 {
+		return false
+	}
+	host := net.IP(addr).String()
 	if s.tcp().SupportCrypt {
 		if ok, err := s.probeClient(client, info.Port, true, "tcp6", host); err == nil && ok {
 			return true
@@ -3474,6 +3518,10 @@ func loginEd3k(tags []NamedTag) []byte {
 // separate present flag: the *presence* of the tag — even with an unusable value
 // — signals the client understands the IPv6 source formats, which is what gates
 // sending it sentinel sources. eMuleAI ServerConnect.cpp:220-223.
+//
+// Deliberately unlike aMule, which sends only a proven address here and an unproven
+// one in OP_IPV6_UPDATE: eMuleQt sends its address at login always, and this server
+// probes the login address just like an update (handleIPv6Update), so both work.
 func loginIPv6(tags []NamedTag) (addr []byte, present bool) {
 	for _, t := range tags {
 		if t.Name != "ipv6" {
@@ -3500,8 +3548,7 @@ func loginIPv6(tags []NamedTag) (addr []byte, present bool) {
 // home routers — still drops the unsolicited SYN a peer sends to the eD2K port,
 // and the existing session opens no hole for it, since the dial-back targets the
 // listen port from a fresh source port and so matches no tracked connection. Only
-// turning probing off skips the dial. Shared with ipv6Reflection so the
-// IPv6StatusProbed bit cannot drift away from what the login path actually did.
+// turning probing off skips the dial.
 func (c *tcpClient) v6ProbeRequired(v6Len int) bool {
 	return c.server.publishV6Sources() && v6Len == 16 && c.server.tcp().ProbeIPv6
 }
@@ -3536,18 +3583,9 @@ func (c *tcpClient) ipv6Reflection() (peerV6 []byte, status uint8) {
 	if !c.server.publishV6Sources() || !c.isLogged() {
 		return peerV6, 0
 	}
-	info := c.snapshotInfo()
-	if len(info.IPv6) != 16 {
-		return peerV6, 0
-	}
-	status = IPv6StatusHave
-	if info.IPv6Reachable {
-		status |= IPv6StatusReachable
-	}
-	if c.v6ProbeRequired(len(info.IPv6)) {
-		status |= IPv6StatusProbed
-	}
-	return peerV6, status
+	c.infoMu.RLock()
+	defer c.infoMu.RUnlock()
+	return peerV6, c.ipv6StatusLocked()
 }
 
 // cryptOptionsFromLoginFlags maps the login capability bits to the per-source

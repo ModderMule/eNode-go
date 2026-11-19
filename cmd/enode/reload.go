@@ -289,6 +289,8 @@ func serverListenConfigs(cfg config.Config) (ed2k.TCPServerConfig, ed2k.UDPServe
 		NatWake:         natWake,
 		RelatedSearch:   cfg.TCP.RelatedSearch.EnabledOrDefault(),
 		FirewallRecheck: cfg.TCP.FirewallRecheckOrDefault(),
+		IPv6Update:      dualStack && cfg.IPv6.PublishSourcesOrDefault(),
+		IPv6Probe:       dualStack && cfg.IPv6.PublishSourcesOrDefault() && cfg.IPv6.ProbeReachabilityOrDefault(),
 	}
 	udpCfg := ed2k.UDPServerConfig{
 		Address:         cfg.Address,

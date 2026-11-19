@@ -154,6 +154,14 @@ const OpNatWake uint8 = 0x46
 // surveyed eMule tree, so a legacy client drops it in its ProcessPacket default.
 const OpCallbackReqdIPv6 uint8 = 0x26
 
+// OpIPv6Update is ed2k-server's OP_IPV6_UPDATE (issue #34), client→server after
+// login: <ipv6 16>, the client's new public IPv6, or 16 zero bytes to withdraw it.
+// No reply; the dial-back verdict arrives in a fresh OP_SERVERIDENT (TagIPv6Status).
+// Accepted only from a server that set FlagIPv6Update. A repeat of an address whose
+// dial-back failed dials it again (ed2k-server 0.9.90, andrey23127/ed2k-server#60),
+// within maxIPv6Dials per session. See docs/ipv6-client-implementation-spec.md §2a.
+const OpIPv6Update uint8 = 0x63
+
 // OpRecheckFirewall is client→server, after login: <tcpPort uint16 LE>, or empty / 0
 // for the session's current port. The server re-tests the port on the existing
 // session and answers with a fresh OP_IDCHANGE: HighID if now reachable, else the
@@ -456,6 +464,14 @@ const (
 	// in the UDP word also FlagForeignCallback), 0x400000 (ed2k-server IPV6_PROBE).
 	// New eNode-go bits go above 0x200000 (FlagNatWake, FlagFirewallRecheck below).
 	FlagNatRendezvous uint32 = 0x40000
+	// FlagIPv6Update (TCP word) is ed2k-server's bit for "OP_IPV6_UPDATE accepted"
+	// (issue #34). Set with ipv6.publishSources.
+	FlagIPv6Update uint32 = 0x8000
+	// FlagIPv6Probe (TCP word) is ed2k-server's IPV6_PROBE (issue #43): the server dials
+	// a client's IPv6 back before it publishes it. Set with ipv6.publishSources and
+	// ipv6.probeReachability. aMule sends an unproved address only to a server that
+	// sets it, and then in OP_IPV6_UPDATE rather than the login tag.
+	FlagIPv6Probe uint32 = 0x400000
 	// FlagNatWake advertises the PR_NAT TCP wake-up (OpNatWake): this server wakes a
 	// logged-in PR_NAT target that has no registration, so a client that set
 	// SrvCapNatWake needs no standing PR_NAT keepalive. Set on the TCP and UDP words
@@ -463,7 +479,7 @@ const (
 	// first bit free everywhere (ed2k-server README bit table, 2026-10-25).
 	FlagNatWake uint32 = 0x200000
 	// FlagFirewallRecheck (TCP word) advertises OpRecheckFirewall; set while
-	// tcp.firewallRecheck is on. 0x400000 is taken by ed2k-server's IPV6_PROBE.
+	// tcp.firewallRecheck is on. 0x400000 is ed2k-server's IPV6_PROBE (FlagIPv6Probe).
 	FlagFirewallRecheck uint32 = 0x800000
 	// FlagForeignCallback (UDP word only) advertises ed2k-server's hole-punch extension
 	// including requests from clients logged in elsewhere (andrey23127/ed2k-server#40):

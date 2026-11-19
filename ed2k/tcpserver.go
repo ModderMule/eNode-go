@@ -39,6 +39,11 @@ type TCPServerConfig struct {
 	// FirewallRecheck advertises FlagFirewallRecheck (0x800000): a logged-in client
 	// may ask for its port to be re-tested (OpRecheckFirewall, tcp.firewallRecheck).
 	FirewallRecheck bool
+	// IPv6Update advertises FlagIPv6Update (0x8000): OP_IPV6_UPDATE is accepted.
+	// IPv6Probe advertises FlagIPv6Probe (0x400000): a client's IPv6 is dialled back
+	// before it is published. Both need DualStack.
+	IPv6Update bool
+	IPv6Probe  bool
 	// Gate holds the accept loop while closed; nil accepts from the start. See Gate.
 	Gate *Gate
 	// PinIPv4 is our advertised IPv4 on a wildcard bind (UDPServerConfig.SourceIPv4).
@@ -52,7 +57,8 @@ type TCPServerConfig struct {
 //
 // Only bits eMule actually defines for the *server* word are emitted
 // (srchybrid/Server.h): COMPRESSION 0x01, NEWTAGS 0x08, UNICODE 0x10,
-// RELATEDSEARCH 0x40 (when enabled), LARGEFILES 0x100, TCPOBFUSCATION 0x400, and the IPv6 extension bit 0x4000. The
+// RELATEDSEARCH 0x40 (when enabled), LARGEFILES 0x100, TCPOBFUSCATION 0x400, the IPv6 extension bit 0x4000
+// and ed2k-server's IPv6 update 0x8000 and probe 0x400000 bits. The
 // previous build packed client-side SRVCAP_* meanings (IP-in-login 0x02, aux-port
 // 0x04, support-crypt 0x200, require-crypt 0x800) into this word — bits eMule
 // reads as undefined and ignores. TCP obfuscation is advertised from SupportCrypt
@@ -65,6 +71,12 @@ func BuildTCPFlags(cfg TCPServerConfig) uint32 {
 	}
 	if cfg.DualStack {
 		flags += FlagIPv6
+		if cfg.IPv6Update {
+			flags += FlagIPv6Update
+		}
+		if cfg.IPv6Probe {
+			flags += FlagIPv6Probe
+		}
 	}
 	if cfg.NatRendezvous {
 		flags += FlagNatRendezvous

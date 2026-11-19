@@ -96,6 +96,11 @@ Protocol doc: [Server <=> Client Communication (OP_ meanings)](docs/server-clien
   is reachable (late VPN/NAT-PMP mapping) or has moved, and is promoted to HighID on the
   same session (`tcp.firewallRecheck`, flag 0x800000). See
   [`docs/server-client-communication.md`](docs/server-client-communication.md#firewall-recheck).
+- IPv6 address updates: a logged-in client sends `OP_IPV6_UPDATE` (0x63) with a new
+  public IPv6, or zeros to withdraw it, and the server dials it back before
+  publishing it (flags 0x8000 and 0x400000, the same extension as ed2k-server and
+  aMule). See
+  [`docs/ipv6-client-implementation-spec.md`](docs/ipv6-client-implementation-spec.md#2a-updating-your-ipv6-after-login--op_ipv6_update-0x63).
 - Login required before any request: every TCP opcode but `OP_LOGINREQUEST` and
   `OP_DISCONNECT` is refused on a session that has not logged in, so nothing can reach
   the index without an identity the server can account for and clean up. See
@@ -237,7 +242,7 @@ ipv6:                        # IPv6 dual-stack; omit the whole block for IPv4-on
   address: ""                # Explicit IPv6 bind; "" lets the top-level address govern
   dynIp6: "auto"             # Public IPv6, "auto" to resolve via testUrls6, or "" to not advertise
   publishSources: true       # Emit the IPv6 sentinel and honour the OP_*_IPV6 opcodes
-  probeReachability: true    # Verify a client's IPv6 is reachable before publishing it
+  probeReachability: true    # Verify a client's IPv6 is reachable before publishing it (flag 0x400000)
   testUrls6:                 # Used only when dynIp6=auto, first valid IPv6 wins (temporary ones swapped for a stable one)
     - "https://v6.ident.me"
     - "https://api64.ipify.org"
