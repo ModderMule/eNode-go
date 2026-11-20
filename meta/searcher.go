@@ -39,6 +39,10 @@ const (
 	NetworkWeb = "web"
 )
 
+// networkNames are every meta network. A search word equal to one of them, in NOT
+// position, excludes that network (Query.ExcludeNetworks).
+var networkNames = []string{NetworkKad, NetworkTorrent, NetworkUsenet, NetworkWeb}
+
 // downBackoff is how long a daemon that answered "unavailable", "unimplemented" or
 // "unauthenticated" is skipped by live searches. Those answers will not change
 // between one search and the next, and without this every search would pay for them.
@@ -84,6 +88,9 @@ type searcherState struct {
 	// torrentPrefix is the torrent network's name prefix, which a BitTorrent row
 	// carries whichever daemon sent it.
 	torrentPrefix string
+	// excludeByName is config.excludeNetworksByName: whether Query.ExcludeNetworks is
+	// honoured.
+	excludeByName bool
 }
 
 // source is one network: its daemon client, its feed and its limits. The client,
@@ -254,12 +261,19 @@ func (s *Searcher) HoldingNetwork(catalogID string) string {
 // torrent is its info hash — is dropped: torrent-crawler's and Kad's rows know
 // their sources, a web page's do not. An eD2K file both send is left to
 // mergeMetaResults, which keeps the first by hash, and Kad answers first.
+//
+// A network the search excludes by name (`-torrent`; see Query.ExcludeNetworks) is
+// not asked, and with torrent excluded the web network's BitTorrent rows are dropped
+// too, since they are served as torrents. config.excludeNetworksByName turns this off.
 func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, nativeOnly bool) []storage.File {
 	st := s.state.Load()
 	if expr == nil || len(st.sources) == 0 {
 		return nil
 	}
 	q, hasTerms := BuildQuery(expr)
+	if !st.excludeByName {
+		q.ExcludeNetworks = nil
+	}
 
 	results := make([][]storage.File, len(st.sources))
 	settings := make([]*sourceSettings, len(st.sources))
@@ -267,6 +281,10 @@ func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, na
 	for i, src := range st.sources {
 		settings[i] = src.settings.Load()
 		if nativeOnly && !src.native && !src.mixed {
+			continue
+		}
+		if q.ExcludesNetwork(src.network) {
+			src.counters.skippedExcluded.Add(1)
 			continue
 		}
 		wg.Add(1)
@@ -289,6 +307,7 @@ func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, na
 		}
 	}
 
+	dropTorrents := q.ExcludesNetwork(NetworkTorrent)
 	var out []storage.File
 	for i, rows := range results {
 		src := st.sources[i]
@@ -297,6 +316,10 @@ func (s *Searcher) Search(ctx context.Context, expr *storage.SearchExpr, udp, na
 			if src.mixed {
 				if nativeOnly && !row.Meta.Native() {
 					src.counters.droppedNativeOnly.Add(1)
+					continue
+				}
+				if dropTorrents && isTorrentRow(row) {
+					src.counters.droppedExcluded.Add(1)
 					continue
 				}
 				if _, dup := sent[row.Meta.CatalogID]; dup {
@@ -329,7 +352,10 @@ func (s *Searcher) sources() []*source {
 // new settings. added are the sources built, removed the ones of old not kept.
 // Called with s.mu held, or before s is shared; s.cfg is still the old config.
 func (s *Searcher) buildState(cfg config.MetaSearchConfig, old *searcherState) (state *searcherState, added, removed []*source) {
-	state = &searcherState{torrentPrefix: cfg.Torrent.NamePrefixOrDefault(config.DefaultTorrentNamePrefix)}
+	state = &searcherState{
+		torrentPrefix: cfg.Torrent.NamePrefixOrDefault(config.DefaultTorrentNamePrefix),
+		excludeByName: cfg.ExcludeNetworksByNameOrDefault(),
+	}
 	switch {
 	case old != nil && cfg.Cache == s.cfg.Cache:
 		state.cache = old.cache
@@ -409,15 +435,10 @@ func (s *Searcher) buildState(cfg config.MetaSearchConfig, old *searcherState) (
 // of a mixed network (web), which is prefixed as a torrent. An eD2K file a web
 // page offered keeps the web prefix, as every network prefixes its rows.
 func (st *searcherState) prefixFor(src *source, set *sourceSettings, row storage.File) string {
-	if !src.mixed || row.Meta == nil {
-		return set.prefix
-	}
-	switch metahash.Kind(row.Meta.Kind) {
-	case metahash.KindBTV1, metahash.KindBTV2:
+	if src.mixed && isTorrentRow(row) {
 		return st.torrentPrefix
-	default:
-		return set.prefix
 	}
+	return set.prefix
 }
 
 // start runs the source's GetInfo poller and its feed until halt or until parent
@@ -685,4 +706,17 @@ func matchRelease(expr *storage.SearchExpr, rows []storage.File) []storage.File 
 		}
 	}
 	return out
+}
+
+// isTorrentRow reports whether a row is a BitTorrent release, whichever network sent
+// it: such a row is prefixed and excluded as a torrent.
+func isTorrentRow(row storage.File) bool {
+	if row.Meta == nil {
+		return false
+	}
+	switch metahash.Kind(row.Meta.Kind) {
+	case metahash.KindBTV1, metahash.KindBTV2:
+		return true
+	}
+	return false
 }

@@ -236,7 +236,8 @@ function seenUsers(m){
 function droppedRows(m){
   var reasons = [
     ['no match', m.droppedNoMatch], ['over cap', m.droppedCap], ['duplicate', m.droppedDuplicate],
-    ['unavailable', m.droppedUnavailable], ['invalid', m.droppedInvalid], ['native-only', m.droppedNativeOnly]
+    ['unavailable', m.droppedUnavailable], ['invalid', m.droppedInvalid], ['native-only', m.droppedNativeOnly],
+    ['excluded', m.droppedExcluded]
   ];
   var total = 0, parts = [];
   reasons.forEach(function(r){
@@ -295,6 +296,8 @@ function metaCard(m){
     ['Live calls', num(m.liveCalls) + ' · ' + num(m.liveErrors) + ' errors · ' + num(m.liveTimeouts) + ' timeouts'],
     ['Cache hits', lookups ? num(m.cacheHits) + ' / ' + num(lookups) + ' (' + Math.round(100 * m.cacheHits / lookups) + '%)' : '—'],
     ['UDP skipped', num(m.udpSkipped)],
+    ['Excluded', num(m.skippedExcluded) + ' searches',
+      'Searches that skipped this network because they excluded it by name, as in "name -torrent".'],
     ['API search', num(m.catalogCalls) + ' calls · ' + num(m.catalogErrors) + ' failed · ' + num(m.catalogCacheHits) + ' cached chunks'],
     ['Server status', m.countInServerStatus ? '+' + num(m.counted) + ' files' : 'not counted']
   ];

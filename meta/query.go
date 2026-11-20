@@ -2,6 +2,7 @@ package meta
 
 import (
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,11 +21,16 @@ import (
 // storage.MatchSearchExpr against the full tree, so the answer a client sees is exact
 // even where the request was not.
 type Query struct {
-	Terms    []string
-	Exclude  []string
-	FileType string
-	MinSize  uint64
-	MaxSize  uint64
+	Terms   []string
+	Exclude []string
+	// ExcludeNetworks are the meta networks the search excludes by name (`-torrent`,
+	// `NOT (usenet OR kad)`), lowercased: a word of Exclude that names a network.
+	// Such a network is not asked at all. The word also stays in Exclude, so the
+	// other networks and the eD2K results still drop rows whose name contains it.
+	ExcludeNetworks []string
+	FileType        string
+	MinSize         uint64
+	MaxSize         uint64
 	// MinSources is the client's availability floor (eMule's "Availability"), sent as
 	// Search.min_seeders: each daemon compares it with what its rows count as
 	// sources, and a Usenet daemon ignores it.
@@ -39,6 +45,7 @@ func BuildQuery(expr *storage.SearchExpr) (Query, bool) {
 	q.walk(expr)
 	q.Terms = dedupeFold(q.Terms)
 	q.Exclude = dedupeFold(q.Exclude)
+	q.ExcludeNetworks = dedupeFold(q.ExcludeNetworks)
 	return q, len(q.Terms) > 0
 }
 
@@ -74,7 +81,14 @@ func (q Query) Key() string {
 	b.WriteString(strconv.FormatUint(q.MaxSize, 10))
 	b.WriteByte(0)
 	b.WriteString(strconv.FormatUint(uint64(q.MinSources), 10))
+	b.WriteByte(0)
+	b.WriteString(strings.Join(sortedLower(q.ExcludeNetworks), "\x1f"))
 	return b.String()
+}
+
+// ExcludesNetwork reports whether the search excludes the meta network by name.
+func (q Query) ExcludesNetwork(network string) bool {
+	return slices.Contains(q.ExcludeNetworks, network)
 }
 
 // walk collects the constraints on the path of AND nodes from the root. A constraint
@@ -131,6 +145,11 @@ func (q *Query) walk(expr *storage.SearchExpr) {
 		q.walk(expr.Left)
 		if terms, ok := excludeTerms(expr.Right); ok {
 			q.Exclude = append(q.Exclude, terms...)
+			for _, term := range terms {
+				if network := strings.ToLower(term); isNetworkName(network) {
+					q.ExcludeNetworks = append(q.ExcludeNetworks, network)
+				}
+			}
 		}
 	}
 }
@@ -159,6 +178,11 @@ func excludeTerms(expr *storage.SearchExpr) ([]string, bool) {
 		}
 	}
 	return nil, false
+}
+
+// isNetworkName reports whether a lowercased search word names a meta network.
+func isNetworkName(word string) bool {
+	return slices.Contains(networkNames, word)
 }
 
 func singleTerm(text string) ([]string, bool) {

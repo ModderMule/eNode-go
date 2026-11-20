@@ -82,6 +82,8 @@ Tests pin both behaviours.
 1. The eD2K search tree is reduced to a `meta.Query` (`meta/query.go`):
    - Keywords on the AND path become the query.
    - A single word under AND NOT becomes an `exclude`.
+   - A NOT word that names a network excludes that network
+     (see [Excluding a network](#excluding-a-network)).
    - The file type and the size bounds carry over.
    - OR branches are dropped. That widens the query, which is safe.
    - A tree with no required keyword (for example `a OR b`) makes no live call.
@@ -102,6 +104,37 @@ A daemon that is slow, down, or has no search index adds at most its deadline to
 search and contributes nothing. It never fails the search. If a daemon answers
 `unavailable`, `unimplemented` or `unauthenticated`, live calls to it pause for 30 s,
 so each search does not pay for that answer again.
+
+### Excluding a network
+
+A search can leave out a whole meta network by naming it after NOT. The stock eMule
+client already turns `-word` into NOT, so `name -torrent` works with no client change.
+
+| word      | effect                                                                    |
+|-----------|---------------------------------------------------------------------------|
+| `torrent` | the torrent daemon is not asked; the web network's torrent rows are dropped |
+| `usenet`  | the Usenet daemon is not asked                                            |
+| `kad`     | the Kad daemon is not asked                                               |
+| `web`     | the web daemon is not asked                                               |
+
+- Case does not matter (`-Torrent`), and the words are the network names, not the
+  configurable name prefixes.
+- Several networks can be excluded together: `name -torrent -usenet` or
+  `name NOT (torrent OR usenet)`.
+- The word only excludes a network when every result must lack it: a single word
+  after NOT, or an OR of such words, on the AND path from the root. `name OR -torrent`
+  and `name -"torrent site"` exclude no network.
+- An excluded network costs nothing: no live call, no UDP slot, no cache entry.
+- The word is still an ordinary NOT for everything else. eD2K files and the other
+  networks' releases whose names contain "torrent" are dropped, as on any server, and
+  the other daemons get it in their `exclude`.
+
+The feature is on by default. `metaSearch.excludeNetworksByName: false` turns it off;
+the word is then only an ordinary NOT and every network is asked. A reload applies the
+change.
+
+The dashboard counts, per network, the searches that excluded it (`skippedExcluded`)
+and the web torrent rows dropped for `-torrent` (`droppedExcluded`).
 
 ### Sub-file rows
 
@@ -193,6 +226,7 @@ is about 250 MB.
 metaSearch:
   advertiseToLegacyClients: true
   udpMaxConcurrent: 16
+  excludeNetworksByName: true       # -torrent / -usenet / -kad / -web leave the network out
   torrent:                          # usenet: the same keys, url :9702, "[usenet] "
                                     # kad:    the same keys, url :9703, "[kad] "
                                     # web:    the same keys, url :9704, "[web] "
@@ -350,14 +384,16 @@ total, a line under it shows the advertised total. When meta search is on, a
 - search counters since start: TCP and UDP searches, rows served, rows downloaded
   (what the daemon sent in Search answers, before filtering or capping), live calls with
   their errors and timeouts, cache hits against lookups, and UDP searches that made no
-  live call because every `udpMaxConcurrent` slot was taken;
+  live call because every `udpMaxConcurrent` slot was taken, and searches that
+  excluded the network by name (`skippedExcluded`);
 - where the rows went between downloaded and served: rows taken from the result cache
   (`rowsFromCache`), and rows dropped by reason — release does not match the search
   (`droppedNoMatch`), past the TCP or UDP row cap (`droppedCap`), duplicate hash or a
   web row of a release another network sent (`droppedDuplicate`), not alive or
   complete under `onlyAvailable` (`droppedUnavailable`), unreadable daemon row
   (`droppedInvalid`), non-native row for a native-only requester
-  (`droppedNativeOnly`). Rows dropped later, when the meta rows are merged into the
+  (`droppedNativeOnly`), web torrent row in a search that excluded torrent
+  (`droppedExcluded`). Rows dropped later, when the meta rows are merged into the
   eD2K answer (hash already shared on the server, content filter, UDP packet cap),
   are not counted, so `rowsServed` is what left the meta searcher;
 - metafiles fetched: torrent, NZB, web-link and container files clients fetched

@@ -450,3 +450,129 @@ func TestSearchWebItems(t *testing.T) {
 		t.Errorf("no feed is on, yet %q holds the container", got)
 	}
 }
+
+// TestSearchExcludesNetworkByName: `night -torrent` never asks the torrent daemon,
+// still answers from Usenet (whose request keeps the word), drops the web network's
+// torrent rows but keeps its other rows, and counts both.
+func TestSearchExcludesNetworkByName(t *testing.T) {
+	torrent := &fakeDaemon{entries: []*metav1.MetaEntry{torrentEntry("Night.Of.The.Living.Torrent.mkv", 12)}}
+	usenet := &fakeDaemon{entries: []*metav1.MetaEntry{nzbEntry("Night.Of.The.Living.Dead.1968")}}
+	page := kadEntry("Night.Of.The.Living.Page.avi", 0, 0)
+	page.Indexer = "example-board"
+	web := &fakeDaemon{entries: []*metav1.MetaEntry{
+		webEntry("Night.Of.The.Living.Web.mkv", 2), page, torrentEntry("Night.Of.The.Living.Linked.mkv", 0),
+	}}
+	cfg := testConfig(t, true, true)
+	cfg.Web.Enabled = true
+	cfg, err := config.ApplyMetaSearchDefaults(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := searcherFor(cfg, map[string]*fakeDaemon{NetworkTorrent: torrent, NetworkUsenet: usenet, NetworkWeb: web})
+
+	all := s.Search(context.Background(), text("night"), false, false)
+	t.Logf("input: night; output: %s", fileNames(all))
+	if len(all) != 5 {
+		t.Fatalf("got %s, want 5 rows from three networks", fileNames(all))
+	}
+
+	got := s.Search(context.Background(), node(storage.SearchAndNot, text("night"), text("Torrent")), false, false)
+	t.Logf("input: night -Torrent; output: %s", fileNames(got))
+	want := []string{
+		"[usenet] Night.Of.The.Living.Dead.1968",
+		"[web] Night.Of.The.Living.Web.mkv",
+		"[web] Night.Of.The.Living.Page.avi",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %s, want %v", fileNames(got), want)
+	}
+	for i, row := range got {
+		if row.Name != want[i] {
+			t.Errorf("row %d: %q, want %q", i, row.Name, want[i])
+		}
+	}
+	if torrent.searchCount() != 1 {
+		t.Errorf("the torrent daemon was asked %d times, want only by the first search", torrent.searchCount())
+	}
+	if ex := usenet.lastSearch().GetExclude(); len(ex) != 1 || ex[0] != "Torrent" {
+		t.Errorf("usenet request exclude=%v, want the word kept", ex)
+	}
+
+	stats := map[string]NetworkStats{}
+	for _, st := range s.Stats() {
+		stats[st.Network] = st
+	}
+	t.Logf("output: torrent skippedExcluded=%d web droppedExcluded=%d usenet skippedExcluded=%d",
+		stats[NetworkTorrent].SkippedExcluded, stats[NetworkWeb].DroppedExcluded, stats[NetworkUsenet].SkippedExcluded)
+	if stats[NetworkTorrent].SkippedExcluded != 1 || stats[NetworkWeb].DroppedExcluded != 1 || stats[NetworkUsenet].SkippedExcluded != 0 {
+		t.Errorf("counters: torrent skipped=%d web dropped=%d usenet skipped=%d, want 1/1/0",
+			stats[NetworkTorrent].SkippedExcluded, stats[NetworkWeb].DroppedExcluded, stats[NetworkUsenet].SkippedExcluded)
+	}
+
+	// Under an OR the word is not required of every result, so nothing is excluded.
+	asked := torrent.searchCount()
+	or := s.Search(context.Background(), node(storage.SearchOr, text("night"), node(storage.SearchAndNot, text("day"), text("torrent"))), false, false)
+	t.Logf("input: night OR (day -torrent); output: %s", fileNames(or))
+	if torrent.searchCount() != asked {
+		t.Errorf("a NOT under an OR excluded the torrent network")
+	}
+}
+
+// TestSearchExcludedNetworkCache: `night` and `night -usenet` do not share a cache
+// entry, and the excluded network's daemon is not asked.
+func TestSearchExcludedNetworkCache(t *testing.T) {
+	torrent := &fakeDaemon{entries: []*metav1.MetaEntry{torrentEntry("Night.Of.The.Living.Torrent.mkv", 12)}}
+	usenet := &fakeDaemon{entries: []*metav1.MetaEntry{nzbEntry("Night.Of.The.Living.Dead.1968")}}
+	cfg := testConfig(t, true, true)
+	cfg.Cache.Enabled = true
+	s := searcherFor(cfg, map[string]*fakeDaemon{NetworkTorrent: torrent, NetworkUsenet: usenet})
+
+	plain := s.Search(context.Background(), text("night"), false, false)
+	excl := s.Search(context.Background(), node(storage.SearchAndNot, text("night"), text("usenet")), false, false)
+	t.Logf("input: night, then night -usenet; output: %s / %s; calls torrent=%d usenet=%d",
+		fileNames(plain), fileNames(excl), torrent.searchCount(), usenet.searchCount())
+	if len(plain) != 2 || len(excl) != 1 || !strings.HasPrefix(excl[0].Name, "[torrent] ") {
+		t.Fatalf("got %s / %s", fileNames(plain), fileNames(excl))
+	}
+	if torrent.searchCount() != 2 || usenet.searchCount() != 1 {
+		t.Errorf("calls torrent=%d usenet=%d, want 2/1: the queries differ and usenet is excluded",
+			torrent.searchCount(), usenet.searchCount())
+	}
+}
+
+// TestSearchExcludeNetworksByNameOff: with excludeNetworksByName off, -usenet is only
+// a normal NOT: the Usenet daemon is still asked, with the word in its exclude. A
+// reload turning it back on excludes the network again.
+func TestSearchExcludeNetworksByNameOff(t *testing.T) {
+	torrent := &fakeDaemon{entries: []*metav1.MetaEntry{torrentEntry("Night.Of.The.Living.Torrent.mkv", 12)}}
+	usenet := &fakeDaemon{entries: []*metav1.MetaEntry{nzbEntry("Night.Of.The.Living.Dead.1968")}}
+	cfg := testConfig(t, true, true)
+	off := false
+	cfg.ExcludeNetworksByName = &off
+	s := searcherFor(cfg, map[string]*fakeDaemon{NetworkTorrent: torrent, NetworkUsenet: usenet})
+	query := node(storage.SearchAndNot, text("night"), text("usenet"))
+
+	got := s.Search(context.Background(), query, false, false)
+	t.Logf("input: night -usenet, excludeNetworksByName off; output: %s; usenet calls=%d exclude=%v",
+		fileNames(got), usenet.searchCount(), usenet.lastSearch().GetExclude())
+	if len(got) != 2 || usenet.searchCount() != 1 {
+		t.Fatalf("got %s with %d usenet calls, want both rows and the daemon asked", fileNames(got), usenet.searchCount())
+	}
+	if ex := usenet.lastSearch().GetExclude(); len(ex) != 1 || ex[0] != "usenet" {
+		t.Errorf("usenet exclude %v, want [usenet]", ex)
+	}
+	for _, st := range s.Stats() {
+		if st.SkippedExcluded != 0 {
+			t.Errorf("%s skippedExcluded=%d, want 0", st.Network, st.SkippedExcluded)
+		}
+	}
+
+	on := true
+	cfg.ExcludeNetworksByName = &on
+	s.Reconfigure(cfg)
+	got = s.Search(context.Background(), query, false, false)
+	t.Logf("input: night -usenet after reload with it on; output: %s; usenet calls=%d", fileNames(got), usenet.searchCount())
+	if len(got) != 1 || usenet.searchCount() != 1 {
+		t.Errorf("got %s with %d usenet calls, want the torrent row only and no new call", fileNames(got), usenet.searchCount())
+	}
+}

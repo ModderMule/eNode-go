@@ -31,6 +31,9 @@ func TestMetaSearchDefaults(t *testing.T) {
 	if !m.AdvertiseToLegacyClientsOrDefault() || m.UDPMaxConcurrent != 16 {
 		t.Fatalf("advertise=%t udpMaxConcurrent=%d", m.AdvertiseToLegacyClientsOrDefault(), m.UDPMaxConcurrent)
 	}
+	if !m.ExcludeNetworksByNameOrDefault() {
+		t.Fatal("excludeNetworksByName must default on")
+	}
 	if m.Torrent.URL != DefaultTorrentURL || m.Usenet.URL != DefaultUsenetURL || m.Kad.URL != DefaultKadURL {
 		t.Fatalf("urls %q / %q / %q", m.Torrent.URL, m.Usenet.URL, m.Kad.URL)
 	}

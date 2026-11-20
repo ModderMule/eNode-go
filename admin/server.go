@@ -340,6 +340,8 @@ type MetaNetworkStats struct {
 	CacheHits      uint64 `json:"cacheHits"`
 	CacheMisses    uint64 `json:"cacheMisses"`
 	UDPSkipped     uint64 `json:"udpSkipped"`
+	// SkippedExcluded counts searches that excluded this network by name.
+	SkippedExcluded uint64 `json:"skippedExcluded"`
 	// CatalogCalls, CatalogErrors and CatalogCacheHits are MetaApi.Search's daemon
 	// calls, failed chunk loads and cached chunks served.
 	CatalogCalls     uint64 `json:"catalogCalls"`
@@ -355,6 +357,7 @@ type MetaNetworkStats struct {
 	DroppedUnavailable uint64 `json:"droppedUnavailable"`
 	DroppedDuplicate   uint64 `json:"droppedDuplicate"`
 	DroppedNativeOnly  uint64 `json:"droppedNativeOnly"`
+	DroppedExcluded    uint64 `json:"droppedExcluded"`
 
 	// ClientFetches are this network's metafiles served to clients, ClientFetchers
 	// the distinct clients, a lower bound when ClientFetchersCapped.

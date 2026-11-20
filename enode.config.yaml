@@ -358,6 +358,11 @@ metaSearch:
   # Live Search calls allowed in flight for UDP global searches. Past it a UDP
   # search is answered from the cache and feed only, never by waiting on a daemon.
   udpMaxConcurrent: 16
+  # A NOT word naming a meta network (-torrent, -usenet, -kad, -web; any case) leaves
+  # that network out of the search: its daemon is not asked, and -torrent also drops
+  # the web network's BitTorrent rows. The word still drops eD2K and other rows whose
+  # name contains it. Off: the word is only a normal NOT.
+  excludeNetworksByName: true
   torrent:
     enabled: false
     url: "http://127.0.0.1:9701"   # torrent-crawler's MetaIngest listener

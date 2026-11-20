@@ -58,6 +58,27 @@ func TestBuildQuery(t *testing.T) {
 			Query{Terms: []string{"linux"}}, true},
 		{"or branch dropped", node(storage.SearchAnd, text("linux"), node(storage.SearchOr, text("iso"), text("img"))),
 			Query{Terms: []string{"linux"}}, true},
+		{"not network name excludes the network", node(storage.SearchAndNot, text("name"), text("torrent")),
+			Query{Terms: []string{"name"}, Exclude: []string{"torrent"}, ExcludeNetworks: []string{"torrent"}}, true},
+		{"not network name any case", node(storage.SearchAndNot, text("name"), text("Torrent")),
+			Query{Terms: []string{"name"}, Exclude: []string{"Torrent"}, ExcludeNetworks: []string{"torrent"}}, true},
+		{"not of network names excludes each", node(storage.SearchAndNot, text("name"), node(storage.SearchOr, text("torrent"), text("usenet"))),
+			Query{Terms: []string{"name"}, Exclude: []string{"torrent", "usenet"}, ExcludeNetworks: []string{"torrent", "usenet"}}, true},
+		{"not of network and other word", node(storage.SearchAndNot, text("name"), node(storage.SearchOr, text("kad"), text("cam"))),
+			Query{Terms: []string{"name"}, Exclude: []string{"kad", "cam"}, ExcludeNetworks: []string{"kad"}}, true},
+		{"chained nots", node(storage.SearchAndNot, node(storage.SearchAndNot, text("name"), text("web")), text("usenet")),
+			Query{Terms: []string{"name"}, Exclude: []string{"web", "usenet"}, ExcludeNetworks: []string{"web", "usenet"}}, true},
+		{"not network under or excludes nothing", node(storage.SearchOr, text("name"), node(storage.SearchAndNot, text("x"), text("torrent"))),
+			Query{}, false},
+		{"not network inside an or branch excludes nothing", node(storage.SearchAnd, text("name"),
+			node(storage.SearchOr, text("iso"), node(storage.SearchAndNot, text("img"), text("torrent")))),
+			Query{Terms: []string{"name"}}, true},
+		{"not phrase with network excludes nothing", node(storage.SearchAndNot, text("name"), text("torrent site")),
+			Query{Terms: []string{"name"}}, true},
+		{"not of and with network excludes nothing", node(storage.SearchAndNot, text("name"), node(storage.SearchAnd, text("torrent"), text("usenet"))),
+			Query{Terms: []string{"name"}}, true},
+		{"positive network word is a keyword", node(storage.SearchAnd, text("name"), text("torrent")),
+			Query{Terms: []string{"name", "torrent"}}, true},
 		{"or at root forwards nothing", node(storage.SearchOr, text("a"), text("b")), Query{}, false},
 		{"type only forwards nothing", tagString(storage.SearchFileTypeTag, "Audio"), Query{FileType: "Audio"}, false},
 		{"extension is post-filter only", node(storage.SearchAnd, text("song"), tagString(storage.SearchExtTag, "mp3")),
@@ -94,6 +115,25 @@ func TestQueryRequestAndKey(t *testing.T) {
 		if other.Key() == q.Key() {
 			t.Fatalf("a different query %+v shares the cache key", other)
 		}
+	}
+}
+
+// TestQueryKeyExcludedNetworks: a search that excludes a network does not share a
+// cache key with one that does not, and the network order and case do not matter.
+func TestQueryKeyExcludedNetworks(t *testing.T) {
+	plain := Query{Terms: []string{"name"}, Exclude: []string{"torrent"}}
+	excluding := Query{Terms: []string{"name"}, Exclude: []string{"torrent"}, ExcludeNetworks: []string{"torrent"}}
+	two := Query{Terms: []string{"name"}, ExcludeNetworks: []string{"usenet", "torrent"}}
+	twoReordered := Query{Terms: []string{"name"}, ExcludeNetworks: []string{"torrent", "usenet"}}
+	t.Logf("input: %+v / %+v; output: keys %q / %q", plain, excluding, plain.Key(), excluding.Key())
+	if plain.Key() == excluding.Key() {
+		t.Fatalf("a query excluding a network shares the cache key of one that does not")
+	}
+	if two.Key() != twoReordered.Key() {
+		t.Fatalf("network order changed the key: %q vs %q", two.Key(), twoReordered.Key())
+	}
+	if !excluding.ExcludesNetwork(NetworkTorrent) || excluding.ExcludesNetwork(NetworkUsenet) {
+		t.Fatalf("ExcludesNetwork: torrent=%t usenet=%t", excluding.ExcludesNetwork(NetworkTorrent), excluding.ExcludesNetwork(NetworkUsenet))
 	}
 }
 

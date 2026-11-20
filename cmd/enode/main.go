@@ -1205,6 +1205,7 @@ func adminMetaStats(s *meta.Searcher) (cacheEntries int, out []admin.MetaNetwork
 			CacheHits:        st.CacheHits,
 			CacheMisses:      st.CacheMisses,
 			UDPSkipped:       st.UDPSkipped,
+			SkippedExcluded:  st.SkippedExcluded,
 			CatalogCalls:     st.CatalogCalls,
 			CatalogErrors:    st.CatalogErrors,
 			CatalogCacheHits: st.CatalogCacheHits,
@@ -1216,6 +1217,7 @@ func adminMetaStats(s *meta.Searcher) (cacheEntries int, out []admin.MetaNetwork
 			DroppedUnavailable: st.DroppedUnavailable,
 			DroppedDuplicate:   st.DroppedDuplicate,
 			DroppedNativeOnly:  st.DroppedNativeOnly,
+			DroppedExcluded:    st.DroppedExcluded,
 
 			ClientFetches:        st.ClientFetches,
 			ClientFetchers:       st.ClientFetchers,

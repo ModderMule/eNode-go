@@ -102,16 +102,18 @@ type NetworkStats struct {
 	// of a release that does not match the search (DroppedNoMatch), a row past the
 	// TCP or UDP row cap (DroppedCap), a row not alive or complete under
 	// onlyAvailable (DroppedUnavailable), a row whose hash was already in the
-	// answer or a web row of a release another network sent (DroppedDuplicate), and
-	// a non-native row for a requester that wants native rows only
-	// (DroppedNativeOnly). Drops after the merge into the eD2K answer are not
-	// counted.
+	// answer or a web row of a release another network sent (DroppedDuplicate), a
+	// non-native row for a requester that wants native rows only
+	// (DroppedNativeOnly), and a web network's torrent row in a search that
+	// excluded torrent by name (DroppedExcluded). Drops after the merge into the
+	// eD2K answer are not counted.
 	DroppedInvalid     uint64
 	DroppedNoMatch     uint64
 	DroppedCap         uint64
 	DroppedUnavailable uint64
 	DroppedDuplicate   uint64
 	DroppedNativeOnly  uint64
+	DroppedExcluded    uint64
 	// ClientFetches counts the metafiles of this network served to clients by
 	// MetaApi.GetMetaFile and GET /meta/v1, and ClientFetchers the distinct clients
 	// (account, else IP) that fetched one. ClientFetchersCapped says the set of
@@ -128,6 +130,9 @@ type NetworkStats struct {
 	// UDPSkipped counts UDP searches that made no live call because every
 	// udpMaxConcurrent slot was taken.
 	UDPSkipped uint64
+	// SkippedExcluded counts searches that did not ask this network because they
+	// excluded it by name, as in `name -torrent`.
+	SkippedExcluded uint64
 	// CatalogCalls, CatalogErrors and CatalogCacheHits are MetaApi.Search's daemon
 	// calls, failed chunk loads and cached chunks served.
 	CatalogCalls     uint64
@@ -221,6 +226,9 @@ type sourceCounters struct {
 	cacheHits      atomic.Uint64
 	cacheMisses    atomic.Uint64
 	udpSkipped     atomic.Uint64
+	// skippedExcluded counts searches that did not ask this network because they
+	// excluded it by name (-torrent).
+	skippedExcluded atomic.Uint64
 	// catalogCalls, catalogErrors and catalogCacheHits count MetaApi.Search chunk
 	// loads: daemon calls, failed loads (errors and timeouts), cached chunks served.
 	catalogCalls     atomic.Uint64
@@ -234,6 +242,7 @@ type sourceCounters struct {
 	droppedUnavailable atomic.Uint64
 	droppedDuplicate   atomic.Uint64
 	droppedNativeOnly  atomic.Uint64
+	droppedExcluded    atomic.Uint64
 
 	clientFetches atomic.Uint64
 	fetchersMu    sync.Mutex
@@ -351,6 +360,7 @@ func (src *source) stats() NetworkStats {
 		CacheHits:           src.counters.cacheHits.Load(),
 		CacheMisses:         src.counters.cacheMisses.Load(),
 		UDPSkipped:          src.counters.udpSkipped.Load(),
+		SkippedExcluded:     src.counters.skippedExcluded.Load(),
 		CatalogCalls:        src.counters.catalogCalls.Load(),
 		CatalogErrors:       src.counters.catalogErrors.Load(),
 		CatalogCacheHits:    src.counters.catalogCacheHits.Load(),
@@ -361,6 +371,7 @@ func (src *source) stats() NetworkStats {
 		DroppedUnavailable:  src.counters.droppedUnavailable.Load(),
 		DroppedDuplicate:    src.counters.droppedDuplicate.Load(),
 		DroppedNativeOnly:   src.counters.droppedNativeOnly.Load(),
+		DroppedExcluded:     src.counters.droppedExcluded.Load(),
 		ClientFetches:       src.counters.clientFetches.Load(),
 	}
 	st.ClientFetchers, st.ClientFetchersCapped = src.counters.fetcherCount()

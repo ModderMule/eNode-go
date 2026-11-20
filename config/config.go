@@ -766,6 +766,10 @@ type MetaSearchConfig struct {
 	// A UDP search runs on a shared worker; past the cap it is answered from the cache
 	// and feed only, so a burst of datagrams cannot park the whole pool on a daemon.
 	UDPMaxConcurrent int `yaml:"udpMaxConcurrent"`
+	// ExcludeNetworksByName reads a NOT word naming a meta network (`-torrent`,
+	// `-usenet`, `-kad`, `-web`) as "leave that network out": its daemon is not asked.
+	// The word still filters names as a normal NOT. *bool, defaults on.
+	ExcludeNetworksByName *bool `yaml:"excludeNetworksByName"`
 
 	Torrent MetaNetworkConfig `yaml:"torrent"`
 	Usenet  MetaNetworkConfig `yaml:"usenet"`
@@ -784,6 +788,12 @@ type MetaSearchConfig struct {
 // defaulting to true.
 func (c MetaSearchConfig) AdvertiseToLegacyClientsOrDefault() bool {
 	return boolOrDefault(c.AdvertiseToLegacyClients, true)
+}
+
+// ExcludeNetworksByNameOrDefault reports whether a NOT word naming a meta network
+// excludes that network, defaulting to true.
+func (c MetaSearchConfig) ExcludeNetworksByNameOrDefault() bool {
+	return boolOrDefault(c.ExcludeNetworksByName, true)
 }
 
 // AnyEnabled reports whether at least one network is on.
