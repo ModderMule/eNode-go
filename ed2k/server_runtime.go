@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -218,6 +219,10 @@ type ServerRuntime struct {
 	// not: what a handover has to park. sessionsByHash holds only logged-in ones.
 	liveMu sync.Mutex
 	live   map[*tcpClient]struct{}
+	// statusLoopOn is whether runStatusLoop is running, and statusNextSlot the slice
+	// the next session joins; see statusloop.go. Both under liveMu.
+	statusLoopOn   bool
+	statusNextSlot uint32
 	// parking is the handover round in progress, or nil. While it is set every
 	// session parks at its next read; see ParkSessions.
 	parking atomic.Pointer[parkRound]
@@ -305,40 +310,22 @@ func (s *ServerRuntime) blockedPeer(ip net.IP) (bool, string) {
 	return s.Filter.Blocked(ip)
 }
 
+// TCPHandler serves one accepted connection until it ends.
+//
+// Its frame stays on the session goroutine's stack for the whole session, under the
+// read loop's, so everything that runs once is in admitTCP and endTCP: see
+// tcpClient.run on why an idle session must fit in 2 KiB of stack.
 func (s *ServerRuntime) TCPHandler(enableCrypt bool) func(net.Conn) {
 	return func(conn net.Conn) {
-		// Filtered before newTCPClient, so a blocked address is closed without a byte
-		// being read or a session goroutine, status ticker or crypt state being created.
-		// Closing silently rather than sending OP_SERVERMESSAGE first is deliberate: the
-		// reply would cost a round trip to an address we have already decided not to
-		// serve, and it tells a scanner it found an eD2K server.
-		if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
-			if blocked, reason := s.blockedPeer(NormalizeIP(tcpAddr.IP)); blocked {
-				logging.Debugf("tcp connection refused remote=%s reason=%s", tcpAddr.IP, reason)
-				_ = conn.Close()
-				return
-			}
+		// Off the session's stack: the checks, the session's construction and the
+		// socket options are deep enough to grow it for good.
+		var client *tcpClient
+		var slot string
+		offStack(func() { client, slot = s.admitTCP(conn, enableCrypt) })
+		if client == nil {
+			return
 		}
-		// Record every accepted address so gossip can refuse to admit a client as a peer.
-		// Placed after the filter so a blocked address is not tracked at all.
-		if g := s.gossip(); g != nil {
-			if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
-				g.NoteClient(tcpAddr.IP)
-			}
-		}
-		if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
-			key := addressKey(NormalizeIP(tcpAddr.IP))
-			if !s.acquireConnSlot(key) {
-				s.blocks.connLimit.Add(1)
-				logging.Debugf("tcp connection refused remote=%s reason=per-ip-limit(%d)", tcpAddr.IP, s.tcp().MaxConnsPerIP)
-				_ = conn.Close()
-				return
-			}
-			defer s.releaseConnSlot(key)
-		}
-		client := newTCPClient(s, conn, enableCrypt)
-		s.trackSession(client)
-		defer s.untrackSession(client)
+		defer s.endTCP(client, slot)
 		client.run()
 	}
 }
@@ -610,7 +597,9 @@ func (s *ServerRuntime) UDPHandler(enableCrypt bool) func([]byte, *net.UDPAddr, 
 			data = s.decryptPeerReply(data, remote.IP)
 		}
 		obfuscated := enableCrypt && !arrivedPlaintext && len(data) > 0 && data[0] == PrED2K
-		LogUDPRaw(module, "recv", remote.String(), data)
+		if logging.DebugEnabled() {
+			LogUDPRaw(module, "recv", remote.String(), data)
+		}
 		b := NewBufferFromBytes(data)
 		protocol, err := b.GetUInt8()
 		if err != nil {
@@ -760,15 +749,17 @@ func (s *ServerRuntime) gossipOpcodeEnabled(code uint8, remote *net.UDPAddr, nee
 }
 
 type tcpClient struct {
-	server     *ServerRuntime
-	conn       net.Conn
-	packet     *Packet
-	crypt      *TCPCrypt
-	module     string
-	writeMu    sync.Mutex
-	closeMu    sync.Mutex
-	remoteHost string
-	statusStop chan struct{}
+	server  *ServerRuntime
+	conn    net.Conn
+	packet  *Packet
+	crypt   *TCPCrypt
+	writeMu sync.Mutex
+	closeMu sync.Mutex
+	// There is no module or remoteHost field: the methods of the same names derive
+	// them from crypt and peerIP. The two strings cost every session 32 bytes and
+	// remoteHost an allocation of its own, though only log lines read them; without
+	// them a session fits Go's 448-byte size class instead of 480
+	// (TestTCPClientSizeClass).
 	// writeTimeout bounds one write to the socket; see tcpWriteTimeout. Set once,
 	// before the session's goroutines start.
 	writeTimeout time.Duration
@@ -810,13 +801,17 @@ type tcpClient struct {
 	// ticker make the session reachable from other goroutines, so the writers on those
 	// goroutines read it without a lock. In the padding, so a session stays the same size.
 	noZlib bool
+	// statusSlot is the slice of the status loop this session belongs to (see
+	// statusloop.go). Set under liveMu by trackSession, before the session is in the
+	// set the loop reads; never changed after. Fills the last byte of the padding.
+	statusSlot uint8
 	// ed3kID is the ed3k node ID the client sent as CT_ED3K at login, or nil. Read
 	// and written under infoMu.
 	ed3kID []byte
 
 	// infoMu guards info, logged and hasLowID. The connection's own goroutine
 	// writes them during login, but two other goroutines read them: the periodic
-	// status ticker (logged) and any peer handling OP_CALLBACKREQUEST, which
+	// status loop (logged) and any peer handling OP_CALLBACKREQUEST, which
 	// reaches this client through the shared LowIDs table.
 	infoMu   sync.RWMutex
 	info     storage.ClientInfo
@@ -844,7 +839,7 @@ type tcpClient struct {
 
 	// pendingResults holds the tail of a search whose first page has been sent, so
 	// OP_QUERY_MORE_RESULT can deliver the rest. Search and the More request both arrive
-	// on this socket, but the status ticker drops expired rows from its own goroutine,
+	// on this socket, but the status loop drops expired rows from its own goroutine,
 	// hence the atomic pointer.
 	//
 	// Held rather than re-queried because eMule's More request carries no payload at all
@@ -955,10 +950,8 @@ func (c *tcpClient) isV6Capable() bool {
 }
 
 func newTCPClient(server *ServerRuntime, conn net.Conn, enableCrypt bool) *tcpClient {
-	host := ""
 	var peerIP net.IP
 	if addr := conn.RemoteAddr(); addr != nil {
-		host = splitHost(addr.String())
 		if tcpAddr, ok := addr.(*net.TCPAddr); ok {
 			peerIP = NormalizeIP(tcpAddr.IP)
 		}
@@ -985,9 +978,7 @@ func newTCPClient(server *ServerRuntime, conn net.Conn, enableCrypt bool) *tcpCl
 		conn:         conn,
 		packet:       packet,
 		crypt:        crypt,
-		module:       tcpModule(enableCrypt),
 		hasLowID:     true,
-		remoteHost:   host,
 		writeTimeout: tcpWriteTimeout,
 		peerIP:       peerIP,
 		connectedV6:  connectedV6,
@@ -1048,16 +1039,25 @@ func enableTCPKeepAlive(conn net.Conn, period time.Duration) {
 	}
 }
 
+// run is the session's read loop.
+//
+// An idle session costs what its goroutine holds while it waits, and Go's stacks make
+// that more than it looks. A stack starts at 2 KiB and doubles when a call needs more,
+// but the runtime halves it again only while less than a quarter of it, plus an
+// 800-byte margin, is in use: a session parked in a read never gets that low on
+// 4 KiB. So a single deep call on this goroutine (a handler, a syscall, even setting
+// the read deadline under the frames of the accept path) left it holding 4 KiB for
+// good.
+//
+// On a plain TCP socket the goroutine therefore does nothing but wait: waitReadable
+// blocks until data has arrived, without a buffer, and the read, the handlers and
+// arming the next deadline run on a short-lived goroutine (offStack) while this one
+// waits for it. Their stack and the pooled read buffer go back when they return.
+// The session's bytes are still handled one chunk at a time and in order. See
+// docs/memory-footprint.local.md §2.5.
 func (c *tcpClient) run() {
 	c.setCloseReason("read-loop-ended")
-	defer func() {
-		// statusStop stays here rather than in releaseSession: this goroutine is the
-		// only one that writes it, while releaseSession may run on another's.
-		if c.statusStop != nil {
-			close(c.statusStop)
-		}
-		c.releaseSession()
-	}()
+	defer c.releaseSession()
 
 	// The idle deadline below is pushed out by every read, so on its own a socket
 	// that trickles a byte at a time never completes a login and is never reaped.
@@ -1066,52 +1066,41 @@ func (c *tcpClient) run() {
 	if c.server.tcp().LoginTimeout > 0 {
 		loginDeadline = time.Now().Add(c.server.tcp().LoginTimeout)
 	}
-	buf := make([]byte, 4096)
+	rc := readWaiterFor(c.conn)
+	var preLogin, armed bool
+	var err error
 	for {
 		// Checked before every read, so a session that was busy in a handler when a
 		// handover began parks as soon as it is done. ParkSessions also keeps
-		// interrupting the read itself, below.
+		// interrupting the wait itself, below.
 		if round := c.server.parking.Load(); round != nil {
 			if !c.park(round) {
 				return
 			}
+			armed = false
 			continue
 		}
-		var deadline time.Time
-		if c.server.tcp().DisconnectTimeout > 0 {
-			deadline = time.Now().Add(c.server.tcp().DisconnectTimeout)
-		}
-		preLogin := !loginDeadline.IsZero() && !c.isLogged()
-		if preLogin && (deadline.IsZero() || loginDeadline.Before(deadline)) {
-			deadline = loginDeadline
-		}
-		if !deadline.IsZero() {
-			_ = c.conn.SetReadDeadline(deadline)
-		}
-		n, err := c.conn.Read(buf)
-		if err != nil {
-			if round := c.server.parking.Load(); round != nil && isTimeout(err) {
-				if !c.park(round) {
-					return
-				}
-				continue
+		if rc == nil {
+			// No way to wait without reading: block in Read, with a buffer in hand.
+			preLogin = c.armReadDeadline(loginDeadline)
+			err = c.readAndHandle()
+		} else {
+			if !armed {
+				offStack(func() { preLogin = c.armReadDeadline(loginDeadline) })
 			}
-			if errors.Is(err, io.EOF) {
-				c.setCloseReason("peer-closed")
-			} else if ne, ok := err.(net.Error); ok && ne.Timeout() && preLogin {
-				c.setCloseReason(fmt.Sprintf("login-timeout(%s)", c.server.tcp().LoginTimeout))
-			} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				c.setCloseReason(fmt.Sprintf("read-timeout(%s)", c.server.tcp().DisconnectTimeout))
-			} else {
-				c.setCloseReason(fmt.Sprintf("read-error: %v", err))
+			armed = false
+			if err = waitReadable(rc); err == nil {
+				offStack(func() {
+					if err = c.readAndHandle(); err == nil {
+						preLogin = c.armReadDeadline(loginDeadline)
+						armed = true
+					}
+				})
 			}
+		}
+		if err != nil && !c.readFailed(err, preLogin) {
 			return
 		}
-		if n == 0 {
-			c.setCloseReason("read-zero")
-			return
-		}
-		c.handleBytes(buf[:n])
 	}
 }
 
@@ -1129,7 +1118,7 @@ func (c *tcpClient) handleBytes(data []byte) {
 			// Only the stream's first byte decides: a later piece of a split key
 			// exchange may start with any value.
 			if state == CsUnknown && len(data) > 0 && IsProtocol(data[0]) && c.crypt.Buffered() == 0 {
-				logging.Debugf("tcp plaintext on obfuscated port remote=%s proto=0x%x", c.remoteHost, data[0])
+				logging.Debugf("tcp plaintext on obfuscated port remote=%s proto=0x%x", c.remoteHost(), data[0])
 				c.crypt.SetState(CsNone)
 				break
 			}
@@ -1138,7 +1127,7 @@ func (c *tcpClient) handleBytes(data []byte) {
 				// The stream is unrecoverable once negotiation fails: state stays
 				// CsNegotiating and every later chunk fails the same way, so the
 				// peer would linger until disconnectTimeout (3600s by default).
-				logging.Warnf("tcp crypt error remote=%s err=%v", c.remoteHost, err)
+				logging.Warnf("tcp crypt error remote=%s err=%v", c.remoteHost(), err)
 				c.closeWithReason(fmt.Sprintf("crypt-handshake-failed: %v", err))
 				return
 			}
@@ -1173,7 +1162,7 @@ func (c *tcpClient) processPacketData(data []byte) {
 		// Reject a bad protocol byte before waiting for the rest of the header:
 		// the stream has lost its framing and nothing later can resync it.
 		if !IsProtocol(data[0]) {
-			logging.Warnf("tcp unknown protocol remote=%s proto=0x%x", c.remoteHost, data[0])
+			logging.Warnf("tcp unknown protocol remote=%s proto=0x%x", c.remoteHost(), data[0])
 			c.closeWithReason("unknown-protocol")
 			return
 		}
@@ -1189,11 +1178,11 @@ func (c *tcpClient) processPacketData(data []byte) {
 			// declaration would allocate the declared size, and a zero size leaves
 			// no way to find the next packet boundary.
 			if errors.Is(err, ErrPacketTooLarge) {
-				logging.Warnf("tcp packet too large remote=%s err=%v", c.remoteHost, err)
+				logging.Warnf("tcp packet too large remote=%s err=%v", c.remoteHost(), err)
 				c.closeWithReason("packet-too-large")
 				return
 			}
-			logging.Warnf("tcp bad packet header remote=%s err=%v", c.remoteHost, err)
+			logging.Warnf("tcp bad packet header remote=%s err=%v", c.remoteHost(), err)
 			c.closeWithReason(fmt.Sprintf("bad-packet-header: %v", err))
 			return
 		}
@@ -1221,13 +1210,13 @@ func (c *tcpClient) processPacketData(data []byte) {
 func (c *tcpClient) handlePacket(packet *Packet) {
 	switch packet.Protocol {
 	case PrED2K:
-		LogTCPPacket(c.module, "recv", c.remoteHost, packet.Protocol, packet.Code, packet.Data.Bytes())
+		c.logPacket("recv", packet.Protocol, packet.Code, packet.Data.Bytes())
 		c.handleED2K(packet.Code, packet.Data)
 	case PrZlib:
-		LogTCPPacket(c.module, "recv", c.remoteHost, packet.Protocol, packet.Code, packet.Data.Bytes())
+		c.logPacket("recv", packet.Protocol, packet.Code, packet.Data.Bytes())
 		payload, err := InflateZlibPayload(packet.Data.Bytes())
 		if err != nil {
-			logging.Warnf("tcp zlib inflate failed remote=%s err=%v", c.remoteHost, err)
+			logging.Warnf("tcp zlib inflate failed remote=%s err=%v", c.remoteHost(), err)
 			// A compression ratio that overshoots the ceiling is a zlib bomb, not
 			// a corrupt stream: drop the peer instead of waiting for the next one.
 			if errors.Is(err, ErrInflatedTooLarge) {
@@ -1235,11 +1224,11 @@ func (c *tcpClient) handlePacket(packet *Packet) {
 			}
 			return
 		}
-		LogTCPPacket(c.module, "recv-decompressed", c.remoteHost, PrED2K, packet.Code, payload)
+		c.logPacket("recv-decompressed", PrED2K, packet.Code, payload)
 		c.handleED2K(packet.Code, NewBufferFromBytes(payload))
 	default:
-		LogTCPPacket(c.module, "recv", c.remoteHost, packet.Protocol, packet.Code, packet.Data.Bytes())
-		logging.Debugf("tcp unsupported protocol remote=%s proto=0x%x", c.remoteHost, packet.Protocol)
+		c.logPacket("recv", packet.Protocol, packet.Code, packet.Data.Bytes())
+		logging.Debugf("tcp unsupported protocol remote=%s proto=0x%x", c.remoteHost(), packet.Protocol)
 	}
 }
 
@@ -1276,7 +1265,7 @@ func (c *tcpClient) handleED2K(opcode uint8, data *Buffer) {
 		if c.server.tcp().IPv6 {
 			c.handleGetSourcesIPv6(data)
 		} else {
-			logging.Debugf("tcp unhandled opcode remote=%s opcode=0x%x (ipv6 off)", c.remoteHost, opcode)
+			logging.Debugf("tcp unhandled opcode remote=%s opcode=0x%x (ipv6 off)", c.remoteHost(), opcode)
 		}
 	case OpSearchRequest:
 		c.handleSearchRequest(data)
@@ -1295,25 +1284,27 @@ func (c *tcpClient) handleED2K(opcode uint8, data *Buffer) {
 		// dies without one. Empty payload.
 		c.closeWithReason("client-disconnect")
 	default:
-		logging.Debugf("tcp unhandled opcode remote=%s opcode=0x%x", c.remoteHost, opcode)
+		logging.Debugf("tcp unhandled opcode remote=%s opcode=0x%x", c.remoteHost(), opcode)
 	}
 }
 
 func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	req, err := ParseLoginRequest(data)
 	if err != nil {
-		logging.Warnf("login request parse failed remote=%s err=%v", c.remoteHost, err)
+		logging.Warnf("login request parse failed remote=%s err=%v", c.remoteHost(), err)
 		return
 	}
-	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_LOGINREQUEST hash=%x id=%d port=%d tags=%s",
-		c.remoteHost, req.Hash, req.ID, req.Port, formatNamedTags(req.Tags, 32))
+	if logging.DebugEnabled() {
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_LOGINREQUEST hash=%x id=%d port=%d tags=%s",
+			c.remoteHost(), req.Hash, req.ID, req.Port, formatNamedTags(req.Tags, 32))
+	}
 
 	// One login per connection. OP_LOGINREQUEST is dispatched at any point in the
 	// session, and a repeat used to overwrite c.info.ID while the previously
 	// allocated LowID stayed in the table pointing at this client — the cleanup
 	// path frees only the last one, so a socket looping logins drained the pool.
 	if c.isLogged() {
-		logging.Warnf("duplicate login on an established session remote=%s", c.remoteHost)
+		logging.Warnf("duplicate login on an established session remote=%s", c.remoteHost())
 		c.closeWithReason("already-logged-in")
 		return
 	}
@@ -1323,7 +1314,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	// drops it and retries forever.
 	if c.server.Content != nil && c.server.Content.Banned(req.Hash, c.peerIP) {
 		c.server.blocks.bannedLogins.Add(1)
-		logging.Warnf("login rejected remote=%s hash=%x: banned by the content filter", c.remoteHost, req.Hash)
+		logging.Warnf("login rejected remote=%s hash=%x: banned by the content filter", c.remoteHost(), req.Hash)
 		c.sendServerMessage(msgBanned)
 		c.closeWithReason("content-ban")
 		return
@@ -1373,17 +1364,17 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		c.replaceSameIPSession(req.Hash)
 		if old, how := c.takeoverFrom(req.Hash, req.Port, loginSessionToken(req.Tags)); old != nil {
 			logging.Infof("login takes over live session after acceptance remote=%s hash=%x by=%s oldRemote=%s",
-				c.remoteHost, req.Hash, how, old.remoteHost)
+				c.remoteHost(), req.Hash, how, old.remoteHost())
 		} else {
 			c.probeStaleSession(req.Hash)
 			switch {
 			case !c.server.Storage.IsConnected(storage.ClientInfo{Hash: req.Hash}):
 				// The probe freed it.
 			case !c.server.hashHeldLocally(req.Hash):
-				logging.Warnf("login releases orphaned storage row remote=%s hash=%x: no session holds it", c.remoteHost, req.Hash)
+				logging.Warnf("login releases orphaned storage row remote=%s hash=%x: no session holds it", c.remoteHost(), req.Hash)
 				c.server.Storage.Disconnect(storage.ClientInfo{Hash: req.Hash})
 			default:
-				logging.Warnf("login rejected remote=%s hash=%x: already connected", c.remoteHost, req.Hash)
+				logging.Warnf("login rejected remote=%s hash=%x: already connected", c.remoteHost(), req.Hash)
 				c.sendServerMessage("Already connected from another session.")
 				c.closeWithReason("duplicate-login")
 				return
@@ -1416,7 +1407,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 					v6Bytes = append([]byte(nil), prev...)
 					sentV6Tag = true
 					logging.Infof("login keeps ipv6 of the session it takes over remote=%s ipv6=%s",
-						c.remoteHost, net.IP(v6Bytes).String())
+						c.remoteHost(), net.IP(v6Bytes).String())
 				}
 			}
 		}
@@ -1481,7 +1472,7 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 	usableIPv4 := HasHighID(ipv4)
 	firewalled := !usableIPv4 || c.server.isFirewalled(c)
 	logging.Debugf("login decision remote=%s requestedID=%d usableIPv4=%t firewalled=%t hasIPv6=%t ipv6Capable=%t",
-		c.remoteHost, req.ID, usableIPv4, firewalled, len(v6Bytes) == 16, c.ipv6Capable)
+		c.remoteHost(), req.ID, usableIPv4, firewalled, len(v6Bytes) == 16, c.ipv6Capable)
 	if firewalled {
 		c.infoMu.Lock()
 		c.hasLowID = true
@@ -1527,12 +1518,12 @@ func (c *tcpClient) handleLoginRequest(data *Buffer) {
 		}
 		c.infoMu.Unlock()
 		logging.Debugf("ipv6 reachability remote=%s ipv6=%s reachable=%t connectedV6=%t",
-			c.remoteHost, net.IP(v6Bytes).String(), reachable, c.connectedV6)
+			c.remoteHost(), net.IP(v6Bytes).String(), reachable, c.connectedV6)
 	}
 
 	info := c.snapshotInfo()
 	logging.Infof("login accepted remote=%s assignedID=%d lowID=%t port=%d ipv6Reachable=%t",
-		c.remoteHost, info.ID, info.LowID, info.Port, info.IPv6Reachable)
+		c.remoteHost(), info.ID, info.LowID, info.Port, info.IPv6Reachable)
 	c.handShake()
 }
 
@@ -1545,7 +1536,7 @@ func (c *tcpClient) handShake() {
 	defer c.server.beginHandshake(c.snapshotInfo().Hash)()
 	storeID, err := c.server.Storage.Connect(c.snapshotInfo())
 	if err != nil {
-		logging.Warnf("storage connect failed remote=%s err=%v", c.remoteHost, err)
+		logging.Warnf("storage connect failed remote=%s err=%v", c.remoteHost(), err)
 		c.closeWithReason(fmt.Sprintf("storage-connect-failed: %v", err))
 		return
 	}
@@ -1554,7 +1545,7 @@ func (c *tcpClient) handShake() {
 	c.info.StoreID = storeID
 	c.infoMu.Unlock()
 	info := c.snapshotInfo()
-	logging.Infof("login handshake complete remote=%s storeID=%d id=%d lowID=%t", c.remoteHost, info.StoreID, info.ID, info.LowID)
+	logging.Infof("login handshake complete remote=%s storeID=%d id=%d lowID=%t", c.remoteHost(), info.StoreID, info.ID, info.LowID)
 
 	// Indexed by user hash so a PR_NAT keepalive from this client can keep its session
 	// alive. Removed in run()'s defer.
@@ -1565,7 +1556,6 @@ func (c *tcpClient) handShake() {
 	c.sendServerMessage(c.server.tcp().MessageLogin)
 	c.sendServerMessage("server version " + LoginVersionStr)
 	c.sendServerStatus()
-	c.startPeriodicServerStatus()
 	c.sendIDChange(info.ID)
 	// The one OP_SERVERIDENT that may carry the OFFERFILES v1 advertisement.
 	c.sendServerIdent(c.offerV1.advertised())
@@ -1689,7 +1679,7 @@ func (c *tcpClient) requireLogin(opcode uint8) bool {
 		return false
 	}
 	c.loginGateTripped = true
-	logging.Warnf("tcp request before login remote=%s opcode=0x%x: closing", c.remoteHost, opcode)
+	logging.Warnf("tcp request before login remote=%s opcode=0x%x: closing", c.remoteHost(), opcode)
 	c.sendServerMessage(msgNotLoggedIn)
 	c.closeWithReason("not-logged-in")
 	return false
@@ -1708,7 +1698,7 @@ func (c *tcpClient) preLoginHeaderAllowed(header []byte) bool {
 		return true
 	}
 	if size := binary.LittleEndian.Uint32(header[1:5]); size > maxPreLoginPacket+1 {
-		logging.Warnf("tcp oversized packet before login remote=%s size=%d: closing", c.remoteHost, size)
+		logging.Warnf("tcp oversized packet before login remote=%s size=%d: closing", c.remoteHost(), size)
 		c.closeWithReason("prelogin-packet-too-large")
 		return false
 	}
@@ -1718,34 +1708,6 @@ func (c *tcpClient) preLoginHeaderAllowed(header []byte) bool {
 		}
 	}
 	return true
-}
-
-func (c *tcpClient) startPeriodicServerStatus() {
-	if c.statusStop != nil {
-		return
-	}
-	interval := c.server.tcp().ServerStatusInterval
-	if interval <= 0 {
-		return
-	}
-	c.statusStop = make(chan struct{})
-	go func(stop <-chan struct{}) {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				// Not while a handover is parking the session: a write now would move
-				// the RC4 keystream past the state being handed over.
-				if c.isLogged() && c.server.parking.Load() == nil {
-					c.sendServerStatus()
-				}
-				c.dropExpiredResults(time.Now())
-			case <-stop:
-				return
-			}
-		}
-	}(c.statusStop)
 }
 
 // msgSoftFileLimit is eserver's own wording, verbatim from
@@ -1804,7 +1766,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 		c.hardLimitHit = true
 		c.server.blocks.hardLimit.Add(1)
 		logging.Warnf("offer files hard limit remote=%s id=%d declared=%d hardLimit=%d: closing",
-			c.remoteHost, id, declared, hardLimit)
+			c.remoteHost(), id, declared, hardLimit)
 		c.sendServerMessage(fmt.Sprintf(msgHardFileLimit, hardLimit))
 		c.closeWithReason("file-hard-limit")
 		return
@@ -1816,7 +1778,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 		if declared > c.offerV1.BatchMax {
 			c.server.blocks.offerOverBatch.Add(1)
 			logging.Warnf("offer files v1 over batch remote=%s id=%d declared=%d batchMax=%d: not indexed",
-				c.remoteHost, c.snapshotInfo().ID, declared, c.offerV1.BatchMax)
+				c.remoteHost(), c.snapshotInfo().ID, declared, c.offerV1.BatchMax)
 			return
 		}
 		c.waitOfferDue(declared)
@@ -1833,14 +1795,14 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	if err != nil {
 		previewHex := hex.EncodeToString(data.Bytes()[:min(payloadLen, 96)])
 		logging.Warnf("offer files parse failed remote=%s payloadLen=%d previewHex=%s err=%v",
-			c.remoteHost, payloadLen, previewHex, err)
+			c.remoteHost(), payloadLen, previewHex, err)
 		return
 	}
 	const maxOfferFilesLog = 50
 	logging.Debugf("offer files remote=%s count=%d payloadLen=%d",
-		c.remoteHost, len(records), payloadLen)
+		c.remoteHost(), len(records), payloadLen)
 	if len(records) > maxOfferFilesLog {
-		logging.Debugf("offer files remote=%s truncated=%d", c.remoteHost, len(records)-maxOfferFilesLog)
+		logging.Debugf("offer files remote=%s truncated=%d", c.remoteHost(), len(records)-maxOfferFilesLog)
 	}
 	// One snapshot for the whole batch: the identity cannot change mid-batch,
 	// and taking it per file would lock once per offered file.
@@ -1892,7 +1854,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 				c.banlistDropped = true
 				c.server.Content.Ban(info.Hash, c.peerIP, fmt.Sprintf("offered %d %s files", distinct, reason))
 				logging.Warnf("offer files %s remote=%s id=%d hash=%x distinct=%d: closing and banning",
-					reason, c.remoteHost, info.ID, info.Hash, distinct)
+					reason, c.remoteHost(), info.ID, info.Hash, distinct)
 				c.sendServerMessage(msgBanlisted)
 				c.closeWithReason("banlist")
 				return
@@ -1903,7 +1865,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 		batch = append(batch, file)
 		if i < maxOfferFilesLog {
 			logging.Debugf("offer file remote=%s idx=%d hash=%x name=%q size=%d type=%q sourceID=%d sourcePort=%d",
-				c.remoteHost, i, record.Hash, file.Name, file.Size, file.Type, info.ID, info.Port)
+				c.remoteHost(), i, record.Hash, file.Name, file.Size, file.Type, info.ID, info.Port)
 		}
 	}
 	// Before the soft limit: what a publisher offers says what its share is, whether
@@ -1915,7 +1877,7 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	if skipped > 0 && !c.softLimitWarned {
 		c.softLimitWarned = true
 		logging.Warnf("offer files soft limit remote=%s id=%d softLimit=%d skipped=%d of=%d: ignoring excess",
-			c.remoteHost, info.ID, softLimit, skipped, len(records))
+			c.remoteHost(), info.ID, softLimit, skipped, len(records))
 		c.sendServerMessage(fmt.Sprintf(msgSoftFileLimit, softLimit))
 	}
 	if len(batch) > 0 {
@@ -1925,20 +1887,20 @@ func (c *tcpClient) handleOfferFiles(data *Buffer) {
 	// records as the hard limit lets through.
 	if contentRefused > 0 {
 		logging.Infof("offer files content filter remote=%s id=%d refused=%d of=%d",
-			c.remoteHost, info.ID, contentRefused, len(records))
+			c.remoteHost(), info.ID, contentRefused, len(records))
 	}
 	if zeroSize > 0 {
 		logging.Infof("offer files zero size remote=%s id=%d dropped=%d of=%d",
-			c.remoteHost, info.ID, zeroSize, len(records))
+			c.remoteHost(), info.ID, zeroSize, len(records))
 	}
 	if metaHashes > 0 {
 		logging.Warnf("offer files meta hash remote=%s id=%d dropped=%d of=%d",
-			c.remoteHost, info.ID, metaHashes, len(records))
+			c.remoteHost(), info.ID, metaHashes, len(records))
 	}
 }
 
 func (c *tcpClient) handleGetServerList() {
-	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_GETSERVERLIST payload=empty", c.remoteHost)
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_GETSERVERLIST payload=empty", c.remoteHost())
 	c.sendServerList()
 	// Never the v1 advertisement: it goes out once per connection, after login.
 	c.sendServerIdent(nil)
@@ -1953,7 +1915,7 @@ func (c *tcpClient) handleGetSources(data *Buffer, obfuscated bool) {
 	if !c.server.withheldHash(hash) {
 		sources = c.server.Storage.GetSources(hash, fileSize)
 	}
-	c.debugPayloadf("tcp payload parsed remote=%s opcode=%s sourcesFound=%d", c.remoteHost, opNameGetSources(obfuscated), len(sources))
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=%s sourcesFound=%d", c.remoteHost(), opNameGetSources(obfuscated), len(sources))
 	// A v6-capable session (connected over IPv6, or having sent CT_MOD_IP_V6) can
 	// parse the sentinel, so IPv6-only sources are published to it inline. Every
 	// other session gets the byte-identical classic layout. Sent even when empty,
@@ -1977,7 +1939,7 @@ func (c *tcpClient) handleGetSourcesIPv6(data *Buffer) {
 	if !c.server.withheldHash(hash) {
 		sources = c.server.v6PublishableSources(c.server.Storage.GetSources(hash, fileSize))
 	}
-	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_GETSOURCES_IPV6 sourcesFound=%d", c.remoteHost, len(sources))
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_GETSOURCES_IPV6 sourcesFound=%d", c.remoteHost(), len(sources))
 	packet, err := BuildFoundSourcesIPv6Packet(hash, sources)
 	if err != nil {
 		return
@@ -1990,37 +1952,37 @@ func (c *tcpClient) handleGetSourcesIPv6(data *Buffer) {
 func (c *tcpClient) parseGetSources(data *Buffer, opName string) (hash []byte, fileSize uint64, ok bool) {
 	hash = append([]byte(nil), data.Get(16)...)
 	if len(hash) != 16 {
-		logging.Warnf("get sources parse failed remote=%s opcode=%s err=invalid-hash-len", c.remoteHost, opName)
+		logging.Warnf("get sources parse failed remote=%s opcode=%s err=invalid-hash-len", c.remoteHost(), opName)
 		return nil, 0, false
 	}
 	size, err := data.GetUInt32LE()
 	if err != nil {
-		logging.Warnf("get sources parse failed remote=%s opcode=%s err=%v", c.remoteHost, opName, err)
+		logging.Warnf("get sources parse failed remote=%s opcode=%s err=%v", c.remoteHost(), opName, err)
 		return nil, 0, false
 	}
 	fileSize = uint64(size)
 	if fileSize == 0 {
 		v, err := data.GetUInt64LE()
 		if err != nil {
-			logging.Warnf("get sources parse failed remote=%s opcode=%s err=%v", c.remoteHost, opName, err)
+			logging.Warnf("get sources parse failed remote=%s opcode=%s err=%v", c.remoteHost(), opName, err)
 			return nil, 0, false
 		}
 		fileSize = v
 	}
-	c.debugPayloadf("tcp payload parsed remote=%s opcode=%s hash=%x fileSize=%d", c.remoteHost, opName, hash, fileSize)
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=%s hash=%x fileSize=%d", c.remoteHost(), opName, hash, fileSize)
 	return hash, fileSize, true
 }
 
 func (c *tcpClient) handleSearchRequest(data *Buffer) {
 	expr, err := ParseSearchExpr(data)
 	if err != nil {
-		logging.Warnf("search request parse failed remote=%s err=%v", c.remoteHost, err)
+		logging.Warnf("search request parse failed remote=%s err=%v", c.remoteHost(), err)
 		// Answered with an empty page for the same reason a zero-result search is
 		// (see below): silence leaves the client "Searching…" until its timeout.
 		c.sendSearchPage(nil)
 		return
 	}
-	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST expr=%s", c.remoteHost, formatSearchExpr(expr))
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST expr=%s", c.remoteHost(), formatSearchExpr(expr))
 	if c.server.queryBlocked(expr) {
 		// Answered like any search with no match, and without asking the index or
 		// the catalogue daemons.
@@ -2030,13 +1992,13 @@ func (c *tcpClient) handleSearchRequest(data *Buffer) {
 	if seeds, ok := storage.FindRelated(expr); ok {
 		// Not merged with meta or mirrored rows: those have no users to relate.
 		files := c.server.relatedSearch(expr, seeds)
-		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST related resultCount=%d", c.remoteHost, len(files))
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST related resultCount=%d", c.remoteHost(), len(files))
 		c.sendSearchPage(files)
 		return
 	}
 	metaCh := c.server.startMetaSearch(expr, c.metaCapable, false)
 	files := c.server.withholdFiles(mergeMetaResults(c.server.Storage.FindBySearch(expr), metaCh))
-	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST resultCount=%d", c.remoteHost, len(files))
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_SEARCHREQUEST resultCount=%d", c.remoteHost(), len(files))
 	// A zero-result reply must still be sent. OP_SEARCHRESULT is the only packet
 	// that reaches eMule's LocalEd2kSearchEnd, which is what cancels the 50 s
 	// local-search timer — on silence the client sits in "Searching…" for the
@@ -2057,12 +2019,12 @@ func (c *tcpClient) handleQueryMoreResult() {
 	c.dropExpiredResults(time.Now())
 	kept := c.pendingResults.Load()
 	if kept == nil || len(kept.rows) == 0 {
-		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_QUERY_MORE_RESULT pending=0", c.remoteHost)
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_QUERY_MORE_RESULT pending=0", c.remoteHost())
 		c.sendSearchResult(nil, false)
 		return
 	}
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_QUERY_MORE_RESULT pending=%d",
-		c.remoteHost, len(kept.rows))
+		c.remoteHost(), len(kept.rows))
 	// Filtered again: the pages were cut when the search ran, and a list can have
 	// gained a hash since. The deadline stays the one of the search.
 	c.sendSearchPageUntil(c.server.withholdFiles(kept.rows), kept.expires)
@@ -2089,19 +2051,19 @@ func (c *tcpClient) sendSearchPageUntil(files []storage.File, expires time.Time)
 func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 	lowID, err := data.GetUInt32LE()
 	if err != nil {
-		logging.Warnf("callback request parse failed remote=%s err=%v", c.remoteHost, err)
+		logging.Warnf("callback request parse failed remote=%s err=%v", c.remoteHost(), err)
 		return
 	}
-	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d", c.remoteHost, lowID)
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d", c.remoteHost(), lowID)
 	v, ok := c.server.LowIDs.Get(lowID)
 	if !ok {
-		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=not-found", c.remoteHost, lowID)
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=not-found", c.remoteHost(), lowID)
 		c.sendCallbackFailed()
 		return
 	}
 	target, ok := v.(*tcpClient)
 	if !ok {
-		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=invalid-target-type", c.remoteHost, lowID)
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=invalid-target-type", c.remoteHost(), lowID)
 		c.sendCallbackFailed()
 		return
 	}
@@ -2109,7 +2071,7 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 	// storage connect come after), so a target can be found here before it is a
 	// session anyone may reach.
 	if !target.isLogged() {
-		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=target-not-logged-in", c.remoteHost, lowID)
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=target-not-logged-in", c.remoteHost(), lowID)
 		c.sendCallbackFailed()
 		return
 	}
@@ -2118,7 +2080,7 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 	targetInfo := target.snapshotInfo()
 	self := c.snapshotInfo()
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d targetIPv4=%d targetPort=%d",
-		c.remoteHost, lowID, targetInfo.IPv4, targetInfo.Port)
+		c.remoteHost(), lowID, targetInfo.IPv4, targetInfo.Port)
 
 	// Pick the callback family from the requester's reachability, as two separate
 	// checks. Classic IPv4 is preferred when the requester has a HighID (a routable
@@ -2129,18 +2091,18 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 	switch {
 	case !self.LowID && self.IPv4 != 0:
 		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d family=ipv4 callbackIPv4=%d callbackPort=%d",
-			c.remoteHost, lowID, self.IPv4, self.Port)
+			c.remoteHost(), lowID, self.IPv4, self.Port)
 		err = target.sendCallbackRequested(self.IPv4, self.Port, self.CryptOptions, self.Hash)
 	case c.server.publishV6Sources() && len(self.IPv6) == 16 && self.IPv6Reachable && target.isV6Capable() &&
 		(len(targetInfo.IPv6) == 16 || target.connectedV6):
 		// The target must have IPv6 itself to dial the requester: being able to parse
 		// the opcode is not enough, and a v6 callback it cannot place fails silently.
 		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d family=ipv6 callbackIPv6=%s callbackPort=%d",
-			c.remoteHost, lowID, net.IP(self.IPv6).String(), self.Port)
+			c.remoteHost(), lowID, net.IP(self.IPv6).String(), self.Port)
 		err = target.sendCallbackRequestedIPv6(self.IPv6, self.Port)
 	default:
 		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=unreachable",
-			c.remoteHost, lowID)
+			c.remoteHost(), lowID)
 		c.sendCallbackFailed()
 		return
 	}
@@ -2306,7 +2268,7 @@ func (c *tcpClient) buildServerIdent(offerV1 *offerV1Policy) *Buffer {
 		offerV1:          offerV1,
 	})
 	if err != nil {
-		logging.Warnf("tcp server ident not sent remote=%s err=%v", c.remoteHost, err)
+		logging.Warnf("tcp server ident not sent remote=%s err=%v", c.remoteHost(), err)
 		return nil
 	}
 	return packet
@@ -2368,10 +2330,12 @@ func (c *tcpClient) writeRaw(data []byte) error {
 
 // writeRawLocked is writeRaw for a caller that holds writeMu.
 func (c *tcpClient) writeRawLocked(data []byte) error {
-	LogTCPRaw(c.module, "send", c.remoteHost, data)
-	c.logSendPayload(data)
+	if logging.DebugEnabled() {
+		LogTCPRaw(c.module(), "send", c.remoteHost().String(), data)
+		c.logSendPayload(data)
+	}
 	// writeRaw is reachable from goroutines other than this connection's own —
-	// the status ticker and a peer's OP_CALLBACKREQUEST both land here — so the
+	// the status loop and a peer's OP_CALLBACKREQUEST both land here — so the
 	// state and the key must be read together, under the crypt lock.
 	if c.crypt != nil {
 		if key, encrypting := c.crypt.SendCipher(); encrypting {
@@ -2397,8 +2361,11 @@ func (c *tcpClient) writeRawLocked(data []byte) error {
 }
 
 func (c *tcpClient) debugPayloadf(format string, args ...any) {
+	if !logging.DebugEnabled() {
+		return
+	}
 	all := make([]any, 0, len(args)+1)
-	all = append(all, c.module)
+	all = append(all, c.module())
 	all = append(all, args...)
 	logging.Debugf("[module=%s] "+format, all...)
 }
@@ -2412,11 +2379,11 @@ func (c *tcpClient) logSendPayload(raw []byte) {
 		inflated, err := InflateZlibPayload(payload)
 		if err != nil {
 			logging.Warnf("tcp payload parse failed remote=%s dir=send protocol=PR_ZLIB opcode=%s err=%v",
-				c.remoteHost, opcodeLabel(opcode), err)
+				c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		c.debugPayloadf("tcp payload parsed remote=%s dir=send protocol=PR_ZLIB opcode=%s compressedPayloadLen=%d decompressedPayloadLen=%d",
-			c.remoteHost, opcodeLabel(opcode), len(payload), len(inflated))
+			c.remoteHost(), opcodeLabel(opcode), len(payload), len(inflated))
 		c.logSendPayloadByOpcode(opcode, inflated)
 		return
 	}
@@ -2429,38 +2396,38 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 	case OpServerMessage:
 		msg, err := b.GetString()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
-		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s message=%q", c.remoteHost, opcodeLabel(opcode), msg)
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s message=%q", c.remoteHost(), opcodeLabel(opcode), msg)
 	case OpServerStatus:
 		users, err := b.GetUInt32LE()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		files, err := b.GetUInt32LE()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
-		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s users=%d files=%d", c.remoteHost, opcodeLabel(opcode), users, files)
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s users=%d files=%d", c.remoteHost(), opcodeLabel(opcode), users, files)
 	case OpIDChange:
 		id, err := b.GetUInt32LE()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		flags, err := b.GetUInt32LE()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
-		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s id=%d flags=%d", c.remoteHost, opcodeLabel(opcode), id, flags)
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s id=%d flags=%d", c.remoteHost(), opcodeLabel(opcode), id, flags)
 	case OpServerList:
 		count, err := b.GetUInt8()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		entries := make([]string, 0, count)
@@ -2471,12 +2438,12 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 		for i := 0; i < int(count); i++ {
 			ipv4, err := b.GetUInt32LE()
 			if err != nil {
-				logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+				logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 				return
 			}
 			port, err := b.GetUInt16LE()
 			if err != nil {
-				logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+				logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 				return
 			}
 			if i < limit {
@@ -2487,89 +2454,89 @@ func (c *tcpClient) logSendPayloadByOpcode(opcode uint8, payload []byte) {
 			entries = append(entries, fmt.Sprintf("...+%d", int(count)-limit))
 		}
 		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s serverCount=%d servers=[%s]",
-			c.remoteHost, opcodeLabel(opcode), count, strings.Join(entries, ", "))
+			c.remoteHost(), opcodeLabel(opcode), count, strings.Join(entries, ", "))
 	case OpServerIdent:
 		hash := b.Get(16)
 		if len(hash) != 16 {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=invalid-hash-len", c.remoteHost, opcodeLabel(opcode))
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=invalid-hash-len", c.remoteHost(), opcodeLabel(opcode))
 			return
 		}
 		ipv4, err := b.GetUInt32LE()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		port, err := b.GetUInt16LE()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		tags, err := b.GetTags()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s hash=%x ip=%d port=%d tags=%s",
-			c.remoteHost, opcodeLabel(opcode), hash, ipv4, port, formatNamedTags(tags, 24))
+			c.remoteHost(), opcodeLabel(opcode), hash, ipv4, port, formatNamedTags(tags, 24))
 	case OpFoundSources:
 		hash, count, entries, err := parseFoundSourcesPayload(payload, false, 20)
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s fileHash=%x sourceCount=%d payloadLen=%d sources=%s",
-			c.remoteHost, opcodeLabel(opcode), hash, count, len(payload), entries)
+			c.remoteHost(), opcodeLabel(opcode), hash, count, len(payload), entries)
 	case OpFoundSourcesObfu:
 		hash, count, entries, err := parseFoundSourcesPayload(payload, true, 20)
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s fileHash=%x sourceCount=%d payloadLen=%d sources=%s",
-			c.remoteHost, opcodeLabel(opcode), hash, count, len(payload), entries)
+			c.remoteHost(), opcodeLabel(opcode), hash, count, len(payload), entries)
 	case OpSearchResult:
 		files, err := b.GetFileList()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s resultCount=%d files=%s",
-			c.remoteHost, opcodeLabel(opcode), len(files), formatFileRecordsForLog(files, 5))
+			c.remoteHost(), opcodeLabel(opcode), len(files), formatFileRecordsForLog(files, 5))
 	case OpCallbackReqd:
 		ipv4, err := b.GetUInt32LE()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		port, err := b.GetUInt16LE()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s targetIP=%d targetPort=%d",
-			c.remoteHost, opcodeLabel(opcode), ipv4, port)
+			c.remoteHost(), opcodeLabel(opcode), ipv4, port)
 	case OpCallbackReqdIPv6:
 		ipv6 := b.Get(16)
 		if len(ipv6) != 16 {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=short-ipv6", c.remoteHost, opcodeLabel(opcode))
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=short-ipv6", c.remoteHost(), opcodeLabel(opcode))
 			return
 		}
 		port, err := b.GetUInt16LE()
 		if err != nil {
-			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost, opcodeLabel(opcode), err)
+			logging.Warnf("tcp payload parse failed remote=%s dir=send opcode=%s err=%v", c.remoteHost(), opcodeLabel(opcode), err)
 			return
 		}
 		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s targetIPv6=%s targetPort=%d",
-			c.remoteHost, opcodeLabel(opcode), net.IP(ipv6).String(), port)
+			c.remoteHost(), opcodeLabel(opcode), net.IP(ipv6).String(), port)
 	case OpCallbackFailed:
-		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s payload=empty", c.remoteHost, opcodeLabel(opcode))
+		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s payload=empty", c.remoteHost(), opcodeLabel(opcode))
 	default:
 		previewLen := len(payload)
 		if previewLen > 128 {
 			previewLen = 128
 		}
 		c.debugPayloadf("tcp payload parsed remote=%s dir=send opcode=%s payloadLen=%d previewHex=%s",
-			c.remoteHost, opcodeLabel(opcode), len(payload), hex.EncodeToString(payload[:previewLen]))
+			c.remoteHost(), opcodeLabel(opcode), len(payload), hex.EncodeToString(payload[:previewLen]))
 	}
 }
 
@@ -2697,12 +2664,12 @@ func (s *ServerRuntime) probeFirewalled(client *tcpClient, port uint16) bool {
 		return true
 	}
 	if s.tcp().SupportCrypt {
-		ok, err := s.probeClient(client, port, true, "tcp4", client.remoteHost)
+		ok, err := s.probeClient(client, port, true, "tcp4", client.remoteHost().String())
 		if err == nil && ok {
 			return false
 		}
 	}
-	ok, err := s.probeClient(client, port, false, "tcp4", client.remoteHost)
+	ok, err := s.probeClient(client, port, false, "tcp4", client.remoteHost().String())
 	return err != nil || !ok
 }
 
@@ -2765,12 +2732,16 @@ func (s *ServerRuntime) probeClient(client *tcpClient, port uint16, enableCrypt 
 	start := time.Now()
 	ok, source, err := s.dialHello(client, port, enableCrypt, network, host)
 	elapsed := time.Since(start).Round(time.Millisecond)
+	// The target is formatted only for a line that is printed: most logins succeed
+	// with debug logging off.
 	if ok && err == nil {
-		logging.Debugf("dial-back ok remote=%s network=%s target=%s crypt=%t source=%s elapsed=%s",
-			client.remoteHost, network, net.JoinHostPort(host, fmt.Sprintf("%d", port)), enableCrypt, source, elapsed)
+		if logging.DebugEnabled() {
+			logging.Debugf("dial-back ok remote=%s network=%s target=%s crypt=%t source=%s elapsed=%s",
+				client.remoteHost(), network, probeTarget(host, port), enableCrypt, source, elapsed)
+		}
 	} else {
 		logging.Infof("dial-back failed remote=%s network=%s target=%s crypt=%t source=%s elapsed=%s timeout=%s err=%v",
-			client.remoteHost, network, net.JoinHostPort(host, fmt.Sprintf("%d", port)), enableCrypt, source, elapsed,
+			client.remoteHost(), network, probeTarget(host, port), enableCrypt, source, elapsed,
 			s.tcp().ConnectionTimeout, err)
 	}
 	return ok, err
@@ -2781,10 +2752,10 @@ func (s *ServerRuntime) probeClient(client *tcpClient, port uint16, enableCrypt 
 // step that failed.
 func (s *ServerRuntime) dialHello(client *tcpClient, port uint16, enableCrypt bool, network, host string) (bool, string, error) {
 	if port == 0 {
-		return false, "", fmt.Errorf("client port is 0")
+		return false, "", errProbePortZero
 	}
-	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	dialer := net.Dialer{Timeout: s.tcp().ConnectionTimeout}
+	addr := probeTarget(host, port)
+	dialer := net.Dialer{Timeout: s.tcp().ConnectionTimeout, Control: dialBackControl}
 	// Only bind a local source address whose family matches the dial network;
 	// binding a v4 LocalAddr to a tcp6 dial (or vice versa) fails outright.
 	var inbound net.Addr
@@ -2796,7 +2767,7 @@ func (s *ServerRuntime) dialHello(client *tcpClient, port uint16, enableCrypt bo
 	}
 	conn, err := dialer.Dial(network, addr)
 	if err != nil {
-		return false, "", fmt.Errorf("dial: %w", err)
+		return false, "", &probeStepError{step: "dial", err: err}
 	}
 	defer conn.Close()
 	source := conn.LocalAddr().String()
@@ -2821,10 +2792,10 @@ func (s *ServerRuntime) dialHello(client *tcpClient, port uint16, enableCrypt bo
 			return false, source, err
 		}
 		if err := writeWithDeadline(conn, handshake, s.tcp().ConnectionTimeout); err != nil {
-			return false, source, fmt.Errorf("send crypt handshake: %w", err)
+			return false, source, &probeStepError{step: "send crypt handshake", err: err}
 		}
 		if leftover, err = readHandshake(cli, conn, s.tcp().ConnectionTimeout); err != nil {
-			return false, source, fmt.Errorf("read crypt handshake answer: %w", err)
+			return false, source, &probeStepError{step: "read crypt handshake answer", err: err}
 		}
 	}
 
@@ -2837,7 +2808,7 @@ func (s *ServerRuntime) dialHello(client *tcpClient, port uint16, enableCrypt bo
 		helloBytes = RC4Crypt(helloBytes, len(helloBytes), cli.SendKey)
 	}
 	if err := writeWithDeadline(conn, helloBytes, s.tcp().ConnectionTimeout); err != nil {
-		return false, source, fmt.Errorf("send hello: %w", err)
+		return false, source, &probeStepError{step: "send hello", err: err}
 	}
 	answer, ok, err := readHelloAnswer(cli, conn, s.tcp().ConnectionTimeout, cli.Hash, leftover)
 	// The probe is a client-to-client hello, the one place a client names its mod;
@@ -2850,16 +2821,20 @@ func (s *ServerRuntime) dialHello(client *tcpClient, port uint16, enableCrypt bo
 		}
 	}
 	if err != nil {
-		err = fmt.Errorf("read hello answer: %w", err)
+		err = &probeStepError{step: "read hello answer", err: err}
 	}
 	return ok, source, err
 }
 
 // readHandshake reads the obfuscation handshake answer, however TCP splits it, and
-// returns what followed it, decrypted.
+// returns what followed it, decrypted. The read buffer comes from readBufPool:
+// Decrypt copies what it keeps (RC4Crypt allocates its output), so nothing returned
+// points into it.
 func readHandshake(cli *Client, conn net.Conn, timeout time.Duration) ([]byte, error) {
 	deadline := time.Now().Add(timeout)
-	buf := make([]byte, 4096)
+	bp := readBufPool.Get().(*[]byte)
+	defer readBufPool.Put(bp)
+	buf := *bp
 	for {
 		_ = conn.SetReadDeadline(deadline)
 		n, err := conn.Read(buf)
@@ -2883,7 +2858,11 @@ func readHandshake(cli *Client, conn net.Conn, timeout time.Duration) ([]byte, e
 // returned with ok, for the tags it carries.
 func readHelloAnswer(cli *Client, conn net.Conn, timeout time.Duration, wantHash, buffer []byte) (HelloAnswer, bool, error) {
 	deadline := time.Now().Add(timeout)
-	buf := make([]byte, 4096)
+	// Each read is appended to buffer (decrypted into a new slice first), so the
+	// parsed answer never points into the pooled read buffer.
+	bp := readBufPool.Get().(*[]byte)
+	defer readBufPool.Put(bp)
+	buf := *bp
 
 	for first := true; ; first = false {
 		if !first || len(buffer) == 0 {
@@ -3149,7 +3128,9 @@ func (s *ServerRuntime) udpCryptPingReply(data []byte, remote *net.UDPAddr, conn
 	}
 	s.gossip().NoteInboundPingChallenge(remote.IP, challenge)
 	reply := NewUDPCrypt(true, challenge).Encrypt(packet.Bytes())
-	LogUDPRaw(module, "send", remote.String(), reply)
+	if logging.DebugEnabled() {
+		LogUDPRaw(module, "send", remote.String(), reply)
+	}
 	_, _ = conn.WriteToUDP(reply, remote)
 }
 
@@ -3262,7 +3243,9 @@ func (s *ServerRuntime) peerReplyCrypt(remote *net.UDPAddr, crypt *UDPCrypt) *UD
 }
 
 func udpSend(conn UDPReplyConn, remote *net.UDPAddr, data []byte, crypt *UDPCrypt, module string) error {
-	LogUDPRaw(module, "send", remote.String(), data)
+	if logging.DebugEnabled() {
+		LogUDPRaw(module, "send", remote.String(), data)
+	}
 	if crypt != nil && crypt.Status == CsEncrypting {
 		data = crypt.Encrypt(data)
 	}
@@ -3689,7 +3672,7 @@ func (c *tcpClient) replaceSameIPSession(hash []byte) {
 	}
 	oldInfo := old.snapshotInfo()
 	logging.Infof("login replaces stale session remote=%s hash=%x oldID=%d oldStoreID=%d",
-		c.remoteHost, hash, oldInfo.ID, oldInfo.StoreID)
+		c.remoteHost(), hash, oldInfo.ID, oldInfo.StoreID)
 	old.closeWithReason("replaced-by-relogin")
 	old.releaseSession()
 }
@@ -3721,7 +3704,7 @@ func (c *tcpClient) probeStaleSession(hash []byte) {
 		wait = staleSessionProbeWait
 	}
 	logging.Debugf("probing session held by duplicate login remote=%s hash=%x oldRemote=%s",
-		c.remoteHost, hash, old.remoteHost)
+		c.remoteHost(), hash, old.remoteHost())
 	// A failed write closes the old socket itself (see writeRaw), so its read loop
 	// releases it without waiting for the reset.
 	old.sendServerStatus()
@@ -3737,7 +3720,7 @@ func (c *tcpClient) probeStaleSession(hash []byte) {
 	old.storeMu.Lock()
 	old.storeMu.Unlock() //nolint:staticcheck // empty critical section waits out the release
 	logging.Infof("duplicate login found the held session dead remote=%s hash=%x oldRemote=%s",
-		c.remoteHost, hash, old.remoteHost)
+		c.remoteHost(), hash, old.remoteHost())
 }
 
 // releaseSession frees everything a session holds — its LowID, its hash index entry and
@@ -3752,7 +3735,7 @@ func (c *tcpClient) releaseSession() {
 			// this one sends the client nothing.
 			_ = c.conn.Close()
 			info := c.snapshotInfo()
-			logging.Debugf("tcp session handed off remote=%s id=%d storeID=%d", c.remoteHost, info.ID, info.StoreID)
+			logging.Debugf("tcp session handed off remote=%s id=%d storeID=%d", c.remoteHost(), info.ID, info.StoreID)
 			return
 		}
 		// Under storeMu, so a firewall recheck (promoteSession) cannot move the ID
@@ -3773,7 +3756,7 @@ func (c *tcpClient) releaseSession() {
 		c.storeMu.Unlock()
 		_ = c.conn.Close()
 		logging.Infof("tcp session closed remote=%s id=%d lowID=%t storeID=%d reason=%s",
-			c.remoteHost, info.ID, info.LowID, info.StoreID, c.getCloseReason())
+			c.remoteHost(), info.ID, info.LowID, info.StoreID, c.getCloseReason())
 	})
 }
 
@@ -3914,9 +3897,206 @@ func (c *tcpClient) pendingRows() []storage.File {
 }
 
 // dropExpiredResults drops the kept rows once their deadline has passed. Called by the
-// session's status ticker, so an idle session frees them too, and by the More handler.
+// status loop (statusloop.go), so an idle session frees them too, and by the More handler.
 func (c *tcpClient) dropExpiredResults(now time.Time) {
 	if p := c.pendingResults.Load(); p != nil && !now.Before(p.expires) {
 		c.pendingResults.CompareAndSwap(p, nil)
 	}
+}
+
+// readBufSize is the size of one read. The buffer is held only while the bytes are
+// handled, so a larger one would not cost an idle session anything.
+const readBufSize = 4096
+
+// readBufPool holds the read loop's buffers. Nothing may keep a reference into one
+// past handleBytes: Packet, the header remainder and the crypt state copy what they
+// keep, as they had to when each session reused its own buffer.
+var readBufPool = sync.Pool{New: func() any {
+	b := make([]byte, readBufSize)
+	return &b
+}}
+
+// errReadZero is a Read that returned neither bytes nor an error.
+var errReadZero = errors.New("read-zero")
+
+// armReadDeadline sets the read deadline for the next wait and reports whether the
+// session is still before login.
+//
+//go:noinline
+func (c *tcpClient) armReadDeadline(loginDeadline time.Time) bool {
+	var deadline time.Time
+	if c.server.tcp().DisconnectTimeout > 0 {
+		deadline = time.Now().Add(c.server.tcp().DisconnectTimeout)
+	}
+	preLogin := !loginDeadline.IsZero() && !c.isLogged()
+	if preLogin && (deadline.IsZero() || loginDeadline.Before(deadline)) {
+		deadline = loginDeadline
+	}
+	if !deadline.IsZero() {
+		_ = c.conn.SetReadDeadline(deadline)
+	}
+	return preLogin
+}
+
+// readAndHandle reads what has arrived into a pooled buffer and handles it.
+//
+//go:noinline
+func (c *tcpClient) readAndHandle() error {
+	bp := readBufPool.Get().(*[]byte)
+	defer readBufPool.Put(bp)
+	n, err := c.conn.Read(*bp)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errReadZero
+	}
+	c.handleBytes((*bp)[:n])
+	return nil
+}
+
+// offStack runs f on a goroutine of its own and waits for it, so the stack f grows
+// is not the caller's; see tcpClient.run. The channel orders f's work before what
+// the caller does next, as if it had run inline.
+//
+//go:noinline
+func offStack(f func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	<-done
+}
+
+// readFailed handles an error from the wait or the read: a timeout while a handover
+// round runs parks the session, anything else ends it with the reason recorded. It
+// reports whether the loop goes on.
+//
+//go:noinline
+func (c *tcpClient) readFailed(err error, preLogin bool) bool {
+	if round := c.server.parking.Load(); round != nil && isTimeout(err) {
+		return c.park(round)
+	}
+	if errors.Is(err, errReadZero) {
+		c.setCloseReason("read-zero")
+	} else if errors.Is(err, io.EOF) {
+		c.setCloseReason("peer-closed")
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() && preLogin {
+		c.setCloseReason(fmt.Sprintf("login-timeout(%s)", c.server.tcp().LoginTimeout))
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		c.setCloseReason(fmt.Sprintf("read-timeout(%s)", c.server.tcp().DisconnectTimeout))
+	} else {
+		c.setCloseReason(fmt.Sprintf("read-error: %v", err))
+	}
+	return false
+}
+
+// admitTCP runs the checks on a new connection and builds its session, nil when the
+// connection was refused and closed. slot is the per-IP key to release at the end,
+// "" when none was taken.
+//
+//go:noinline
+func (s *ServerRuntime) admitTCP(conn net.Conn, enableCrypt bool) (*tcpClient, string) {
+	// Filtered before newTCPClient, so a blocked address is closed without a byte
+	// being read or a session goroutine, status-loop slot or crypt state being created.
+	// Closing silently rather than sending OP_SERVERMESSAGE first is deliberate: the
+	// reply would cost a round trip to an address we have already decided not to
+	// serve, and it tells a scanner it found an eD2K server.
+	if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		if blocked, reason := s.blockedPeer(NormalizeIP(tcpAddr.IP)); blocked {
+			logging.Debugf("tcp connection refused remote=%s reason=%s", tcpAddr.IP, reason)
+			_ = conn.Close()
+			return nil, ""
+		}
+	}
+	// Record every accepted address so gossip can refuse to admit a client as a peer.
+	// Placed after the filter so a blocked address is not tracked at all.
+	if g := s.gossip(); g != nil {
+		if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+			g.NoteClient(tcpAddr.IP)
+		}
+	}
+	slot := ""
+	if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		key := addressKey(NormalizeIP(tcpAddr.IP))
+		if !s.acquireConnSlot(key) {
+			s.blocks.connLimit.Add(1)
+			logging.Debugf("tcp connection refused remote=%s reason=per-ip-limit(%d)", tcpAddr.IP, s.tcp().MaxConnsPerIP)
+			_ = conn.Close()
+			return nil, ""
+		}
+		slot = key
+	}
+	client := newTCPClient(s, conn, enableCrypt)
+	s.trackSession(client)
+	return client, slot
+}
+
+// endTCP undoes admitTCP once the read loop has ended.
+//
+//go:noinline
+func (s *ServerRuntime) endTCP(client *tcpClient, slot string) {
+	s.untrackSession(client)
+	if slot != "" {
+		s.releaseConnSlot(slot)
+	}
+}
+
+// module is the session's log module: "tcp-obfs" for the obfuscated listener, where
+// every session has a crypt, "tcp" for the plain one.
+func (c *tcpClient) module() string {
+	return tcpModule(c.crypt != nil)
+}
+
+// remoteHost is the session's remote address for log lines. Its String formats
+// peerIP only when a line is printed; boxing the pointer into a log argument
+// allocates nothing.
+func (c *tcpClient) remoteHost() *sessionHost {
+	return (*sessionHost)(c)
+}
+
+// sessionHost formats a session's remote address; see remoteHost.
+type sessionHost tcpClient
+
+// String is peerIP, or for a connection that is not TCP (a test pipe) the host of
+// its RemoteAddr.
+func (h *sessionHost) String() string {
+	c := (*tcpClient)(h)
+	if c.peerIP != nil {
+		return c.peerIP.String()
+	}
+	if c.conn != nil {
+		if addr := c.conn.RemoteAddr(); addr != nil {
+			return splitHost(addr.String())
+		}
+	}
+	return ""
+}
+
+// logPacket debug-logs a received packet. The address is formatted only when debug
+// logging is on.
+func (c *tcpClient) logPacket(dir string, protocol, opcode uint8, payload []byte) {
+	if logging.DebugEnabled() {
+		LogTCPPacket(c.module(), dir, c.remoteHost().String(), protocol, opcode, payload)
+	}
+}
+
+// errProbePortZero fails a dial-back to a client that advertised port 0.
+var errProbePortZero = errors.New("client port is 0")
+
+// probeStepError names the dial-back step that failed. Unlike fmt.Errorf it builds
+// the message only when it is printed: a LowID login fails its probe, and with
+// info logging off the message was never read.
+type probeStepError struct {
+	step string
+	err  error
+}
+
+func (e *probeStepError) Error() string { return e.step + ": " + e.err.Error() }
+func (e *probeStepError) Unwrap() error { return e.err }
+
+// probeTarget is the host:port a dial-back connects to.
+func probeTarget(host string, port uint16) string {
+	return net.JoinHostPort(host, strconv.Itoa(int(port)))
 }

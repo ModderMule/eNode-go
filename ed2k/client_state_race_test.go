@@ -13,7 +13,7 @@ import (
 //
 // Three goroutines touch a connection's state concurrently in production and
 // none of them was synchronised: the connection's own goroutine writes info and
-// logged during login; the periodic status ticker reads logged; and any peer
+// logged during login; the status loop reads logged; and any peer
 // handling OP_CALLBACKREQUEST reaches this client through the shared LowIDs
 // table, reading its info and calling writeRaw — which in turn reads the crypt
 // state and the RC4 send key.
@@ -47,14 +47,9 @@ func TestConcurrentLoginAndCallbackHaveNoRace(t *testing.T) {
 	targetID := target.snapshotInfo().ID
 	t.Logf("input: target logged in with lowID=%d, %d concurrent peers", targetID, clients)
 
-	// Its status ticker reads logged from a separate goroutine.
-	target.startPeriodicServerStatus()
-	defer func() {
-		if target.statusStop != nil {
-			close(target.statusStop)
-			target.statusStop = nil
-		}
-	}()
+	// The status loop reads logged from a separate goroutine.
+	rt.trackSession(target)
+	defer rt.untrackSession(target)
 
 	// Peers hammering OP_CALLBACKREQUEST at the target: each reads target.info
 	// and writes to target's socket from its own goroutine.
@@ -139,7 +134,7 @@ func TestConcurrentWritesDuringCryptHandshakeHaveNoRace(t *testing.T) {
 		client.handleBytes(negIn)
 	}()
 
-	// Other goroutines write concurrently, as the status ticker and callback
+	// Other goroutines write concurrently, as the status loop and callback
 	// path do.
 	for i := 0; i < 4; i++ {
 		wg.Add(1)

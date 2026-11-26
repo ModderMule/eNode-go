@@ -65,7 +65,7 @@ func (c *tcpClient) completeTakeover() bool {
 	if old, how := c.takeoverFrom(info.Hash, info.Port, c.server.sessionTokens.claimed(c)); old != nil {
 		oldInfo := old.snapshotInfo()
 		logging.Infof("login replaces live session remote=%s hash=%x by=%s oldRemote=%s oldID=%d",
-			c.remoteHost, info.Hash, how, old.remoteHost, oldInfo.ID)
+			c.remoteHost(), info.Hash, how, old.remoteHost(), oldInfo.ID)
 		reason := "replaced-by-takeover"
 		if how == takeoverDualStack {
 			reason = "replaced-by-ipv6-session"
@@ -74,7 +74,7 @@ func (c *tcpClient) completeTakeover() bool {
 		old.releaseSession()
 	}
 	if c.server.Storage.IsConnected(storage.ClientInfo{Hash: info.Hash}) {
-		logging.Warnf("login rejected remote=%s hash=%x: already connected", c.remoteHost, info.Hash)
+		logging.Warnf("login rejected remote=%s hash=%x: already connected", c.remoteHost(), info.Hash)
 		c.sendServerMessage("Already connected from another session.")
 		c.closeWithReason("duplicate-login")
 		return false
@@ -89,7 +89,7 @@ func (c *tcpClient) issueSessionToken() {
 	c.server.sessionTokens.drop(c)
 	var token [16]byte
 	if _, err := rand.Read(token[:]); err != nil {
-		logging.Warnf("session token not issued remote=%s err=%v", c.remoteHost, err)
+		logging.Warnf("session token not issued remote=%s err=%v", c.remoteHost(), err)
 		return
 	}
 	c.server.natCallback.setToken(c, token)

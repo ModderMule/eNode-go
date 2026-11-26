@@ -187,3 +187,43 @@ func TestParseCgroupLimit(t *testing.T) {
 		t.Fatalf("readCgroupLimit = %d, want the v1 limit", got)
 	}
 }
+
+// TestGuardAppliesGCPercent covers memory.gcPercent: a set value replaces GOGC, and
+// 0 after a reload puts back the GOGC the process started with.
+func TestGuardAppliesGCPercent(t *testing.T) {
+	var live, applied int64
+	g := testGuard(config.MemoryConfig{GCPercent: 50}, 0, &live, &applied)
+	g.envGC = 100
+	g.gcPercent = 100
+	var set []int
+	g.setGC = func(n int) int { set = append(set, n); return 0 }
+
+	g.mu.Lock()
+	g.applyLocked()
+	g.mu.Unlock()
+	t.Logf("input: gcPercent=50 GOGC=100; output: set=%v stats=%d", set, g.Stats().GCPercent)
+	if len(set) != 1 || set[0] != 50 || g.Stats().GCPercent != 50 {
+		t.Fatalf("set=%v, want [50]", set)
+	}
+
+	g.Reload(config.MemoryConfig{AutoPercent: 75, ShedAtPercent: 80, KeepPercent: 50})
+	t.Logf("input: reload with gcPercent=0; output: set=%v stats=%d", set, g.Stats().GCPercent)
+	if len(set) != 2 || set[1] != 100 || g.Stats().GCPercent != 100 {
+		t.Fatalf("set=%v, want GOGC 100 back", set)
+	}
+
+	g.Reload(config.MemoryConfig{AutoPercent: 75, ShedAtPercent: 80, KeepPercent: 50})
+	if len(set) != 2 {
+		t.Fatalf("an unchanged value was set again: %v", set)
+	}
+}
+
+func TestGCPercentFromEnv(t *testing.T) {
+	for in, want := range map[string]int{"": 100, "50": 50, "off": -1, "junk": 100} {
+		got := gcPercentFromEnv(in)
+		t.Logf("input: GOGC=%q; output: %d", in, got)
+		if got != want {
+			t.Errorf("GOGC=%q: got %d, want %d", in, got, want)
+		}
+	}
+}

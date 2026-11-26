@@ -108,12 +108,12 @@ func TestDuplicateLoginSameIPReplacesStaleSession(t *testing.T) {
 		t.Fatalf("first login should have succeeded with a LowID (logged=%t lowID=%t)", first.logged, first.hasLowID)
 	}
 	firstID := first.info.ID
-	t.Logf("input: first login hash=%x remote=%s -> id=%d lowIDs=%d", hash, first.remoteHost, firstID, rt.LowIDs.Count())
+	t.Logf("input: first login hash=%x remote=%s -> id=%d lowIDs=%d", hash, first.remoteHost(), firstID, rt.LowIDs.Count())
 
 	secondConn := &mockConn{}
 	second := newTCPClient(rt, secondConn, false)
 	second.handlePacket(loginPacket(t, hash, 0, 4663))
-	t.Logf("input: second login, same hash, same remote=%s", second.remoteHost)
+	t.Logf("input: second login, same hash, same remote=%s", second.remoteHost())
 	t.Logf("output: second logged=%t id=%d closed=%d; first closed=%d reason=%q",
 		second.logged, second.info.ID, secondConn.closed, firstConn.closed, first.getCloseReason())
 

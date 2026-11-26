@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,8 +61,10 @@ type CacheStats struct {
 type Stats struct {
 	Enabled bool `json:"enabled"`
 	// Limit is the soft limit in bytes; 0 = none, the guard sheds nothing.
-	Limit         int64        `json:"limit"`
-	Source        string       `json:"source"`
+	Limit  int64  `json:"limit"`
+	Source string `json:"source"`
+	// GCPercent is the GC target in effect: memory.gcPercent, else GOGC.
+	GCPercent     int          `json:"gcPercent"`
 	ShedAtPercent int          `json:"shedAtPercent"`
 	KeepPercent   int          `json:"keepPercent"`
 	LiveHeap      int64        `json:"liveHeap"`
@@ -75,11 +78,14 @@ type Stats struct {
 type Guard struct {
 	// envLimit is the GOMEMLIMIT the process started with; math.MaxInt64 = unset.
 	envLimit int64
+	// envGC is the GOGC the process started with: 100 when unset, -1 for off.
+	envGC int
 	// Probes, replaced in tests.
 	cgroupLimit func() int64
 	physicalRAM func() int64
 	liveHeap    func() int64
 	setLimit    func(int64) int64
+	setGC       func(int) int
 	now         func() time.Time
 
 	kick    chan struct{}
@@ -89,6 +95,7 @@ type Guard struct {
 	cfg           config.MemoryConfig
 	limit         int64
 	source        string
+	gcPercent     int
 	caches        []namedCache
 	lastLive      int64
 	sheds         uint64
@@ -110,8 +117,12 @@ func New(cfg config.MemoryConfig) *Guard {
 		// The runtime has parsed it already; a negative argument only reads.
 		env = debug.SetMemoryLimit(-1)
 	}
+	envGC := gcPercentFromEnv(os.Getenv("GOGC"))
 	return &Guard{
 		envLimit:    env,
+		envGC:       envGC,
+		gcPercent:   envGC,
+		setGC:       debug.SetGCPercent,
 		cgroupLimit: cgroupMemoryLimit,
 		physicalRAM: physicalMemory,
 		liveHeap:    readLiveHeap,
@@ -196,6 +207,7 @@ func (g *Guard) Stats() Stats {
 		Enabled:       g.cfg.EnabledOrDefault(),
 		Limit:         g.limit,
 		Source:        g.source,
+		GCPercent:     g.gcPercent,
 		ShedAtPercent: g.cfg.ShedAtPercent,
 		KeepPercent:   g.cfg.KeepPercent,
 		LiveHeap:      g.lastLive,
@@ -228,6 +240,15 @@ func (g *Guard) applyLocked() {
 	default:
 		// Off, none, or GOMEMLIMIT: the limit the process started with stands.
 		g.setLimit(g.envLimit)
+	}
+	gc := g.envGC
+	if g.cfg.GCPercent > 0 {
+		gc = g.cfg.GCPercent
+	}
+	if gc != g.gcPercent {
+		g.setGC(gc)
+		logging.Infof("memory guard: GC percent %d (GOGC %d)", gc, g.envGC)
+		g.gcPercent = gc
 	}
 }
 
@@ -291,6 +312,18 @@ func readLiveHeap() int64 {
 		return 0
 	}
 	return int64(sample[0].Value.Uint64())
+}
+
+// gcPercentFromEnv parses GOGC as the runtime does: unset or unparsable is 100,
+// "off" is -1.
+func gcPercentFromEnv(v string) int {
+	if v == "off" {
+		return -1
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		return n
+	}
+	return 100
 }
 
 func mib(n int64) string {

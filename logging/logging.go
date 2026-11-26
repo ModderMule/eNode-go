@@ -106,6 +106,14 @@ func enabled(level Level) bool {
 	return Level(atomic.LoadInt32(&currentLevel)) <= level
 }
 
+// DebugEnabled reports whether debug lines are written. A caller checks it before
+// building an argument that costs something: Debugf drops a line only after its
+// arguments were evaluated, and a per-packet log line built for nothing was a quarter
+// of what a login allocated (docs/memory-footprint.local.md §2.5).
+func DebugEnabled() bool {
+	return enabled(LevelDebug)
+}
+
 func Debugf(format string, args ...any) {
 	if enabled(LevelDebug) {
 		sugar.Debugf(format, args...)

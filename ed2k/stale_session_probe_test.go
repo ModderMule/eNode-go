@@ -78,7 +78,7 @@ func TestDuplicateLoginProbeFreesDeadSession(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() { first.run(); close(done) }()
-	t.Logf("input: ipv6 session hash=%x remote=%s, client process gone", hash, first.remoteHost)
+	t.Logf("input: ipv6 session hash=%x remote=%s, client process gone", hash, first.remoteHost())
 
 	secondConn := v4Conn()
 	second := newTCPClient(rt, secondConn, false)
@@ -118,7 +118,7 @@ func TestDuplicateLoginProbeKeepsLiveSession(t *testing.T) {
 	if !first.logged {
 		t.Fatalf("ipv6 login refused (reason=%q)", first.getCloseReason())
 	}
-	t.Logf("input: live ipv6 session hash=%x remote=%s", hash, first.remoteHost)
+	t.Logf("input: live ipv6 session hash=%x remote=%s", hash, first.remoteHost())
 
 	secondConn := v4Conn()
 	second := newTCPClient(rt, secondConn, false)

@@ -19,6 +19,12 @@ type MemoryConfig struct {
 	// KeepPercent is the share of its bytes each cache keeps per shed, expired
 	// entries dropped first. Default 50.
 	KeepPercent int `yaml:"keepPercent"`
+	// GCPercent is the GC target (GOGC): the heap may grow this many percent past
+	// what the last cycle found live before the next cycle runs. 0 keeps the GOGC the
+	// process started with (100 when unset). Lower trades GC CPU for resident memory:
+	// 50 holds the heap to 1.5× live instead of 2×. Applied whether or not the guard
+	// is enabled.
+	GCPercent int `yaml:"gcPercent"`
 }
 
 // EnabledOrDefault reports whether the guard runs, defaulting to true.
@@ -47,10 +53,14 @@ func setMemoryDefaults(c *MemoryConfig) error {
 		{"memory.autoPercent", c.AutoPercent, 1, 100},
 		{"memory.shedAtPercent", c.ShedAtPercent, 1, 100},
 		{"memory.keepPercent", c.KeepPercent, 0, 99},
+		{"memory.gcPercent", c.GCPercent, 0, 1000},
 	} {
 		if p.value < p.min || p.value > p.max {
 			return fmt.Errorf("%s must be between %d and %d", p.key, p.min, p.max)
 		}
+	}
+	if c.GCPercent > 0 && c.GCPercent < 10 {
+		return fmt.Errorf("memory.gcPercent must be 0 (keep GOGC) or between 10 and 1000")
 	}
 	return nil
 }

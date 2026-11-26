@@ -16,7 +16,7 @@ const (
 //
 // state/sendKey/recvKey are guarded by mu because they are read from goroutines
 // other than the one driving the connection: writeRaw is reachable from the
-// status ticker and from a peer's OP_CALLBACKREQUEST, while only the owning
+// status loop and from a peer's OP_CALLBACKREQUEST, while only the owning
 // goroutine advances the state machine. RC4 is a stateful stream cipher, so a
 // torn read of the key corrupts the rest of the stream, not just one packet.
 type TCPCrypt struct {

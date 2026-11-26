@@ -25,6 +25,9 @@ func TestMemoryConfigRejectsOutOfRange(t *testing.T) {
 		{AutoPercent: 101},
 		{ShedAtPercent: -5},
 		{KeepPercent: 100},
+		{GCPercent: -1},
+		{GCPercent: 5},
+		{GCPercent: 1001},
 	}
 	for _, c := range cases {
 		err := setMemoryDefaults(&c)
@@ -33,8 +36,8 @@ func TestMemoryConfigRejectsOutOfRange(t *testing.T) {
 			t.Errorf("%+v accepted", c)
 		}
 	}
-	ok := MemoryConfig{LimitBytes: 1 << 30, AutoPercent: 60, ShedAtPercent: 90, KeepPercent: 25}
-	if err := setMemoryDefaults(&ok); err != nil || ok.AutoPercent != 60 || ok.KeepPercent != 25 {
+	ok := MemoryConfig{LimitBytes: 1 << 30, AutoPercent: 60, ShedAtPercent: 90, KeepPercent: 25, GCPercent: 50}
+	if err := setMemoryDefaults(&ok); err != nil || ok.AutoPercent != 60 || ok.KeepPercent != 25 || ok.GCPercent != 50 {
 		t.Errorf("explicit values: %+v err=%v", ok, err)
 	}
 }

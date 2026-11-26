@@ -14,6 +14,10 @@ const (
 	// templateMaxGroups how many templates one session is tracked for.
 	templateSuffixTokens = 3
 	templateMaxGroups    = 64
+	// firstsSample is how many names of a template group are checked for distinct
+	// first words. Past it the group keeps only the result, so a share of tens of
+	// thousands of varied names costs no more than one of firstsSample.
+	firstsSample = 128
 )
 
 // Profile is what one session's share looks like so far. It keeps counters, never the
@@ -33,8 +37,10 @@ type Profile struct {
 type templateGroup struct {
 	count            int
 	minSize, maxSize uint64
-	// firsts holds the distinct first words, at most count of them.
-	firsts map[string]struct{}
+	// firsts holds the distinct first words of the group's first firstsSample names.
+	// It is dropped once the sample is full; distinct then keeps its size.
+	firsts   map[string]struct{}
+	distinct int
 }
 
 // Add counts one offered file.
@@ -62,7 +68,7 @@ func (p *Profile) Add(r Record) {
 	}
 	g.count++
 	g.minSize, g.maxSize = min(g.minSize, r.Size), max(g.maxSize, r.Size)
-	g.firsts[tokens[0]] = struct{}{}
+	g.addFirst(tokens[0])
 }
 
 // Files is how many files the session has offered.
@@ -90,10 +96,11 @@ func (p *Profile) Reasons() []ReasonPoints {
 // isTemplate reports whether the group is one name with the leading words swapped:
 // most of the share ends in the same words, starts differently every time, and is the
 // same size within a tenth. Episodes of a series end alike too, but start alike as
-// well; releases of one group end alike, but differ in size.
+// well; releases of one group end alike, but differ in size. "Starts differently" is
+// judged on the group's first firstsSample names.
 func (g *templateGroup) isTemplate(files int) bool {
 	return g.count*10 >= files*8 &&
-		len(g.firsts)*10 >= g.count*8 &&
+		g.distinctFirsts()*10 >= min(g.count, firstsSample)*8 &&
 		g.maxSize <= g.minSize+g.minSize/10
 }
 
@@ -104,4 +111,25 @@ func hasVideoReleaseWord(tokens []string) bool {
 		}
 	}
 	return false
+}
+
+// addFirst records the first word of one of the group's names while the sample is
+// not full. The key is cloned: the word is a substring of the lowercased name and
+// would keep all of it alive.
+func (g *templateGroup) addFirst(word string) {
+	if g.firsts == nil {
+		return
+	}
+	g.firsts[strings.Clone(word)] = struct{}{}
+	if g.count >= firstsSample {
+		g.distinct, g.firsts = len(g.firsts), nil
+	}
+}
+
+// distinctFirsts is how many different first words the sampled names have.
+func (g *templateGroup) distinctFirsts() int {
+	if g.firsts == nil {
+		return g.distinct
+	}
+	return len(g.firsts)
 }

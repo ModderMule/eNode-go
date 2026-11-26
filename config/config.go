@@ -148,10 +148,13 @@ type TCPConfig struct {
 	LoginTimeout int `yaml:"loginTimeout"`
 	// MaxConnectionsPerIP caps concurrent connections from one address (an IPv6 /64)
 	// across both listeners. A pointer so an explicit 0 (off) differs from absent.
-	MaxConnectionsPerIP *int   `yaml:"maxConnectionsPerIP"`
-	AllowLowIDs         bool   `yaml:"allowLowIDs"`
-	MinLowID            uint32 `yaml:"minLowID"`
-	MaxLowID            uint32 `yaml:"maxLowID"`
+	MaxConnectionsPerIP *int `yaml:"maxConnectionsPerIP"`
+	// AllowLowIDs admits firewalled clients. Default true; a pointer so an explicit
+	// false differs from absent. An absent MinLowID or MaxLowID is the full range
+	// (ed2k.NewLowIDClients).
+	AllowLowIDs *bool  `yaml:"allowLowIDs"`
+	MinLowID    uint32 `yaml:"minLowID"`
+	MaxLowID    uint32 `yaml:"maxLowID"`
 	// MoreResults bounds the search results a session keeps for OP_QUERY_MORE_RESULT.
 	MoreResults MoreResultsConfig `yaml:"moreResults"`
 	// RelatedSearch answers Lugdunum's related search over TCP.
@@ -166,6 +169,14 @@ type TCPConfig struct {
 
 // DefaultFirewallRecheckInterval is the default of tcp.firewallRecheckInterval, seconds.
 const DefaultFirewallRecheckInterval = 120
+
+// DefaultConnectionTimeoutMs is the default of tcp.connectionTimeout. Zero cannot be
+// allowed: the dial-back would have no connect timeout and its hello read would fail
+// at once, so a reachable client would fail the probe.
+const DefaultConnectionTimeoutMs = 2000
+
+// AllowLowIDsOrDefault resolves tcp.allowLowIDs, defaulting to true.
+func (c TCPConfig) AllowLowIDsOrDefault() bool { return boolOrDefault(c.AllowLowIDs, true) }
 
 // FirewallRecheckOrDefault resolves tcp.firewallRecheck.
 func (c TCPConfig) FirewallRecheckOrDefault() bool { return boolOrDefault(c.FirewallRecheck, true) }
@@ -1153,6 +1164,9 @@ func setDefaults(cfg *Config) error {
 	}
 	if cfg.TCP.PortObfuscated == 0 {
 		cfg.TCP.PortObfuscated = 5565
+	}
+	if cfg.TCP.ConnectionTimeout <= 0 {
+		cfg.TCP.ConnectionTimeout = DefaultConnectionTimeoutMs
 	}
 	if cfg.TCP.LoginTimeout <= 0 {
 		cfg.TCP.LoginTimeout = 60

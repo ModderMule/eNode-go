@@ -578,6 +578,7 @@ func run(ctx context.Context, configPath string) error {
 	// byte with IsProtocol and falls through to normal parsing for a plaintext frame (the
 	// H4 fix), so a plaintext login on this port still works exactly as before. The
 	// separate tcp.portObfuscated listener stays bound for clients pinned to it.
+	logSocketLimits(tcpCfg.MaxConnections)
 	ln, err := ed2k.RunTCPServer(tcpCfg, runtime.TCPHandler(cfg.SupportCrypt))
 	if err != nil {
 		return fmt.Errorf("tcp server failed: %w", err)

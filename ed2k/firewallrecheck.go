@@ -22,7 +22,7 @@ func (s *ServerRuntime) firewallRecheckInterval() time.Duration {
 // fresh OP_IDCHANGE (promoteSession). Throttled or in flight: no answer.
 func (c *tcpClient) handleRecheckFirewall(data *Buffer) {
 	if !c.server.tcp().FirewallRecheck {
-		logging.Debugf("tcp firewall recheck ignored remote=%s: off", c.remoteHost)
+		logging.Debugf("tcp firewall recheck ignored remote=%s: off", c.remoteHost())
 		return
 	}
 	var port uint16
@@ -31,12 +31,12 @@ func (c *tcpClient) handleRecheckFirewall(data *Buffer) {
 	case 2:
 		port, _ = data.GetUInt16LE()
 	default:
-		logging.Debugf("tcp firewall recheck ignored remote=%s: payload %d bytes", c.remoteHost, data.Remaining())
+		logging.Debugf("tcp firewall recheck ignored remote=%s: payload %d bytes", c.remoteHost(), data.Remaining())
 		return
 	}
 	now := uint32(time.Since(c.connectedAt)/time.Second) + 1
 	if c.lastRecheck != 0 && time.Duration(now-c.lastRecheck)*time.Second < c.server.firewallRecheckInterval() {
-		logging.Debugf("tcp firewall recheck ignored remote=%s: throttled, last %ds ago", c.remoteHost, now-c.lastRecheck)
+		logging.Debugf("tcp firewall recheck ignored remote=%s: throttled, last %ds ago", c.remoteHost(), now-c.lastRecheck)
 		return
 	}
 	c.infoMu.Lock()
@@ -44,7 +44,7 @@ func (c *tcpClient) handleRecheckFirewall(data *Buffer) {
 	c.recheckBusy = true
 	c.infoMu.Unlock()
 	if busy {
-		logging.Debugf("tcp firewall recheck ignored remote=%s: one in flight", c.remoteHost)
+		logging.Debugf("tcp firewall recheck ignored remote=%s: one in flight", c.remoteHost())
 		return
 	}
 	c.lastRecheck = now
@@ -75,7 +75,7 @@ func (c *tcpClient) runFirewallRecheck(port uint16) {
 		reachable = !c.server.isFirewalledAt(c, port)
 	}
 	logging.Debugf("tcp firewall recheck remote=%s lowID=%t port=%d->%d reachable=%t",
-		c.remoteHost, lowID, info.Port, port, reachable)
+		c.remoteHost(), lowID, info.Port, port, reachable)
 	if !lowID && !reachable {
 		port = info.Port
 	}
@@ -114,17 +114,17 @@ func (c *tcpClient) promoteSession(port uint16, promote bool) {
 	c.infoMu.Unlock()
 	if info.ID != old.ID || info.Port != old.Port {
 		if err := c.server.Storage.UpdateClient(old.ID, old.Port, info); err != nil {
-			logging.Warnf("storage update client remote=%s storeID=%d failed: %v", c.remoteHost, info.StoreID, err)
+			logging.Warnf("storage update client remote=%s storeID=%d failed: %v", c.remoteHost(), info.StoreID, err)
 		}
 	}
 	c.storeMu.Unlock()
 	if promoted {
 		c.server.natCallback.forgetLowID(old.ID)
 		logging.Infof("firewall recheck promoted remote=%s lowID=%d -> highID=%d port=%d",
-			c.remoteHost, old.ID, info.ID, info.Port)
+			c.remoteHost(), old.ID, info.ID, info.Port)
 	} else if info.Port != old.Port {
 		logging.Infof("firewall recheck moved port remote=%s id=%d lowID=%t port=%d->%d",
-			c.remoteHost, info.ID, info.LowID, old.Port, info.Port)
+			c.remoteHost(), info.ID, info.LowID, old.Port, info.Port)
 	}
 	if packet := c.buildIDChange(info.ID); packet != nil {
 		_ = c.writeRawLocked(packet.Bytes())

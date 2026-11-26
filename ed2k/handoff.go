@@ -134,7 +134,7 @@ type ParkedSessions struct {
 	rt    *ServerRuntime
 	round *parkRound
 	// clients are the parked sessions, each with its writeMu held so nothing is
-	// written to it — the status ticker, a peer's callback request — while its
+	// written to it — the status loop, a peer's callback request — while its
 	// RC4 state is read out and after.
 	clients []*tcpClient
 	// exported are the ones Export handed out; the rest were closed.
@@ -181,7 +181,7 @@ func (s *ServerRuntime) ParkSessions(timeout time.Duration) *ParkedSessions {
 		if !round.isParked(c) {
 			p.Stragglers++
 			info := c.snapshotInfo()
-			logging.Warnf("handoff: session did not park in %s, dropping it remote=%s id=%d", timeout, c.remoteHost, info.ID)
+			logging.Warnf("handoff: session did not park in %s, dropping it remote=%s id=%d", timeout, c.remoteHost(), info.ID)
 			c.closeWithReason("handoff-park-timeout")
 			c.releaseSession()
 			continue
@@ -202,7 +202,7 @@ func (p *ParkedSessions) Export() ([]SessionState, []*os.File, error) {
 	for _, c := range p.clients {
 		f, err := connFile(c.conn)
 		if err != nil {
-			logging.Debugf("handoff: session not handed over remote=%s: %v", c.remoteHost, err)
+			logging.Debugf("handoff: session not handed over remote=%s: %v", c.remoteHost(), err)
 			c.releaseSession()
 			continue
 		}
@@ -280,7 +280,7 @@ func (s *ServerRuntime) RestoreSessions(states []SessionState, files []*os.File)
 			// Cannot happen with a fresh table, but if it did, two sessions answering
 			// to one LowID would get each other's callbacks. Drop this one, without
 			// freeing the LowID the other holds.
-			logging.Warnf("handoff: LowID %d taken twice, dropping remote=%s", st.Info.ID, c.remoteHost)
+			logging.Warnf("handoff: LowID %d taken twice, dropping remote=%s", st.Info.ID, c.remoteHost())
 			c.hasLowID = false
 			c.closeWithReason("handoff-lowid-conflict")
 			c.releaseSession()
@@ -320,7 +320,7 @@ func (s *ServerRuntime) LiveSessions() int {
 	return len(s.live)
 }
 
-// trackSession and untrackSession maintain the set ParkSessions walks.
+// trackSession and untrackSession maintain the set ParkSessions and the status loop walk.
 func (s *ServerRuntime) trackSession(c *tcpClient) {
 	s.liveMu.Lock()
 	defer s.liveMu.Unlock()
@@ -328,6 +328,7 @@ func (s *ServerRuntime) trackSession(c *tcpClient) {
 		s.live = map[*tcpClient]struct{}{}
 	}
 	s.live[c] = struct{}{}
+	s.statusSlotLocked(c)
 }
 
 func (s *ServerRuntime) untrackSession(c *tcpClient) {
@@ -348,26 +349,14 @@ func (s *ServerRuntime) liveSessions() []*tcpClient {
 
 // serveRestored is TCPHandler for a session that arrived by handover: the same
 // bookkeeping around the read loop, minus what only a new connection needs. The
-// per-IP slot is taken without the limit — the session was admitted already — and
-// the status ticker starts again, since the predecessor's went with it.
+// per-IP slot is taken without the limit — the session was admitted already. Start
+// tracked the session, which puts it in the status loop again.
+//
+// Like TCPHandler, it keeps its own frame small, since the frame stays on the
+// session's stack under the read loop.
 func (s *ServerRuntime) serveRestored(c *tcpClient) {
-	defer s.untrackSession(c)
-	if c.peerIP != nil {
-		key := addressKey(c.peerIP)
-		s.connsMu.Lock()
-		if s.connsPerIP == nil {
-			s.connsPerIP = map[string]int{}
-		}
-		s.connsPerIP[key]++
-		s.connsMu.Unlock()
-		defer s.releaseConnSlot(key)
-		if g := s.gossip(); g != nil {
-			g.NoteClient(c.peerIP)
-		}
-	}
-	if c.isLogged() {
-		c.startPeriodicServerStatus()
-	}
+	slot := s.admitRestored(c)
+	defer s.endTCP(c, slot)
 	c.run()
 }
 
@@ -530,4 +519,25 @@ func (r *parkRound) isParked(c *tcpClient) bool {
 	defer r.mu.Unlock()
 	_, ok := r.parked[c]
 	return ok
+}
+
+// admitRestored takes the per-IP slot of a restored session, without the limit, and
+// returns its key for endTCP ("" when the session has no address).
+//
+//go:noinline
+func (s *ServerRuntime) admitRestored(c *tcpClient) string {
+	if c.peerIP == nil {
+		return ""
+	}
+	key := addressKey(c.peerIP)
+	s.connsMu.Lock()
+	if s.connsPerIP == nil {
+		s.connsPerIP = map[string]int{}
+	}
+	s.connsPerIP[key]++
+	s.connsMu.Unlock()
+	if g := s.gossip(); g != nil {
+		g.NoteClient(c.peerIP)
+	}
+	return key
 }

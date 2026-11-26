@@ -1,6 +1,7 @@
 package ed2k
 
 import (
+	"errors"
 	"net"
 	"strconv"
 	"sync/atomic"
@@ -113,39 +114,7 @@ func RunTCPServer(cfg TCPServerConfig, handler func(net.Conn)) (net.Listener, er
 	if tl, ok := ln.(interface{ SetDeadline(time.Time) error }); ok {
 		cfg.Gate.attach(tl.SetDeadline)
 	}
-	var active atomic.Int64
-	go func() {
-		for {
-			cfg.Gate.wait()
-			conn, err := ln.Accept()
-			if err != nil {
-				if cfg.Gate.interrupted(err) {
-					continue
-				}
-				return
-			}
-			if local, ok := conn.LocalAddr().(*net.TCPAddr); ok && ForeignLocalIPv4(local.IP, cfg.PinIPv4) {
-				logging.Debugf("tcp connection refused remote=%s local=%s: not our address %s",
-					conn.RemoteAddr(), local, cfg.PinIPv4)
-				_ = conn.Close()
-				continue
-			}
-			if cfg.MaxConnections > 0 && active.Add(1) > int64(cfg.MaxConnections) {
-				active.Add(-1)
-				logging.Warnf("tcp connection refused remote=%s: at maxConnections=%d",
-					conn.RemoteAddr(), cfg.MaxConnections)
-				_ = conn.Close()
-				continue
-			}
-			go func() {
-				if cfg.MaxConnections > 0 {
-					defer active.Add(-1)
-				}
-				logging.Debugf("tcp accept remote=%s local=%s", conn.RemoteAddr(), conn.LocalAddr())
-				handler(conn)
-			}()
-		}
-	}()
+	go acceptTCP(ln, cfg, handler)
 	return ln, nil
 }
 
@@ -156,4 +125,78 @@ func tcpNetwork(dualStack bool) string {
 		return "tcp"
 	}
 	return "tcp4"
+}
+
+// logAccept logs a new connection, outside the session goroutine's lasting frame.
+//
+//go:noinline
+func logAccept(conn net.Conn) {
+	logging.Debugf("tcp accept remote=%s local=%s", conn.RemoteAddr(), conn.LocalAddr())
+}
+
+// acceptTCP accepts connections until the listener is closed. A temporary error
+// (EMFILE when the process is out of file descriptors, ENFILE, ENOBUFS) is retried
+// after a pause instead of ending the loop: at 10k+ sockets a moment at the fd
+// limit is normal, and the loop used to stop accepting for good on the first one.
+func acceptTCP(ln net.Listener, cfg TCPServerConfig, handler func(net.Conn)) {
+	var active atomic.Int64
+	var delay time.Duration
+	for {
+		cfg.Gate.wait()
+		conn, err := ln.Accept()
+		if err != nil {
+			if cfg.Gate.interrupted(err) {
+				continue
+			}
+			if !acceptTemporary(err) {
+				return
+			}
+			if delay == 0 {
+				logging.Warnf("tcp accept paused on %s: %v (raise the file descriptor limit if it is EMFILE)",
+					ln.Addr(), err)
+			}
+			delay = nextAcceptDelay(delay)
+			time.Sleep(delay)
+			continue
+		}
+		delay = 0
+		if local, ok := conn.LocalAddr().(*net.TCPAddr); ok && ForeignLocalIPv4(local.IP, cfg.PinIPv4) {
+			logging.Debugf("tcp connection refused remote=%s local=%s: not our address %s",
+				conn.RemoteAddr(), local, cfg.PinIPv4)
+			_ = conn.Close()
+			continue
+		}
+		if cfg.MaxConnections > 0 && active.Add(1) > int64(cfg.MaxConnections) {
+			active.Add(-1)
+			logging.Warnf("tcp connection refused remote=%s: at maxConnections=%d",
+				conn.RemoteAddr(), cfg.MaxConnections)
+			_ = conn.Close()
+			continue
+		}
+		// The goroutine's own frame stays under the session for its whole life, so
+		// it holds nothing but the call; see tcpClient.run on the 2 KiB stack.
+		go func() {
+			if cfg.MaxConnections > 0 {
+				defer active.Add(-1)
+			}
+			logAccept(conn)
+			handler(conn)
+		}()
+	}
+}
+
+// acceptTemporary reports whether an Accept error is worth retrying: the listener
+// is still open and the error says a resource ran out for now.
+func acceptTemporary(err error) bool {
+	var t interface{ Temporary() bool }
+	return errors.As(err, &t) && t.Temporary()
+}
+
+// nextAcceptDelay doubles the pause between retries, from 5 ms up to 1 s, like
+// net/http's Server.Serve.
+func nextAcceptDelay(d time.Duration) time.Duration {
+	if d == 0 {
+		return 5 * time.Millisecond
+	}
+	return min(2*d, time.Second)
 }

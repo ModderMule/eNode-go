@@ -64,10 +64,18 @@ memory:
   autoPercent: 75
   shedAtPercent: 80      # live heap above this share of the limit makes the caches shed
   keepPercent: 50        # each cache keeps this share of its bytes per shed
+  gcPercent: 0           # GC target (GOGC); 0 = keep GOGC (100 when unset)
 ```
 
 The whole section is reloadable. A reload applies the new limit and percentages to
 the running process.
+
+`gcPercent` sets the GC target, like `GOGC`: the heap may grow that many percent past
+the live heap before the next cycle. 0 keeps the `GOGC` the process started with. 50
+holds the heap to 1.5× live instead of 2×, which saves resident memory in proportion
+to the live heap (about 75 MiB on a 300 MiB live heap) for roughly twice as many GC
+cycles. It applies even with `enabled: false`. On idle sockets alone it buys little:
+0.5 KiB per session at 15k sessions (docs/memory-footprint.local.md §2.5).
 
 `keepPercent` 0 means the default (50). At most one shed runs per second. While the
 heap stays above the threshold, each shed halves the caches again, so they drain

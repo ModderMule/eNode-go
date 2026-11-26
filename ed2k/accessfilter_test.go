@@ -141,7 +141,7 @@ func TestUDPFilterRunsAheadOfDecryption(t *testing.T) {
 }
 
 // TestTCPBlockedAddressIsClosedBeforeReading asserts the connection is closed with no
-// bytes read: a blocked address must not get a session goroutine, a status ticker, or a
+// bytes read: a blocked address must not get a session goroutine, a status-loop slot, or a
 // crypt state machine. Closing silently rather than sending OP_SERVERMESSAGE first is
 // deliberate — the reply costs a round trip to an address we have decided not to serve,
 // and it confirms to a scanner that it found an eD2K server.

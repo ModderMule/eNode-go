@@ -49,11 +49,11 @@ func TestServerListenConfigsForeignCallback(t *testing.T) {
 		cfg  config.Config
 		want bool
 	}{
-		{"defaults", config.Config{SupportCrypt: true, TCP: config.TCPConfig{AllowLowIDs: true}}, true},
-		{"foreignCallback off", config.Config{SupportCrypt: true, TCP: config.TCPConfig{AllowLowIDs: true}, NAT: config.NATConfig{ForeignCallback: &off}}, false},
-		{"lugdunum callback off", config.Config{SupportCrypt: true, TCP: config.TCPConfig{AllowLowIDs: true}, NAT: config.NATConfig{LugdunumCallback: &off}}, false},
-		{"no crypt", config.Config{TCP: config.TCPConfig{AllowLowIDs: true}}, false},
-		{"no LowIDs", config.Config{SupportCrypt: true}, false},
+		{"defaults", config.Config{SupportCrypt: true}, true},
+		{"foreignCallback off", config.Config{SupportCrypt: true, NAT: config.NATConfig{ForeignCallback: &off}}, false},
+		{"lugdunum callback off", config.Config{SupportCrypt: true, NAT: config.NATConfig{LugdunumCallback: &off}}, false},
+		{"no crypt", config.Config{}, false},
+		{"no LowIDs", config.Config{SupportCrypt: true, TCP: config.TCPConfig{AllowLowIDs: &off}}, false},
 	}
 	if ed2k.FlagForeignCallback != 0x100000 {
 		t.Fatalf("FlagForeignCallback 0x%x, want 0x100000", ed2k.FlagForeignCallback)

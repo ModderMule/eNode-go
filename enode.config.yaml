@@ -889,6 +889,7 @@ memory:
   autoPercent: 75                  # share of cgroup/RAM taken when limitBytes is 0 and GOMEMLIMIT unset
   shedAtPercent: 80                # live heap above this share of the limit makes the caches shed
   keepPercent: 50                  # each cache keeps this share of its bytes per shed (expired entries go first)
+  gcPercent: 0                     # GC target (GOGC); 0 = keep GOGC (100). 50 holds the heap to 1.5x live: less RSS, more GC CPU
 
 debug:
   seedFixtures: false

@@ -200,6 +200,38 @@ func TestProfileTemplateGroupsAreBounded(t *testing.T) {
 	}
 }
 
+// TestProfileFirstsAreSampled: a large template share is still flagged, a large series
+// is not, and neither keeps more than firstsSample first words.
+func TestProfileFirstsAreSampled(t *testing.T) {
+	template, series := &Profile{}, &Profile{}
+	for i := range 5000 {
+		template.Add(Record{Name: fmt.Sprintf("word%d full crack keygen.zip", i), Size: 1_500_000})
+		series.Add(Record{Name: fmt.Sprintf("Show S01E%d HDTV XviD GRP.avi", i), Size: 350 << 20})
+	}
+	for _, tc := range []struct {
+		name string
+		p    *Profile
+		want bool
+	}{{"template", template, true}, {"series", series, false}} {
+		var g *templateGroup
+		for _, v := range tc.p.templates {
+			g = v
+		}
+		if len(tc.p.templates) != 1 {
+			t.Fatalf("%s: %d template groups, want 1", tc.name, len(tc.p.templates))
+		}
+		got := hasReason(tc.p.Reasons(), ReasonPublisherTemplate)
+		t.Logf("input: %s share of %d files output: count=%d distinct=%d mapKept=%t flagged=%t",
+			tc.name, tc.p.Files(), g.count, g.distinctFirsts(), g.firsts != nil, got)
+		if g.firsts != nil || g.distinctFirsts() > firstsSample {
+			t.Errorf("%s: firsts kept after the sample (distinct=%d)", tc.name, g.distinctFirsts())
+		}
+		if got != tc.want {
+			t.Errorf("%s: flagged=%t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestDetectorObserves follows one spam session: nothing is listed for an ordinary
 // offer, the offer that gives the share away marks its own files, and the detection
 // expires.

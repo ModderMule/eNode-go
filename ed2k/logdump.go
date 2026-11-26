@@ -9,12 +9,18 @@ import (
 )
 
 func LogTCPPacket(module string, dir string, remote string, protocol uint8, opcode uint8, payload []byte) {
+	if !logging.DebugEnabled() {
+		return
+	}
 	size := uint32(len(payload) + 1)
 	logging.Debugf(formatLogLine(module, "tcp", dir, remote, protocolName(protocol), opcodeName(opcode, dir),
 		fmt.Sprintf("%d", size), fmt.Sprintf("%d", len(payload))))
 }
 
 func LogTCPRaw(module string, dir string, remote string, raw []byte) {
+	if !logging.DebugEnabled() {
+		return
+	}
 	proto, size, opcode, payload, ok := parseTCPRaw(raw)
 	if !ok {
 		logging.Debugf(formatLogLine(module, "tcp", dir, remote, "-", "-", "-", "-"))
@@ -25,6 +31,9 @@ func LogTCPRaw(module string, dir string, remote string, raw []byte) {
 }
 
 func LogUDPRaw(module string, dir string, remote string, raw []byte) {
+	if !logging.DebugEnabled() {
+		return
+	}
 	proto, opcode, payload, ok := parseUDPRaw(raw)
 	if !ok {
 		logging.Debugf(formatLogLine(module, "udp", dir, remote, "-", "-", "-", "-"))
@@ -35,6 +44,9 @@ func LogUDPRaw(module string, dir string, remote string, raw []byte) {
 }
 
 func LogNATRaw(module string, dir string, remote string, raw []byte) {
+	if !logging.DebugEnabled() {
+		return
+	}
 	proto, size, opcode, payload, ok := parseNATRaw(raw)
 	if !ok {
 		logging.Debugf(formatLogLine(module, "nat", dir, remote, "-", "-", "-", "-"))

@@ -27,20 +27,25 @@ func Hex(n int64, length int) string {
 	return s
 }
 
+// IPv4ToInt32LE parses a dotted IPv4 address into eD2K's little-endian uint32. Each
+// part is a decimal byte; leading zeros are allowed. It runs for every
+// OP_SERVERIDENT, so it walks the string instead of splitting it.
 func IPv4ToInt32LE(ipv4 string) (uint32, error) {
-	parts := strings.Split(ipv4, ".")
-	if len(parts) != 4 {
-		return 0, fmt.Errorf("invalid ipv4: %q", ipv4)
-	}
-	vals := make([]uint64, 4)
-	for i := range parts {
-		v, err := strconv.ParseUint(parts[i], 10, 8)
+	var out uint32
+	rest := ipv4
+	for i := range 4 {
+		part, tail, found := strings.Cut(rest, ".")
+		if found == (i == 3) {
+			return 0, fmt.Errorf("invalid ipv4: %q", ipv4)
+		}
+		v, err := strconv.ParseUint(part, 10, 8)
 		if err != nil {
 			return 0, fmt.Errorf("invalid ipv4: %q", ipv4)
 		}
-		vals[i] = v
+		out |= uint32(v) << (8 * i)
+		rest = tail
 	}
-	return uint32(vals[0]) + uint32(vals[1])*0x100 + uint32(vals[2])*0x10000 + uint32(vals[3])*0x1000000, nil
+	return out, nil
 }
 
 func GetFileType(name string) string {

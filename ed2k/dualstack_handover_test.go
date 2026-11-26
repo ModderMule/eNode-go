@@ -68,7 +68,7 @@ func TestDualStackHandoverReplacesIPv4Session(t *testing.T) {
 	if !first.logged {
 		t.Fatalf("ipv4 login refused (reason=%q)", first.getCloseReason())
 	}
-	t.Logf("input: ipv4 session remote=%s advertised=%s port=4662", first.remoteHost, handoverV6)
+	t.Logf("input: ipv4 session remote=%s advertised=%s port=4662", first.remoteHost(), handoverV6)
 
 	secondConn := v6Conn(handoverV6)
 	second := newTCPClient(rt, secondConn, false)

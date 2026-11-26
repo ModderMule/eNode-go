@@ -28,16 +28,16 @@ const maxIPv6Dials = 4
 //     pinhole since). Never more than maxIPv6Dials dials a session.
 func (c *tcpClient) handleIPv6Update(data *Buffer) {
 	if !c.server.publishV6Sources() {
-		logging.Debugf("tcp ipv6 update ignored remote=%s: ipv6.publishSources off", c.remoteHost)
+		logging.Debugf("tcp ipv6 update ignored remote=%s: ipv6.publishSources off", c.remoteHost())
 		return
 	}
 	if data.Remaining() != 16 {
-		logging.Debugf("tcp ipv6 update ignored remote=%s: payload %d bytes", c.remoteHost, data.Remaining())
+		logging.Debugf("tcp ipv6 update ignored remote=%s: payload %d bytes", c.remoteHost(), data.Remaining())
 		return
 	}
 	addr := append([]byte(nil), data.Bytes()[data.Pos():data.Pos()+16]...)
 	if c.connectedV6 {
-		logging.Debugf("tcp ipv6 update ignored remote=%s: session is ipv6, keeps %s", c.remoteHost, c.peerIP)
+		logging.Debugf("tcp ipv6 update ignored remote=%s: session is ipv6, keeps %s", c.remoteHost(), c.peerIP)
 		return
 	}
 	withdraw := bytes.Equal(addr, make([]byte, 16))
@@ -81,13 +81,13 @@ func (c *tcpClient) handleIPv6Update(data *Buffer) {
 	c.infoMu.Unlock()
 	if changed {
 		if err := c.server.Storage.UpdateClientIPv6(info); err != nil {
-			logging.Warnf("storage update client ipv6 remote=%s storeID=%d failed: %v", c.remoteHost, info.StoreID, err)
+			logging.Warnf("storage update client ipv6 remote=%s storeID=%d failed: %v", c.remoteHost(), info.StoreID, err)
 		}
 	}
 	c.storeMu.Unlock()
 
 	logging.Infof("tcp ipv6 update remote=%s ipv6=%s withdraw=%t public=%t changed=%t dial=%t capped=%t",
-		c.remoteHost, net.IP(addr), withdraw, public, changed, dial, capped)
+		c.remoteHost(), net.IP(addr), withdraw, public, changed, dial, capped)
 	switch {
 	case dial:
 		go c.runIPv6Probe(addr)
@@ -127,11 +127,11 @@ func (c *tcpClient) runIPv6Probe(addr []byte) {
 	c.infoMu.Unlock()
 	if changed {
 		if err := c.server.Storage.UpdateClientIPv6(info); err != nil {
-			logging.Warnf("storage update client ipv6 remote=%s storeID=%d failed: %v", c.remoteHost, info.StoreID, err)
+			logging.Warnf("storage update client ipv6 remote=%s storeID=%d failed: %v", c.remoteHost(), info.StoreID, err)
 		}
 	}
 	c.storeMu.Unlock()
-	logging.Infof("tcp ipv6 update verdict remote=%s ipv6=%s reachable=%t", c.remoteHost, net.IP(info.IPv6), reachable)
+	logging.Infof("tcp ipv6 update verdict remote=%s ipv6=%s reachable=%t", c.remoteHost(), net.IP(info.IPv6), reachable)
 	_ = c.writePacketLocked(c.buildServerIdent(nil))
 }
 

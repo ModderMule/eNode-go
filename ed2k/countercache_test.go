@@ -157,7 +157,7 @@ func TestCounterCacheRefreshesAfterTTL(t *testing.T) {
 }
 
 // The whole point is that cost stops tracking the number of clients. Each
-// logged-in client owns a status ticker, so query load used to be 2N per
+// logged-in client gets a status packet, so query load used to be 2N per
 // interval; through the cache it is flat.
 func TestCounterCacheCostDoesNotScaleWithClients(t *testing.T) {
 	for _, clients := range []int{1, 10, 100} {

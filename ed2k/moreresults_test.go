@@ -72,7 +72,7 @@ func TestMoreResultsOffSetsNoMoreFlag(t *testing.T) {
 }
 
 // TestMoreResultsExpire covers the TTL: a More request after the deadline gets the empty
-// final page, and the status ticker's sweep frees an idle session's rows.
+// final page, and the status loop's sweep frees an idle session's rows.
 func TestMoreResultsExpire(t *testing.T) {
 	client, conn := searchPagingClient(t, storage.MaxSearchPage+40)
 	setMoreResults(t, client, 0, time.Minute)

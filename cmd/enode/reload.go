@@ -266,7 +266,7 @@ func serverListenConfigs(cfg config.Config) (ed2k.TCPServerConfig, ed2k.UDPServe
 	dualStack := cfg.IPv6.EnabledOrDefault()
 	// The Lugdunum NAT callback request is accepted only obfuscated, and only a
 	// LowID can be its target, so it is offered only when both are possible.
-	natCallback := cfg.NAT.LugdunumCallbackOrDefault() && cfg.SupportCrypt && cfg.TCP.AllowLowIDs
+	natCallback := cfg.NAT.LugdunumCallbackOrDefault() && cfg.SupportCrypt && cfg.TCP.AllowLowIDsOrDefault()
 	// A client not logged in here may ask for a callback to one of our LowIDs.
 	foreignCallback := natCallback && cfg.NAT.ForeignCallbackOrDefault()
 	// TCP flag 0x40000: PR_NAT rendezvous for clients logged in here. With the wake,
@@ -343,7 +343,7 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		DisconnectTimeout: time.Duration(cfg.TCP.DisconnectTimeout) * time.Second,
 		LoginTimeout:      time.Duration(cfg.TCP.LoginTimeout) * time.Second,
 		MaxConnsPerIP:     cfg.TCP.MaxConnectionsPerIPOrDefault(),
-		AllowLowIDs:       cfg.TCP.AllowLowIDs,
+		AllowLowIDs:       cfg.TCP.AllowLowIDsOrDefault(),
 		SupportCrypt:      cfg.SupportCrypt,
 		MinLowID:          cfg.TCP.MinLowID,
 		MaxLowID:          cfg.TCP.MaxLowID,

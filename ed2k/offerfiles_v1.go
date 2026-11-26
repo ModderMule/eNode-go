@@ -226,7 +226,7 @@ func (c *tcpClient) waitOfferDue(cost uint32) {
 		return
 	}
 	c.server.blocks.offerPaced.Add(1)
-	logging.Debugf("offer files v1 early remote=%s records=%d: waiting %s", c.remoteHost, cost, wait)
+	logging.Debugf("offer files v1 early remote=%s records=%d: waiting %s", c.remoteHost(), cost, wait)
 	const step = 100 * time.Millisecond
 	for deadline := now.Add(wait); ; {
 		left := time.Until(deadline)
