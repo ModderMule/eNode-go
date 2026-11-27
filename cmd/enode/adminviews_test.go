@@ -144,8 +144,8 @@ func TestAdminViewsBansAndBlocks(t *testing.T) {
 
 	blocks := v.Blocks()
 	t.Logf("output: %d block rows, first=%+v", len(blocks), blocks[0])
-	if len(blocks) != 14 {
-		t.Fatalf("block rows = %d, want 14", len(blocks))
+	if len(blocks) != 16 {
+		t.Fatalf("block rows = %d, want 16", len(blocks))
 	}
 	for _, b := range blocks {
 		if b.Reason == "" || b.What == "" || b.Count != 0 {

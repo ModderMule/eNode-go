@@ -380,7 +380,40 @@ func (v *adminViews) Blocks() []admin.BlockRow {
 		{Reason: "Withheld when serving", Count: uint64(content.WithheldServed), What: "result rows and source requests for a filtered file"},
 		{Reason: "Blocked search", Count: uint64(content.BlockedQueries), What: "searches whose own terms match filter.keywords"},
 		{Reason: "Bot detected", Count: rt.Bots, What: "times an address was listed as an automated querier (observed, not blocked)"},
+		{Reason: "IPv6 callback forwarded", Count: rt.IPv6CallbackForwarded, What: "OP_IPV6_CALLBACKREQUESTED sent to an opted-in LowID target (observed, not blocked)"},
+		{Reason: "IPv6 callback refused", Count: ipv6CallbackRefusedTotal(rt), What: ipv6CallbackRefusedWhat(rt)},
 	}
+}
+
+// ipv6CallbackRefusedTotal sums the refused OP_IPV6_CALLBACK_REQUEST over every reason.
+func ipv6CallbackRefusedTotal(rt ed2k.BlockStats) uint64 {
+	var n uint64
+	for _, c := range rt.IPv6CallbackRefused {
+		n += c
+	}
+	return n
+}
+
+// ipv6CallbackRefusedWhat explains the refused OP_IPV6_CALLBACK_REQUEST row with its
+// per-reason counts, named as ed2k-server's counters are.
+func ipv6CallbackRefusedWhat(rt ed2k.BlockStats) string {
+	names := [...]string{
+		ed2k.IPv6CallbackRefusedNotOffered:           "not offered",
+		ed2k.IPv6CallbackRefusedRequesterHighID:      "requester HighID",
+		ed2k.IPv6CallbackRefusedRequesterNotVerified: "unverified",
+		ed2k.IPv6CallbackRefusedSelfTarget:           "self",
+		ed2k.IPv6CallbackRefusedTargetGone:           "target gone",
+		ed2k.IPv6CallbackRefusedTargetNotOptedIn:     "target not opted in",
+		ed2k.IPv6CallbackRefusedTargetUnreachable:    "target unreachable",
+		ed2k.IPv6CallbackRefusedRateLimited:          "rate limited",
+	}
+	parts := make([]string, 0, len(names))
+	for i, name := range names {
+		if name != "" {
+			parts = append(parts, fmt.Sprintf("%s %d", name, rt.IPv6CallbackRefused[i]))
+		}
+	}
+	return "OP_IPV6_CALLBACK_REQUEST answered with OP_CALLBACK_FAIL: " + strings.Join(parts, ", ")
 }
 
 func (v *adminViews) Health() admin.HealthView {

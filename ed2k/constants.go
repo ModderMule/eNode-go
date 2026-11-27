@@ -145,14 +145,28 @@ const OpNatKeepalive uint8 = 0x9f
 // eMule and eMuleQt log an unknown server opcode and carry on.
 const OpNatWake uint8 = 0x46
 
-// OpCallbackReqdIPv6 is the IPv6 form of OP_CALLBACKREQUESTED (0x35): the server
-// sends it to a v6-capable, firewalled callback target so it can call back to a
-// requester that has no usable IPv4 but a reachable public IPv6. The payload is
-// <ipv6:16><port:2> — the classic packet widened from a uint32 IP to a 16-byte
-// in6_addr, no crypt trailer (matching eNode-go's classic emitter). 0x26 is the
-// next value after the IPv6 source opcodes 0x24/0x25 and is free across every
-// surveyed eMule tree, so a legacy client drops it in its ProcessPacket default.
+// OpCallbackReqdIPv6 is OP_IPV6_CALLBACKREQUESTED, the IPv6 form of
+// OP_CALLBACKREQUESTED (0x35). The server sends it to a firewalled target that
+// opted in with OpIPv6CallbackOptIn, in answer to an OpIPv6CallbackRequest, so the
+// target dials a LowID requester's verified IPv6. Payload <ipv6:16><port:2 LE>,
+// then <crypt options:1><user hash:16> when both clients support obfuscation, as in
+// 0x35; a parser that reads 18 bytes still works. 0x26 is free across every
+// surveyed eMule tree. See docs/ipv6-client-implementation-spec.md §8.
 const OpCallbackReqdIPv6 uint8 = 0x26
+
+// OpIPv6CallbackRequest is OP_IPV6_CALLBACK_REQUEST, client→server after login:
+// <target LowID:4 LE>. A LowID requester whose IPv6 passed the dial-back asks the
+// server to send the target OpCallbackReqdIPv6. Refused with the 5-byte
+// OP_CALLBACK_FAIL <target LowID:4 LE><reason:1> (IPv6CallbackRefused*). The value
+// and the rules are ed2k-server's (andrey23127/ed2k-server#62, ModderMule/eNode-go#2).
+const OpIPv6CallbackRequest uint8 = 0x64
+
+// OpIPv6CallbackOptIn is OP_IPV6_CALLBACK_OPTIN, client→server after login: empty
+// (opt in) or one feature byte whose bit 0 (IPv6CallbackBit) opts in when set and
+// out when clear. Only a client that sent it is named as an OpCallbackReqdIPv6
+// target: CT_MOD_IP_V6 alone does not prove it can handle 0x26 (eMuleAI cannot).
+// Ignored unless the session's OP_SERVERIDENT carried TagIPv6Callback. No reply.
+const OpIPv6CallbackOptIn uint8 = 0x65
 
 // OpIPv6Update is ed2k-server's OP_IPV6_UPDATE (issue #34), client→server after
 // login: <ipv6 16>, the client's new public IPv6, or 16 zero bytes to withdraw it.
@@ -311,6 +325,13 @@ const (
 	// being published as a v6 source. 0xAB is free across the ST_*, CT_* and OP_*
 	// namespaces in both surveyed C++ trees. See docs/ipv6-client-implementation-spec.md §3a.
 	TagIPv6Status uint8 = 0xab
+	// TagIPv6Callback is ed2k-server's ST_IPV6_CALLBACK (andrey23127/ed2k-server#62):
+	// a uint8 feature byte in OP_SERVERIDENT, bit 0 (IPv6CallbackBit) offering the
+	// IPv6 callback (OpIPv6CallbackRequest / OpIPv6CallbackOptIn). Sent only to a
+	// v6-capable session while the server dials IPv6 addresses back. ed2k-server's
+	// value; eMuleQt also uses 0xAA for CT_MOD_MISCOPTIONS, a client-hello tag, which
+	// never meets an OP_SERVERIDENT tag.
+	TagIPv6Callback uint8 = 0xaa
 	// TagServerUDPFlags is eMule's ST_UDPFLAGS (srchybrid/Opcodes.h), the server's UDP
 	// flag word. ed2k-server sends it in OP_SERVERIDENT so a client learns 0x100000
 	// (FlagForeignCallback) at login; the same word as the status reply.
@@ -395,6 +416,34 @@ const (
 	MetaNetworkKad uint8 = 3
 	// MetaNetworkWeb is its value for an eD2K file a web page offered.
 	MetaNetworkWeb uint8 = 5
+)
+
+// IPv6CallbackBit is IPV6CB_CALLBACK, bit 0 of the TagIPv6Callback feature byte and
+// of the OpIPv6CallbackOptIn payload.
+const IPv6CallbackBit uint8 = 0x01
+
+// IPv6CallbackRefused* are the reason bytes of the 5-byte OP_CALLBACK_FAIL that
+// answers an OpIPv6CallbackRequest, ed2k-server's values (#62). Every refusal lets
+// the requester go on to the hole punch at once.
+const (
+	// IPv6CallbackRefusedNotOffered: the callback is off, the server is not dialling
+	// IPv6 back, or the requester never announced IPv6.
+	IPv6CallbackRefusedNotOffered uint8 = 1
+	// IPv6CallbackRefusedRequesterHighID: a HighID requester has the classic 0x1C.
+	IPv6CallbackRefusedRequesterHighID uint8 = 2
+	// IPv6CallbackRefusedRequesterNotVerified: the requester's IPv6 has not passed
+	// the dial-back (ST_IPV6_STATUS is not 0x07).
+	IPv6CallbackRefusedRequesterNotVerified uint8 = 3
+	// IPv6CallbackRefusedSelfTarget: the request names the requester itself.
+	IPv6CallbackRefusedSelfTarget uint8 = 4
+	// IPv6CallbackRefusedTargetGone: no logged-in session holds that LowID.
+	IPv6CallbackRefusedTargetGone uint8 = 5
+	// IPv6CallbackRefusedTargetNotOptedIn: the target sent no OpIPv6CallbackOptIn.
+	IPv6CallbackRefusedTargetNotOptedIn uint8 = 6
+	// IPv6CallbackRefusedTargetUnreachable: the target's connection took no frame.
+	IPv6CallbackRefusedTargetUnreachable uint8 = 7
+	// IPv6CallbackRefusedRateLimited: the requester used up its relay allowance.
+	IPv6CallbackRefusedRateLimited uint8 = 8
 )
 
 // IPv6Status* are the bits of the TagIPv6Status (0xab) bitfield. Unset bits mean

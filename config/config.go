@@ -498,6 +498,11 @@ type IPv6Config struct {
 	TestURLs6         []string `yaml:"testUrls6"`
 	PublishSources    *bool    `yaml:"publishSources"`
 	ProbeReachability *bool    `yaml:"probeReachability"`
+	// Callback offers the IPv6 callback (OP_IPV6_CALLBACK_REQUEST 0x64 /
+	// OP_IPV6_CALLBACK_OPTIN 0x65, ST_IPV6_CALLBACK 0xAA): a LowID client whose IPv6
+	// passed the dial-back may have an opted-in LowID target dial it over IPv6.
+	// Effective only with publishSources and probeReachability on. Defaults on.
+	Callback *bool `yaml:"callback"`
 }
 
 // EnabledOrDefault reports whether IPv6 is enabled, defaulting to true.
@@ -512,6 +517,10 @@ func (c IPv6Config) PublishSourcesOrDefault() bool { return boolOrDefault(c.Publ
 func (c IPv6Config) ProbeReachabilityOrDefault() bool {
 	return boolOrDefault(c.ProbeReachability, true)
 }
+
+// CallbackOrDefault reports whether the IPv6 callback is offered, defaulting to true
+// (subject to PublishSourcesOrDefault and ProbeReachabilityOrDefault).
+func (c IPv6Config) CallbackOrDefault() bool { return boolOrDefault(c.Callback, true) }
 
 // AdminConfig controls the local HTTP status dashboard (see admin.Server). Enabled
 // is *bool so an absent key defaults on rather than off; BindIP defaults to

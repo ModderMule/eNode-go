@@ -64,6 +64,10 @@ type TCPRuntimeConfig struct {
 	PublishV6Sources bool
 	ProbeIPv6        bool
 	ServerIPv6       []byte
+	// IPv6Callback offers the IPv6 callback (ipv6.callback): OpIPv6CallbackRequest,
+	// OpIPv6CallbackOptIn and TagIPv6Callback. Effective only with PublishV6Sources
+	// and ProbeIPv6, since only a dialled-back address may be handed to a target.
+	IPv6Callback bool
 	// NatRendezvousPort is advertised as the TagNatPort (0x9d) tag in OP_SERVERIDENT
 	// when FlagNatRendezvous or FlagNatWake is set. Zero omits the tag.
 	NatRendezvousPort uint16
@@ -881,6 +885,13 @@ type tcpClient struct {
 	// offerV1 (docs/ipv6-client-implementation-spec.md §2a).
 	v6Dials  uint8
 	v6Probed bool
+	// v6CallbackOptIn is set by OpIPv6CallbackOptIn: the session may be named as an
+	// OpCallbackReqdIPv6 target. Cleared when OP_IPV6_UPDATE withdraws the IPv6; a
+	// new login is a new tcpClient and so starts without it. Read by a requester's
+	// goroutine, so under infoMu. relayAt is the relay allowance's clock (relayAllow),
+	// own goroutine only. Both fill the padding before offerV1.
+	v6CallbackOptIn bool
+	relayAt         uint16
 	// offerV1 is the OFFERFILES v1 policy this session asked for at login and was
 	// advertised in its post-login OP_SERVERIDENT, with its pacing bucket; nil for a
 	// legacy session. Every file limit applied to a v1 session comes from it, not
@@ -899,6 +910,9 @@ type tcpClient struct {
 	// but does not stop dispatch of bytes that already arrived. Same-goroutine only,
 	// like the counters above, so it needs no lock.
 	loginGateTripped bool
+	// relaySpent is how much of the relay allowance is used (relayAllow); zero is a
+	// full allowance. Own goroutine only; in the padding after loginGateTripped.
+	relaySpent uint8
 
 	// releaseOnce makes releaseSession run exactly once. It has two callers: run()'s
 	// defer, and a same-IP re-login that takes this session over (handleLoginRequest)
@@ -1277,6 +1291,10 @@ func (c *tcpClient) handleED2K(opcode uint8, data *Buffer) {
 		c.handleRecheckFirewall(data)
 	case OpIPv6Update:
 		c.handleIPv6Update(data)
+	case OpIPv6CallbackRequest:
+		c.handleIPv6CallbackRequest(data)
+	case OpIPv6CallbackOptIn:
+		c.handleIPv6CallbackOptIn(data)
 	case OpDisconnect:
 		// eMule sends this before closing. Acting on it releases the session, its LowID
 		// and its storage row immediately instead of after the read loop notices the FIN —
@@ -2055,6 +2073,13 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 		return
 	}
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d", c.remoteHost(), lowID)
+	// Over the session's relay allowance the requester gets the protocol's own
+	// failure reply, as from ed2k-server.
+	if !c.relayAllow() {
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=rate-limited", c.remoteHost(), lowID)
+		c.sendCallbackFailed()
+		return
+	}
 	v, ok := c.server.LowIDs.Get(lowID)
 	if !ok {
 		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=not-found", c.remoteHost(), lowID)
@@ -2082,30 +2107,21 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d targetIPv4=%d targetPort=%d",
 		c.remoteHost(), lowID, targetInfo.IPv4, targetInfo.Port)
 
-	// Pick the callback family from the requester's reachability, as two separate
-	// checks. Classic IPv4 is preferred when the requester has a HighID (a routable
-	// IPv4). When it does not — LowID over IPv4, or v6-only (IPv4 == 0) — but it has
-	// a reachable public IPv6 and the target can parse the IPv6 opcode, send the
-	// IPv6 callback so the target calls back over IPv6. Otherwise the callback fails
-	// cleanly instead of pointing the target at 0.0.0.0 or a firewalled IPv4.
-	switch {
-	case !self.LowID && self.IPv4 != 0:
-		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d family=ipv4 callbackIPv4=%d callbackPort=%d",
-			c.remoteHost(), lowID, self.IPv4, self.Port)
-		err = target.sendCallbackRequested(self.IPv4, self.Port, self.CryptOptions, self.Hash)
-	case c.server.publishV6Sources() && len(self.IPv6) == 16 && self.IPv6Reachable && target.isV6Capable() &&
-		(len(targetInfo.IPv6) == 16 || target.connectedV6):
-		// The target must have IPv6 itself to dial the requester: being able to parse
-		// the opcode is not enough, and a v6 callback it cannot place fails silently.
-		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d family=ipv6 callbackIPv6=%s callbackPort=%d",
-			c.remoteHost(), lowID, net.IP(self.IPv6).String(), self.Port)
-		err = target.sendCallbackRequestedIPv6(self.IPv6, self.Port)
-	default:
-		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=unreachable",
+	// Only a HighID requester has a routable IPv4 to hand the target. A LowID one —
+	// over IPv4, or v6-only (IPv4 == 0) — is refused rather than pointing the target
+	// at 0.0.0.0 or a firewalled IPv4; with a verified IPv6 it asks again with
+	// OpIPv6CallbackRequest (ipv6callback.go). The IPv6 form is never picked here:
+	// it goes only to a target that opted in, and only for a requester that asked
+	// for it, so a 0x1C never ends in a 0x26 that a client such as eMuleAI drops.
+	if self.LowID || self.IPv4 == 0 {
+		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=requester-lowid",
 			c.remoteHost(), lowID)
 		c.sendCallbackFailed()
 		return
 	}
+	c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d callbackIPv4=%d callbackPort=%d",
+		c.remoteHost(), lowID, self.IPv4, self.Port)
+	err = target.sendCallbackRequested(self.IPv4, self.Port, self.CryptOptions, self.Hash)
 	if err != nil {
 		c.sendCallbackFailed()
 	}
@@ -2261,6 +2277,7 @@ func (c *tcpClient) buildServerIdent(offerV1 *offerV1Policy) *Buffer {
 		NatPort:          cfg.NatRendezvousPort,
 		ClientIPv6:       clientV6,
 		ClientIPv6Status: v6Status,
+		IPv6Callback:     c.ipv6CallbackFeatures(),
 		MetaAPI:          cfg.MetaAPI,
 		Ed3k:             cfg.Ed3k,
 		UDPFlags:         c.server.udp().UDPFlags,
@@ -2287,14 +2304,6 @@ func (c *tcpClient) sendServerMessage(message string) {
 
 func (c *tcpClient) sendCallbackRequested(ipv4 uint32, port uint16, cryptOptions byte, userHash []byte) error {
 	packet, err := BuildCallbackRequestedPacket(ipv4, port, cryptOptions, userHash)
-	if err != nil {
-		return err
-	}
-	return c.writePacket(packet)
-}
-
-func (c *tcpClient) sendCallbackRequestedIPv6(ipv6 []byte, port uint16) error {
-	packet, err := BuildCallbackRequestedIPv6Packet(ipv6, port)
 	if err != nil {
 		return err
 	}

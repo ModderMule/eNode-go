@@ -44,9 +44,13 @@ type SessionState struct {
 	// running is not carried: the successor reports the address as held (0x01) until
 	// the client repeats it in OP_IPV6_UPDATE. A state from a build before
 	// OP_IPV6_UPDATE has both zero; applyState then infers the login's dial-back.
-	IPv6Dials   uint8
-	IPv6Probed  bool
-	MetaCapable bool
+	IPv6Dials  uint8
+	IPv6Probed bool
+	// IPv6CallbackOptIn is tcpClient.v6CallbackOptIn: the client opts in once per
+	// session, so the successor must remember it. False in a state from an older
+	// build, which never took the opt-in.
+	IPv6CallbackOptIn bool
+	MetaCapable       bool
 	// NoZlib is tcpClient.noZlib. False in a state from an older build, which
 	// compressed for every client, so such a session keeps being sent PR_ZLIB.
 	NoZlib bool
@@ -391,6 +395,8 @@ func (c *tcpClient) exportState() SessionState {
 		IPv6Capable: c.ipv6Capable,
 		IPv6Dials:   c.v6Dials,
 		IPv6Probed:  c.v6Probed,
+
+		IPv6CallbackOptIn: c.v6CallbackOptIn,
 	}
 	c.infoMu.RUnlock()
 	st.Info.Hash = append([]byte(nil), st.Info.Hash...)
@@ -437,6 +443,7 @@ func (c *tcpClient) applyState(st SessionState) {
 	c.nick, c.software, c.mod = st.Nick, st.Software, st.Mod
 	c.ipv6Capable = st.IPv6Capable
 	c.v6Dials, c.v6Probed = st.IPv6Dials, st.IPv6Probed
+	c.v6CallbackOptIn = st.IPv6CallbackOptIn
 	if st.IPv6Dials == 0 && c.v6ProbeRequired(len(st.Info.IPv6)) {
 		// An older build: the login dialled whenever probing was on.
 		c.v6Dials, c.v6Probed = 1, true

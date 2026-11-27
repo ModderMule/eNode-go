@@ -350,6 +350,7 @@ func buildRuntimeConfigs(cfg config.Config, d bootDerived) (ed2k.TCPRuntimeConfi
 		IPv6:              dualStack,
 		PublishV6Sources:  dualStack && cfg.IPv6.PublishSourcesOrDefault(),
 		ProbeIPv6:         dualStack && cfg.IPv6.ProbeReachabilityOrDefault(),
+		IPv6Callback:      dualStack && cfg.IPv6.CallbackOrDefault(),
 		ServerIPv6:        d.serverIPv6,
 		NatRendezvousPort: natRendezvousPort,
 		MetaAPI:           d.metaAPI,

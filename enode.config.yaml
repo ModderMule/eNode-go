@@ -749,6 +749,7 @@ ipv6:
   dynIp6: "auto"         # server's public IPv6, or "auto", or "" to not advertise one
   publishSources: true   # emit the IPv6 sentinel and honour the OP_*_IPV6 opcodes
   probeReachability: true # verify a client's IPv6 is reachable before publishing it
+  callback: true          # offer the IPv6 callback (0x64/0x65, ST_IPV6_CALLBACK 0xAA); needs probeReachability
   # Resolved only when dynIp6 is "auto". Literal-IP endpoints first (they pin the
   # family), then v6-only hosts, then dual-stack hosts. Falls back to a local
   # global-scope interface address if all fail. A temporary (privacy), deprecated

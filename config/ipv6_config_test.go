@@ -63,3 +63,23 @@ func TestIPv6ExplicitBindHonoured(t *testing.T) {
 	}
 	t.Logf("explicit IPv4 bind stays %q with ipv6.enabled=%v", cfg.Address, cfg.IPv6.EnabledOrDefault())
 }
+
+func TestIPv6CallbackDefaultsOn(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{"name: t\n", true},
+		{"name: t\nipv6:\n  callback: false\n", false},
+		{"name: t\nipv6:\n  callback: true\n", true},
+	} {
+		cfg, err := Load(writeTempConfig(t, tc.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("input: %q, output: ipv6.callback=%t", tc.body, cfg.IPv6.CallbackOrDefault())
+		if cfg.IPv6.CallbackOrDefault() != tc.want {
+			t.Fatalf("ipv6.callback = %t, want %t", cfg.IPv6.CallbackOrDefault(), tc.want)
+		}
+	}
+}

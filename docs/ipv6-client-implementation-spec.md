@@ -31,7 +31,10 @@ to the pre-IPv6 server. IPv6 is entirely additive and opt-in.
 | `OP_FOUNDSOURCES_IPV6` | `0x25` | server→client, TCP |
 | `OP_GLOBGETSOURCES_IPV6` | `0xA5` | client→server, UDP |
 | `OP_GLOBFOUNDSOURCES_IPV6` | `0xA6` | server→client, UDP |
-| `OP_CALLBACKREQUESTED_IPV6` | `0x26` | server→client, TCP |
+| `OP_CALLBACKREQUESTED_IPV6` | `0x26` | server→client, TCP — only to a target that opted in (§7) |
+| `OP_IPV6_CALLBACK_REQUEST` | `0x64`, `<target LowID 4>` | client→server, TCP, after login (§7) |
+| `OP_IPV6_CALLBACK_OPTIN` | `0x65`, empty or `<features 1>` | client→server, TCP, after login (§7) |
+| `ST_IPV6_CALLBACK` | tag `0xAA`, type `TAGTYPE_UINT8` | `OP_SERVERIDENT` (server→client) — bit 0 `IPV6CB_CALLBACK`: the IPv6 callback is offered (§7) |
 | `OP_NAT_REGISTER_IPV6` | `0xEC` (under `PR_NAT 0xF1`) | server→client, UDP |
 | `OP_NAT_SYNC_IPV6` | `0xED` (under `PR_NAT 0xF1`) | server→client, UDP |
 | `SRV_TCPFLG_NAT_RENDEZVOUS` | `0x00040000` | `OP_IDCHANGE` / `OP_SERVERIDENT` flags word |
@@ -403,45 +406,100 @@ A LowID callback lets a firewalled **target** be reached: a **requester** asks t
 server to tell the target to connect *back* to the requester. Classic
 `OP_CALLBACKREQUESTED (0x35)` carries `uint32 ip + uint16 port` (the requester's
 IPv4), so it only works when the requester is directly reachable over IPv4 (HighID).
-A requester whose only routable address is IPv6 — v6-only, or LowID over IPv4 —
-could not be called back at all. eNode-go now closes that gap.
+The IPv6 callback serves a LowID requester whose IPv6 the server has dialled back:
+the target is told to dial that IPv6.
 
-### Request (unchanged)
+The extension is shared with ed2k-server (andrey23127/ed2k-server#62,
+ModderMule/eNode-go#2): opcodes, tag, reason codes and rules are the same on both
+servers. Its two rules:
 
-The requester still sends `OP_CALLBACKREQUEST (0x1C)` `<target LowID:uint32>`. The
-LowID is the server-assigned 32-bit id; it is family-agnostic and needs no change.
+- **The requester asks for it explicitly** with `OP_IPV6_CALLBACK_REQUEST (0x64)`.
+  `OP_CALLBACKREQUEST (0x1C)` never ends in a `0x26`: a LowID requester's `0x1C` is
+  answered with an empty `OP_CALLBACK_FAIL (0x36)`, as before.
+- **The target declares it can take `0x26`** with `OP_IPV6_CALLBACK_OPTIN (0x65)`.
+  `CT_MOD_IP_V6` alone is not enough: eMuleAI sends it and has no `0x26` handler, so
+  a `0x26` sent to it would be lost without a trace.
 
-### The server's family choice
+### Offer — `ST_IPV6_CALLBACK (0xAA)` in `OP_SERVERIDENT`
 
-The server picks the callback family from the **requester's** reachability, as two
-independent checks:
+A `TAGTYPE_UINT8` feature byte; bit 0 (`IPV6CB_CALLBACK`) offers the callback. The
+server sends it only to a v6-capable session (connected over IPv6, or sent
+`CT_MOD_IP_V6`) while `ipv6.callback`, `ipv6.publishSources` and
+`ipv6.probeReachability` are all on: only an address the server dialled back is
+handed to a target. Read it as an integer of any width. It is absent otherwise, and
+from every server that does not implement the extension, so its absence means "do
+not send `0x64` or `0x65` here". A fresh `OP_SERVERIDENT` (after an
+`OP_IPV6_UPDATE` verdict) carries it again, or no longer.
 
-1. If the requester has a HighID (a routable IPv4), the server sends the classic
-   `OP_CALLBACKREQUESTED (0x35)` — byte-identical to before.
-2. Otherwise (requester LowID over IPv4, or IPv4 `0`), if the requester has a
-   **reachable public IPv6** and the target session is **v6-capable** (§2), the
-   server sends `OP_CALLBACKREQUESTED_IPV6 (0x26)` so the target calls back over
-   IPv6.
-3. If neither applies, the server sends `OP_CALLBACKFAILED (0x36)`.
+### Opt-in — `OP_IPV6_CALLBACK_OPTIN (0x65)`, target → server
+
+```
+uint8  opcode = 0x65
+[uint8 features]   // optional; bit 0 set: opt in, clear: opt out. Empty: opt in.
+```
+
+Send it after an `OP_SERVERIDENT` with `ST_IPV6_CALLBACK` bit 0, when you can
+receive `0x26` and dial out over IPv6; once per session is enough, and repeating it
+after each ident that offers the callback (eMuleQt does) is harmless. No reply. The server ignores it
+from a session it did not offer the extension to. The opt-in lasts the session; it is
+dropped when `OP_IPV6_UPDATE` withdraws your IPv6 (16 zero bytes), so opt in again
+after announcing a new address. A new login is a new session.
+
+### Request — `OP_IPV6_CALLBACK_REQUEST (0x64)`, requester → server
+
+```
+uint8   opcode = 0x64
+uint32  targetID   // the target's LowID (LE)
+```
+
+Send it when you are LowID on this server, the server offered `ST_IPV6_CALLBACK`, and
+its `ST_IPV6_STATUS` is `0x07` (your IPv6 passed the dial-back), instead of — not as
+well as — `0x1C`. A payload under 4 bytes is ignored. The server answers with
+`0x26` to the target (and nothing to you), or a 5-byte `0x36` to you.
 
 ### `OP_CALLBACKREQUESTED_IPV6 (0x26)` — server → target
 
 ```
 uint8      opcode = 0x26
-uint8[16]  ipv6        // the requester's public IPv6, network byte order
-uint16     port        // the requester's port (LE)
+uint8[16]  ipv6        // the requester's dialled-back IPv6, network byte order
+uint16     port        // the requester's login port (LE)
+[uint8     cryptOptions]  // only when both clients announced crypt support:
+[uint8[16] userHash]      //   the requester's, exactly as in 0x35's 23-byte form
 ```
 
-It is the classic packet widened from a 4-byte IPv4 to a 16-byte `in6_addr`, with
-**no** crypt-options/userhash trailer (eNode-go's classic `0x35` emitter has none
-either). On receipt, build the callback client from the 16 IPv6 bytes and the port
-and connect to it over IPv6, exactly as you would `TryToConnect()` on the IPv4
-address from `0x35`.
+18 bytes, or 35 with the trailer; a parser that reads only the first 18 bytes still
+works. Connect to `[ipv6]:port` as you would to the IPv4 of a `0x35`, obfuscated when
+the trailer says the requester supports it.
 
-> **Capability gate.** The server only sends `0x26` to a session it knows is
-> v6-capable (connected over IPv6, or sent `CT_MOD_IP_V6` at login — §2). A client
-> that is not v6-capable never receives it, and a legacy client drops the unknown
-> `0x26` opcode in its `ProcessPacket` default, so there is no desync risk.
+### Refusal — 5-byte `OP_CALLBACK_FAIL (0x36)`, server → requester
+
+```
+uint8   opcode = 0x36
+uint32  targetID   // as in the request (LE)
+uint8   reason
+```
+
+The classic `0x36` stays empty, so the length tells the two apart, and the target ID
+tells which of several outstanding requests failed. The server checks in this order:
+
+| Reason | Name | When |
+|---|---|---|
+| 8 | `RateLimited` | the session used up its relay allowance (10/s, burst 200, shared with `0x1C`; checked first) |
+| 1 | `NotOffered` | the callback is off, the server is not dialling IPv6 back, or you never announced IPv6 |
+| 2 | `RequesterHighId` | you have a HighID: use `0x1C` |
+| 3 | `RequesterNotVerified` | your IPv6 has not passed the dial-back (`ST_IPV6_STATUS` is not `0x07`) |
+| 5 | `TargetGone` | no logged-in session holds that LowID |
+| 4 | `SelfTarget` | the LowID is yours |
+| 6 | `TargetNotOptedIn` | the target did not send `0x65` (or withdrew its IPv6) |
+| 7 | `TargetUnreachable` | the target's connection could not take the frame |
+
+On any refusal, go on to the next way to reach the target (the hole punch, Kad) at
+once. Reasons 1 and 3 hold until a fresh `OP_SERVERIDENT` changes your status, and 6
+until the target logs in again, so do not ask again for them before that.
+
+eNode-go has no check that its host can route IPv6: on such a host the dial-backs
+fail, and a request is refused with 3 where ed2k-server, which checks the route,
+does not offer the extension at all.
 
 ---
 
@@ -492,7 +550,7 @@ to each other. It covers the cases a direct connect or a callback cannot:
   are LowID. Hole-punching does not.
 - **Firewalled IPv6 ↔ firewalled IPv6.** Two peers each behind a stateful IPv6
   firewall. Neither can accept an inbound connection, so neither direct-reach nor the
-  `0x26` callback (§7) works. This is the v6 analogue of LowID↔LowID.
+  IPv6 callback (§7) works. This is the v6 analogue of LowID↔LowID.
 
 This protocol exists only in eNode-go today. The full contract for servers and clients,
 with costs and a comparison to the other LowID↔LowID schemes, is now

@@ -547,6 +547,8 @@ func tagName(code uint8) string {
 		return "yourip"
 	case TagIPv6Status:
 		return "ipv6status"
+	case TagIPv6Callback:
+		return "ipv6callback"
 	case TagMetaAPI:
 		return "metaapi"
 	case TagMetaAPIVersion:

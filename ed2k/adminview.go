@@ -83,6 +83,11 @@ type BlockStats struct {
 	// OfferPaced is OFFERFILES v1 packets that arrived before they were due and
 	// were held until they were (never dropped).
 	OfferPaced uint64
+	// IPv6CallbackForwarded is OP_IPV6_CALLBACKREQUESTED sent to a target.
+	IPv6CallbackForwarded uint64
+	// IPv6CallbackRefused is refused OP_IPV6_CALLBACK_REQUEST, indexed by reason byte
+	// (IPv6CallbackRefused*); index 0 is unused.
+	IPv6CallbackRefused [IPv6CallbackRefusedRateLimited + 1]uint64
 }
 
 // blockCounters backs BlockStats.
@@ -96,6 +101,10 @@ type blockCounters struct {
 	// advertised batch size, and packets that arrived early and were held.
 	offerOverBatch atomic.Uint64
 	offerPaced     atomic.Uint64
+	// ipv6CallbackForwarded counts OpCallbackReqdIPv6 sent to a target, and
+	// ipv6CallbackRefused the refused OpIPv6CallbackRequest, by reason byte.
+	ipv6CallbackForwarded atomic.Uint64
+	ipv6CallbackRefused   [IPv6CallbackRefusedRateLimited + 1]atomic.Uint64
 }
 
 // ClientSnapshot returns every logged-in session.
@@ -178,7 +187,7 @@ func (s *ServerRuntime) GossipPeers() []PeerView {
 
 // BlockStats returns the runtime's refusal counters.
 func (s *ServerRuntime) BlockStats() BlockStats {
-	return BlockStats{
+	st := BlockStats{
 		RateLimited:    s.blocks.rateLimited.Load(),
 		ConnLimit:      s.blocks.connLimit.Load(),
 		BannedLogins:   s.blocks.bannedLogins.Load(),
@@ -187,6 +196,11 @@ func (s *ServerRuntime) BlockStats() BlockStats {
 		OfferPaced:     s.blocks.offerPaced.Load(),
 		Bots:           s.blocks.bots.Load(),
 	}
+	st.IPv6CallbackForwarded = s.blocks.ipv6CallbackForwarded.Load()
+	for i := range st.IPv6CallbackRefused {
+		st.IPv6CallbackRefused[i] = s.blocks.ipv6CallbackRefused[i].Load()
+	}
+	return st
 }
 
 // Bots returns the UDP queriers the bot detector has flagged, highest rate first.

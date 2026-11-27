@@ -30,6 +30,9 @@ type ServerConfig struct {
 	// about this session's IPv6, sent as a TagIPv6Status (0xab) uint8 tag. Zero omits
 	// the tag, which is also how "the server has no verdict" is expressed.
 	ClientIPv6Status uint8
+	// IPv6Callback is the TagIPv6Callback (0xaa) feature byte offering this session
+	// the IPv6 callback (IPv6CallbackBit). Zero omits the tag.
+	IPv6Callback uint8
 	// MetaAPI advertises the client-facing Meta API. A zero value omits its tags.
 	MetaAPI MetaAPIAdvert
 	// Ed3k is the ed3k:node link of the server's ed3k index node, sent as ST_ED3K
@@ -476,6 +479,9 @@ func BuildServerIdentPacket(conf ServerConfig) (*Buffer, error) {
 	if conf.ClientIPv6Status != 0 {
 		tags = append(tags, Tag{Type: TypeUint8, Code: TagIPv6Status, Data: conf.ClientIPv6Status})
 	}
+	if conf.IPv6Callback != 0 {
+		tags = append(tags, Tag{Type: TypeUint8, Code: TagIPv6Callback, Data: conf.IPv6Callback})
+	}
 	// OFFERFILES v1, only in the post-login packet of a session that asked for it.
 	// The string-named tags are old format, which every client skips by name.
 	if conf.offerV1 != nil {
@@ -545,23 +551,41 @@ func BuildCallbackRequestedPacket(ipv4 uint32, port uint16, cryptOptions byte, u
 	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
 }
 
-// BuildCallbackRequestedIPv6Packet builds the OP_CALLBACKREQUESTED_IPV6 (0x26)
-// packet the server sends to a firewalled callback target so it can call back to a
-// requester over IPv6. It mirrors BuildCallbackRequestedPacket, replacing the
-// uint32 IPv4 with the requester's 16-byte in6_addr (network byte order, emitted
-// as a HASH just like the sentinel / CT_MOD_SVR_IP_V6 paths). It carries no crypt
-// trailer: the IPv6 spec defines none, and clients ignore bytes after the port.
-func BuildCallbackRequestedIPv6Packet(ipv6 []byte, port uint16) (*Buffer, error) {
+// BuildCallbackRequestedIPv6Packet builds OP_IPV6_CALLBACKREQUESTED (0x26), which
+// tells an opted-in firewalled target to dial a LowID requester over IPv6: the
+// requester's 16-byte in6_addr (network byte order, emitted as a HASH like the
+// sentinel / CT_MOD_SVR_IP_V6 paths) and its port, then — when userHash is 16
+// bytes — the crypt options and user hash, exactly as in BuildCallbackRequestedPacket.
+// The caller passes the hash only when both clients support obfuscation
+// (ed2k-server #62); a parser that reads the first 18 bytes ignores the trailer.
+func BuildCallbackRequestedIPv6Packet(ipv6 []byte, port uint16, cryptOptions byte, userHash []byte) (*Buffer, error) {
 	pack := []PacketItem{
 		{Type: TypeUint8, Value: OpCallbackReqdIPv6},
 		{Type: TypeHash, Value: ipv6},
 		{Type: TypeUint16, Value: port},
+	}
+	if len(userHash) == 16 {
+		pack = append(pack,
+			PacketItem{Type: TypeUint8, Value: cryptOptions & 0x07},
+			PacketItem{Type: TypeHash, Value: userHash})
 	}
 	packet, err := MakePacket(PrED2K, pack)
 	if err != nil {
 		return nil, err
 	}
 	return MaybeCompressTCPPacket(packet, minZlibPayloadOnSend)
+}
+
+// BuildIPv6CallbackFailPacket builds the OP_CALLBACK_FAIL (0x36) that refuses an
+// OpIPv6CallbackRequest: <target LowID:4 LE><reason:1> (IPv6CallbackRefused*), so
+// a requester with several requests outstanding knows which one failed and why.
+// The classic 0x1C is still refused with an empty 0x36.
+func BuildIPv6CallbackFailPacket(targetID uint32, reason uint8) (*Buffer, error) {
+	return MakePacket(PrED2K, []PacketItem{
+		{Type: TypeUint8, Value: OpCallbackFailed},
+		{Type: TypeUint32, Value: targetID},
+		{Type: TypeUint8, Value: reason},
+	})
 }
 
 // crlfMessageLines rewrites a server message's line endings to CRLF. See

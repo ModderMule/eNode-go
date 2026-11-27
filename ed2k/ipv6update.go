@@ -54,6 +54,11 @@ func (c *tcpClient) handleIPv6Update(data *Buffer) {
 	}
 	c.infoMu.Lock()
 	c.ipv6Capable = !withdraw
+	if withdraw {
+		// No IPv6 to dial a requester from: the opt-in goes with it, as in
+		// ed2k-server. The client opts in again after announcing a new address.
+		c.v6CallbackOptIn = false
+	}
 	same := bytes.Equal(addr, c.info.IPv6)
 	var dial, changed, capped bool
 	switch {

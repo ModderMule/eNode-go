@@ -243,6 +243,7 @@ ipv6:                        # IPv6 dual-stack; omit the whole block for IPv4-on
   dynIp6: "auto"             # Public IPv6, "auto" to resolve via testUrls6, or "" to not advertise
   publishSources: true       # Emit the IPv6 sentinel and honour the OP_*_IPV6 opcodes
   probeReachability: true    # Verify a client's IPv6 is reachable before publishing it (flag 0x400000)
+  callback: true            # Offer the IPv6 callback to LowID clients (0x64/0x65, tag 0xAA)
   testUrls6:                 # Used only when dynIp6=auto, first valid IPv6 wins (temporary ones swapped for a stable one)
     - "https://v6.ident.me"
     - "https://api64.ipify.org"
