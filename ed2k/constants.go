@@ -424,7 +424,8 @@ const IPv6CallbackBit uint8 = 0x01
 
 // IPv6CallbackRefused* are the reason bytes of the 5-byte OP_CALLBACK_FAIL that
 // answers an OpIPv6CallbackRequest, ed2k-server's values (#62). Every refusal lets
-// the requester go on to the hole punch at once.
+// the requester go on to the hole punch at once. A classic OP_CALLBACKREQUEST is
+// refused with the same form, using 5, 7 and 8 only (ed2k-server#63).
 const (
 	// IPv6CallbackRefusedNotOffered: the callback is off, the server is not dialling
 	// IPv6 back, or the requester never announced IPv6.

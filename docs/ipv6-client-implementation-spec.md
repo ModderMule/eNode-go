@@ -479,8 +479,8 @@ uint32  targetID   // as in the request (LE)
 uint8   reason
 ```
 
-The classic `0x36` stays empty, so the length tells the two apart, and the target ID
-tells which of several outstanding requests failed. The server checks in this order:
+The target ID tells which of several outstanding requests failed. The server checks
+in this order:
 
 | Reason | Name | When |
 |---|---|---|
@@ -492,6 +492,11 @@ tells which of several outstanding requests failed. The server checks in this or
 | 4 | `SelfTarget` | the LowID is yours |
 | 6 | `TargetNotOptedIn` | the target did not send `0x65` (or withdrew its IPv6) |
 | 7 | `TargetUnreachable` | the target's connection could not take the frame |
+
+The classic `0x1C` is refused with the same 5-byte form (ed2k-server#63), with
+reasons 8, 5 and 7 only. A `0x1C` from a LowID requester still gets an empty `0x36`,
+and other servers send it empty, so match a 5-byte `0x36` to the pending request
+for that target (IPv6 or classic) and keep the old rule for an empty one.
 
 On any refusal, go on to the next way to reach the target (the hole punch, Kad) at
 once. Reasons 1 and 3 hold until a fresh `OP_SERVERIDENT` changes your status, and 6

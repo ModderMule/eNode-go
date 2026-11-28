@@ -2077,19 +2077,19 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 	// failure reply, as from ed2k-server.
 	if !c.relayAllow() {
 		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=rate-limited", c.remoteHost(), lowID)
-		c.sendCallbackFailed()
+		c.sendCallbackRefused(lowID, IPv6CallbackRefusedRateLimited)
 		return
 	}
 	v, ok := c.server.LowIDs.Get(lowID)
 	if !ok {
 		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=not-found", c.remoteHost(), lowID)
-		c.sendCallbackFailed()
+		c.sendCallbackRefused(lowID, IPv6CallbackRefusedTargetGone)
 		return
 	}
 	target, ok := v.(*tcpClient)
 	if !ok {
 		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=invalid-target-type", c.remoteHost(), lowID)
-		c.sendCallbackFailed()
+		c.sendCallbackRefused(lowID, IPv6CallbackRefusedTargetGone)
 		return
 	}
 	// The LowID is registered before the target's login completes (the IPv6 probe and
@@ -2097,7 +2097,7 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 	// session anyone may reach.
 	if !target.isLogged() {
 		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=target-not-logged-in", c.remoteHost(), lowID)
-		c.sendCallbackFailed()
+		c.sendCallbackRefused(lowID, IPv6CallbackRefusedTargetGone)
 		return
 	}
 	// target belongs to another connection's goroutine, so its identity is read
@@ -2113,6 +2113,8 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 	// OpIPv6CallbackRequest (ipv6callback.go). The IPv6 form is never picked here:
 	// it goes only to a target that opted in, and only for a requester that asked
 	// for it, so a 0x1C never ends in a 0x26 that a client such as eMuleAI drops.
+	// No reason byte fits this refusal, so it stays the empty 0x36 (ed2k-server sends
+	// nothing); stock clients never send 0x1C while LowID.
 	if self.LowID || self.IPv4 == 0 {
 		c.debugPayloadf("tcp payload parsed remote=%s opcode=OP_CALLBACKREQUEST lowID=%d result=requester-lowid",
 			c.remoteHost(), lowID)
@@ -2123,7 +2125,7 @@ func (c *tcpClient) handleCallbackRequest(data *Buffer) {
 		c.remoteHost(), lowID, self.IPv4, self.Port)
 	err = target.sendCallbackRequested(self.IPv4, self.Port, self.CryptOptions, self.Hash)
 	if err != nil {
-		c.sendCallbackFailed()
+		c.sendCallbackRefused(lowID, IPv6CallbackRefusedTargetUnreachable)
 	}
 }
 
@@ -2247,8 +2249,22 @@ func (c *tcpClient) buildIDChange(id uint32) *Buffer {
 	return packet
 }
 
+// sendCallbackFailed sends the empty OP_CALLBACK_FAIL, which names no target.
 func (c *tcpClient) sendCallbackFailed() {
 	packet, err := BuildCallbackFailedPacket()
+	if err != nil {
+		return
+	}
+	_ = c.writePacket(packet)
+}
+
+// sendCallbackRefused refuses a classic OP_CALLBACKREQUEST for targetID with the
+// 5-byte OP_CALLBACK_FAIL <target LowID><reason>, as ed2k-server does
+// (andrey23127/ed2k-server#63), so a requester with several requests out ends the
+// right one at once. Old clients ignore the payload; MLDonkey reads the ID. Unlike
+// refuseIPv6Callback it does not count as an IPv6 callback refusal.
+func (c *tcpClient) sendCallbackRefused(targetID uint32, reason uint8) {
+	packet, err := BuildIPv6CallbackFailPacket(targetID, reason)
 	if err != nil {
 		return
 	}

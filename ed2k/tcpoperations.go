@@ -577,9 +577,10 @@ func BuildCallbackRequestedIPv6Packet(ipv6 []byte, port uint16, cryptOptions byt
 }
 
 // BuildIPv6CallbackFailPacket builds the OP_CALLBACK_FAIL (0x36) that refuses an
-// OpIPv6CallbackRequest: <target LowID:4 LE><reason:1> (IPv6CallbackRefused*), so
-// a requester with several requests outstanding knows which one failed and why.
-// The classic 0x1C is still refused with an empty 0x36.
+// OpIPv6CallbackRequest or a classic OP_CALLBACKREQUEST: <target LowID:4 LE>
+// <reason:1> (IPv6CallbackRefused*), so a requester with several requests
+// outstanding knows which one failed and why. Only a 0x1C from a LowID requester,
+// which no reason fits, still gets the empty 0x36 (BuildCallbackFailedPacket).
 func BuildIPv6CallbackFailPacket(targetID uint32, reason uint8) (*Buffer, error) {
 	return MakePacket(PrED2K, []PacketItem{
 		{Type: TypeUint8, Value: OpCallbackFailed},

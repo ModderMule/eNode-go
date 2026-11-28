@@ -429,7 +429,7 @@ func TestCallbackRequestFromLowIDNeverSendsIPv6(t *testing.T) {
 }
 
 // TestRelayAllowanceSharedByBothCallbacks: the burst is shared by 0x1C and 0x64, and
-// an over-budget 0x1C gets the empty 0x36.
+// an over-budget 0x1C gets the 5-byte 0x36 with reason 8.
 func TestRelayAllowanceSharedByBothCallbacks(t *testing.T) {
 	r := newIPv6CallbackRig(t)
 	for i := 0; i < relayBurst-1; i++ {
@@ -446,8 +446,52 @@ func TestRelayAllowanceSharedByBothCallbacks(t *testing.T) {
 	req.Pos(0)
 	r.requester.handleCallbackRequest(req)
 	t.Logf("input: %d requests in one second, output: requester=% x", relayBurst+1, r.reqConn.written())
-	if r.reqConn.opcode() != OpCallbackFailed || len(r.reqConn.payload()) != 0 {
-		t.Fatalf("over-budget 0x1C answered % x, want an empty 0x36", r.reqConn.written())
+	want := []byte{byte(r.targetID), byte(r.targetID >> 8), byte(r.targetID >> 16), byte(r.targetID >> 24), IPv6CallbackRefusedRateLimited}
+	if r.reqConn.opcode() != OpCallbackFailed || !bytes.Equal(r.reqConn.payload(), want) {
+		t.Fatalf("over-budget 0x1C answered % x, want 0x36 % x", r.reqConn.written(), want)
+	}
+}
+
+// TestClassicCallbackRefusalNamesTarget: a refused 0x1C from a HighID requester gets
+// the 5-byte 0x36 <target LowID><reason> (ed2k-server#63), and is not counted as an
+// IPv6 callback refusal.
+func TestClassicCallbackRefusalNamesTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		setup      func(r *ipv6CallbackRig) uint32
+		wantReason uint8
+	}{
+		{"target gone", func(r *ipv6CallbackRig) uint32 { return r.targetID + 1 }, IPv6CallbackRefusedTargetGone},
+		{"target not logged in", func(r *ipv6CallbackRig) uint32 {
+			r.target.infoMu.Lock()
+			r.target.logged = false
+			r.target.infoMu.Unlock()
+			return r.targetID
+		}, IPv6CallbackRefusedTargetGone},
+		{"target unreachable", func(r *ipv6CallbackRig) uint32 {
+			r.target.conn = &failingConn{}
+			return r.targetID
+		}, IPv6CallbackRefusedTargetUnreachable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newIPv6CallbackRig(t)
+			r.requester.info.LowID = false
+			id := tc.setup(r)
+			req := NewBuffer(4)
+			_ = req.PutUInt32LE(id)
+			req.Pos(0)
+			r.requester.handleCallbackRequest(req)
+			want := []byte{byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), tc.wantReason}
+			t.Logf("input: 0x1C target=%d, output: requester=% x", id, r.reqConn.written())
+			if r.reqConn.opcode() != OpCallbackFailed || !bytes.Equal(r.reqConn.payload(), want) {
+				t.Fatalf("requester got % x, want 0x36 % x", r.reqConn.written(), want)
+			}
+			for i := range r.rt.blocks.ipv6CallbackRefused {
+				if n := r.rt.blocks.ipv6CallbackRefused[i].Load(); n != 0 {
+					t.Fatalf("ipv6CallbackRefused[%d] = %d, want 0 for a classic refusal", i, n)
+				}
+			}
+		})
 	}
 }
 
